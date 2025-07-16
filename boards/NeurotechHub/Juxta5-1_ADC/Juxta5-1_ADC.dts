@@ -58,7 +58,7 @@
 	fram0: fram@0 {
 		compatible = "jedec,spi-nor";
 		reg = <0>;
-		spi-max-frequency = <500000>; /* Even slower for FRAM testing */
+		spi-max-frequency = <8000000>; /* 8MHz - standard SPI clock */
 		size = <DT_SIZE_K(128)>; /* MB85RS1MTPW-G-APEWE1 is 1Mbit = 128KB */
 		has-dpd;
 		jedec-id = [04 7F 27];

@@ -192,7 +192,7 @@ static int test_fram(void)
     }
 
     struct spi_config spi_cfg = {
-        .frequency = 500000,
+        .frequency = 8000000, /* 8MHz - standard SPI clock */
         .operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
         .slave = DT_REG_ADDR(FRAM_NODE),
         .cs = {
