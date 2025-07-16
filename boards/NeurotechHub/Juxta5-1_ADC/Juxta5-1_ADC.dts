@@ -56,13 +56,12 @@
 	cs-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
 	
 	fram0: fram@0 {
-		compatible = "atmel,at25";
+		compatible = "jedec,spi-nor";
 		reg = <0>;
 		spi-max-frequency = <500000>; /* Even slower for FRAM testing */
 		size = <DT_SIZE_K(128)>; /* MB85RS1MTPW-G-APEWE1 is 1Mbit = 128KB */
-		pagesize = <1>; /* FRAM doesn't have pages like EEPROM */
-		address-width = <16>;
-		timeout = <5>;
+		has-dpd;
+		jedec-id = [04 7F 27];
 	};
 };
 

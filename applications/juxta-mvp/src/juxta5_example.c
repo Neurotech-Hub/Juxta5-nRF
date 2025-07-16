@@ -11,7 +11,6 @@
 #include <zephyr/drivers/eeprom.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
-#include <zephyr/drivers/spi.h>
 
 LOG_MODULE_REGISTER(juxta5_example, LOG_LEVEL_DBG);
 
@@ -180,39 +179,32 @@ static int read_adc(void)
  */
 static int test_fram(void)
 {
-    const struct device *fram_dev;
-    uint8_t write_data[] = "Hello FRAM!";
-    uint8_t read_data[sizeof(write_data)];
     int ret;
 
     LOG_INF("Testing FRAM (MB85RS1MTPW-G-APEWE1)...");
 
-    fram_dev = DEVICE_DT_GET(FRAM_NODE);
-    if (!device_is_ready(fram_dev))
-    {
-        LOG_ERR("FRAM device not ready");
-        return -ENODEV;
-    }
-
-    LOG_INF("FRAM device ready, attempting device ID read...");
-
-    /* Get SPI device from FRAM device */
+    /* Get SPI device and configure */
     const struct device *spi_dev = DEVICE_DT_GET(DT_BUS(FRAM_NODE));
     if (!device_is_ready(spi_dev))
     {
-        LOG_ERR("SPI device not ready");
+        LOG_ERR("SPI bus not ready");
         return -ENODEV;
     }
 
     struct spi_config spi_cfg = {
         .frequency = 500000,
-        .operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB, /* Mode 0 is default */
-    };
+        .operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
+        .slave = DT_REG_ADDR(FRAM_NODE),
+        .cs = {
+            .gpio = {
+                .port = led.port,
+                .pin = led.pin,
+                .dt_flags = led.dt_flags},
+            .delay = 0}};
 
-    /* Test direct SPI communication first */
-    LOG_INF("Testing direct SPI communication...");
+    LOG_INF("Testing FRAM with direct SPI communication...");
 
-    /* Send WREN command */
+    /* Step 1: Write Enable */
     uint8_t tx_wren = 0x06;
     const struct spi_buf tx_buf_wren = {
         .buf = &tx_wren,
@@ -228,7 +220,9 @@ static int test_fram(void)
         return ret;
     }
 
-    /* Write a test byte to address 0x000000 */
+    k_usleep(30); /* Consistent delay between transactions */
+
+    /* Step 2: Write Data */
     uint8_t tx_write[] = {
         0x02,             /* Write command */
         0x00, 0x00, 0x00, /* 24-bit address */
@@ -248,10 +242,9 @@ static int test_fram(void)
         return ret;
     }
 
-    /* Small delay between transactions */
-    k_usleep(10);
+    k_usleep(30); /* Consistent delay between transactions */
 
-    /* Read back the test byte from address 0x000000 */
+    /* Step 3: Read Data */
     uint8_t tx_read[] = {
         0x03,             /* Read command */
         0x00, 0x00, 0x00, /* 24-bit address */
@@ -281,13 +274,9 @@ static int test_fram(void)
 
     LOG_INF("Direct SPI test - wrote 0xAA, read back 0x%02X", rx_read[4]);
 
-    /* Now try the device ID read */
-    /* RDID command should return:
-     * - Manufacturer ID: 0x04 (Fujitsu)
-     * - Continuation code: 0x7F
-     * - Product ID 1st Byte: 0x27 (1Mbit)
-     * - Product ID 2nd Byte: 0x03
-     */
+    k_usleep(30); /* Consistent delay before RDID */
+
+    /* Step 4: Device ID Read (moved to end since it has different length) */
     uint8_t tx_rdid[] = {
         0x9F,                  /* RDID command */
         0x00, 0x00, 0x00, 0x00 /* 32 cycles needed for complete ID */
