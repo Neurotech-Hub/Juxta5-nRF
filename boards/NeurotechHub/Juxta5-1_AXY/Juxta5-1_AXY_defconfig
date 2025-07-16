@@ -1,0 +1,19 @@
+CONFIG_ARM_MPU=y
+CONFIG_HW_STACK_PROTECTION=y
+
+# Enable GPIO
+CONFIG_GPIO=y
+
+# Enable SPI
+CONFIG_SPI=y
+CONFIG_SPI_NRFX=y
+
+# Enable Sensor support for accelerometer
+CONFIG_SENSOR=y
+
+# Enable FRAM support
+CONFIG_EEPROM=y
+CONFIG_EEPROM_AT2X_EMUL=y
+
+# Enable interrupts and GPIO callbacks
+CONFIG_GPIO_INT_DEBOUNCE=y

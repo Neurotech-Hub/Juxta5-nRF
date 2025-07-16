@@ -1,0 +1,378 @@
+/*
+ * Example code for Juxta5-1 board peripherals
+ * This demonstrates how to use SPI FRAM, ADC, GPIO interrupt, and shared LED/CS
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/eeprom.h>
+#include <zephyr/logging/log.h>
+#include <string.h>
+#include <zephyr/drivers/spi.h>
+
+LOG_MODULE_REGISTER(juxta5_example, LOG_LEVEL_DBG);
+
+/* Device tree definitions */
+#define MAGNET_SENSOR_NODE DT_ALIAS(magnet_sensor)
+#define LED_NODE DT_ALIAS(led0)
+#define FRAM_NODE DT_ALIAS(spi_fram)
+
+/* GPIO specifications */
+static const struct gpio_dt_spec magnet_sensor = GPIO_DT_SPEC_GET(MAGNET_SENSOR_NODE, gpios);
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
+
+/* Callback data */
+static struct gpio_callback magnet_cb_data;
+
+/* ADC configuration */
+#define ADC_NODE DT_NODELABEL(adc)
+#define ADC_CHANNEL_ID 4
+#define ADC_CHANNEL_INPUT ADC_CHANNEL_ID
+
+static const struct device *adc_dev;
+static const struct adc_channel_cfg adc_channel_cfg = {
+    .gain = ADC_GAIN_1_6,
+    .reference = ADC_REF_INTERNAL,
+    .acquisition_time = ADC_ACQ_TIME_DEFAULT,
+    .channel_id = ADC_CHANNEL_ID,
+    .differential = 1,
+    .input_positive = 4, /* P0.04 - AIN4 */
+    .input_negative = 5, /* P0.05 - AIN5 */
+};
+
+/**
+ * @brief Magnet sensor interrupt callback
+ */
+void magnet_sensor_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    LOG_INF("Magnet sensor interrupt triggered!");
+
+    /* Note: P0.20 is shared between LED and FRAM CS */
+    /* When using SPI, LED will be controlled by SPI CS */
+    /* When using LED, you need to manage this carefully */
+}
+
+/**
+ * @brief Initialize magnet sensor interrupt
+ */
+static int init_magnet_sensor(void)
+{
+    int ret;
+
+    if (!gpio_is_ready_dt(&magnet_sensor))
+    {
+        LOG_ERR("Magnet sensor GPIO not ready");
+        return -ENODEV;
+    }
+
+    ret = gpio_pin_configure_dt(&magnet_sensor, GPIO_INPUT);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure magnet sensor pin: %d", ret);
+        return ret;
+    }
+
+    ret = gpio_pin_interrupt_configure_dt(&magnet_sensor, GPIO_INT_EDGE_TO_ACTIVE);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure magnet sensor interrupt: %d", ret);
+        return ret;
+    }
+
+    gpio_init_callback(&magnet_cb_data, magnet_sensor_callback, BIT(magnet_sensor.pin));
+    gpio_add_callback(magnet_sensor.port, &magnet_cb_data);
+
+    LOG_INF("Magnet sensor initialized on pin %d", magnet_sensor.pin);
+    return 0;
+}
+
+/**
+ * @brief Initialize LED (shared with FRAM CS)
+ */
+static int init_led(void)
+{
+    int ret;
+
+    if (!gpio_is_ready_dt(&led))
+    {
+        LOG_ERR("LED GPIO not ready");
+        return -ENODEV;
+    }
+
+    ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure LED pin: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("LED initialized on pin %d (shared with FRAM CS)", led.pin);
+    return 0;
+}
+
+/**
+ * @brief Initialize ADC for differential measurement
+ */
+static int init_adc(void)
+{
+    int ret;
+
+    adc_dev = DEVICE_DT_GET(ADC_NODE);
+    if (!device_is_ready(adc_dev))
+    {
+        LOG_ERR("ADC device not ready");
+        return -ENODEV;
+    }
+
+    ret = adc_channel_setup(adc_dev, &adc_channel_cfg);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to setup ADC channel: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("ADC initialized for differential measurement (P0.04/P0.05)");
+    return 0;
+}
+
+/**
+ * @brief Read differential ADC value
+ */
+static int read_adc(void)
+{
+    int ret;
+    int16_t buf;
+
+    const struct adc_sequence sequence = {
+        .channels = BIT(ADC_CHANNEL_ID),
+        .buffer = &buf,
+        .buffer_size = sizeof(buf),
+        .resolution = 12,
+        .oversampling = 8,
+        .calibrate = true,
+    };
+
+    ret = adc_read(adc_dev, &sequence);
+    if (ret < 0)
+    {
+        LOG_ERR("ADC read failed: %d", ret);
+        return ret;
+    }
+
+    /* Convert to millivolts */
+    int32_t val_mv = buf;
+    ret = adc_raw_to_millivolts(adc_ref_internal(adc_dev), ADC_GAIN_1_6, 12, &val_mv);
+    if (ret < 0)
+    {
+        LOG_ERR("ADC conversion failed: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("ADC differential reading: %d mV (raw: %d)", val_mv, buf);
+    return 0;
+}
+
+/**
+ * @brief Test FRAM memory (when LED is not being used)
+ */
+static int test_fram(void)
+{
+    const struct device *fram_dev;
+    uint8_t write_data[] = "Hello FRAM!";
+    uint8_t read_data[sizeof(write_data)];
+    int ret;
+
+    LOG_INF("Testing FRAM (MB85RS1MTPW-G-APEWE1)...");
+
+    fram_dev = DEVICE_DT_GET(FRAM_NODE);
+    if (!device_is_ready(fram_dev))
+    {
+        LOG_ERR("FRAM device not ready");
+        return -ENODEV;
+    }
+
+    LOG_INF("FRAM device ready, attempting device ID read...");
+
+    /* Get SPI device from FRAM device */
+    const struct device *spi_dev = DEVICE_DT_GET(DT_BUS(FRAM_NODE));
+    if (!device_is_ready(spi_dev))
+    {
+        LOG_ERR("SPI device not ready");
+        return -ENODEV;
+    }
+
+    struct spi_config spi_cfg = {
+        .frequency = 500000,
+        .operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB, /* Mode 0 is default */
+    };
+
+    /* Test direct SPI communication first */
+    LOG_INF("Testing direct SPI communication...");
+
+    /* Send WREN command */
+    uint8_t tx_wren = 0x06;
+    const struct spi_buf tx_buf_wren = {
+        .buf = &tx_wren,
+        .len = 1};
+    const struct spi_buf_set tx_wren_set = {
+        .buffers = &tx_buf_wren,
+        .count = 1};
+
+    ret = spi_write(spi_dev, &spi_cfg, &tx_wren_set);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to send WREN command: %d", ret);
+        return ret;
+    }
+
+    /* Write a test byte to address 0x000000 */
+    uint8_t tx_write[] = {
+        0x02,             /* Write command */
+        0x00, 0x00, 0x00, /* 24-bit address */
+        0xAA              /* Test data */
+    };
+    const struct spi_buf tx_buf_write = {
+        .buf = tx_write,
+        .len = sizeof(tx_write)};
+    const struct spi_buf_set tx_write_set = {
+        .buffers = &tx_buf_write,
+        .count = 1};
+
+    ret = spi_write(spi_dev, &spi_cfg, &tx_write_set);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write test byte: %d", ret);
+        return ret;
+    }
+
+    /* Small delay between transactions */
+    k_usleep(10);
+
+    /* Read back the test byte from address 0x000000 */
+    uint8_t tx_read[] = {
+        0x03,             /* Read command */
+        0x00, 0x00, 0x00, /* 24-bit address */
+        0x00              /* Dummy byte to receive data */
+    };
+    uint8_t rx_read[sizeof(tx_read)] = {0};
+
+    const struct spi_buf tx_buf_read = {
+        .buf = tx_read,
+        .len = sizeof(tx_read)};
+    const struct spi_buf rx_buf_read = {
+        .buf = rx_read,
+        .len = sizeof(rx_read)};
+    const struct spi_buf_set tx_read_set = {
+        .buffers = &tx_buf_read,
+        .count = 1};
+    const struct spi_buf_set rx_read_set = {
+        .buffers = &rx_buf_read,
+        .count = 1};
+
+    ret = spi_transceive(spi_dev, &spi_cfg, &tx_read_set, &rx_read_set);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read test byte: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("Direct SPI test - wrote 0xAA, read back 0x%02X", rx_read[4]);
+
+    /* Now try the device ID read */
+    /* RDID command should return:
+     * - Manufacturer ID: 0x04 (Fujitsu)
+     * - Continuation code: 0x7F
+     * - Product ID 1st Byte: 0x27 (1Mbit)
+     * - Product ID 2nd Byte: 0x03
+     */
+    uint8_t tx_rdid[] = {
+        0x9F,                  /* RDID command */
+        0x00, 0x00, 0x00, 0x00 /* 32 cycles needed for complete ID */
+    };
+    uint8_t rx_rdid[5] = {0}; /* 1 byte command + 4 bytes response */
+
+    const struct spi_buf tx_buf = {
+        .buf = tx_rdid,
+        .len = sizeof(tx_rdid)};
+    const struct spi_buf rx_buf = {
+        .buf = rx_rdid,
+        .len = sizeof(rx_rdid)};
+    const struct spi_buf_set tx = {
+        .buffers = &tx_buf,
+        .count = 1};
+    const struct spi_buf_set rx = {
+        .buffers = &rx_buf,
+        .count = 1};
+
+    ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read device ID: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("Device ID read:");
+    LOG_INF("  Manufacturer ID: 0x%02X (expected: 0x04 Fujitsu)", rx_rdid[1]);
+    LOG_INF("  Continuation: 0x%02X (expected: 0x7F)", rx_rdid[2]);
+    LOG_INF("  Product ID 1: 0x%02X (expected: 0x27 - 1Mbit)", rx_rdid[3]);
+    LOG_INF("  Product ID 2: 0x%02X (expected: 0x03)", rx_rdid[4]);
+
+    return 0;
+}
+
+/**
+ * @brief Main application entry point
+ */
+int juxta5_example_main(void)
+{
+    int ret;
+
+    LOG_INF("Starting Juxta5-1 board example");
+
+    /* Initialize peripherals */
+    ret = init_magnet_sensor();
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    ret = init_led();
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    ret = init_adc();
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    LOG_INF("All peripherals initialized successfully");
+
+    /* Main loop */
+    while (1)
+    {
+        /* Read ADC every second */
+        read_adc();
+
+        /* NOTE: P0.20 is shared between LED and FRAM CS */
+        /* Can only use one at a time - currently using FRAM */
+
+        /* Blink LED (when not using FRAM) */
+        /* gpio_pin_toggle_dt(&led); */
+
+        /* Test FRAM periodically (LED disabled due to shared pin) */
+        test_fram();
+
+        /* Suppress unused function warning */
+        /* (void)test_fram; */
+
+        k_sleep(K_SECONDS(1));
+    }
+
+    return 0;
+}
