@@ -1,6 +1,7 @@
 /*
  * Example code for Juxta5-1 board peripherals
  * This demonstrates how to use SPI FRAM, ADC, GPIO interrupt, and shared LED/CS
+ * with low-power sleep until magnet sensor interrupt
  */
 
 #include <zephyr/kernel.h>
@@ -10,6 +11,7 @@
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/eeprom.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/pm.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(juxta5_example, LOG_LEVEL_DBG);
@@ -25,6 +27,12 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 
 /* Callback data */
 static struct gpio_callback magnet_cb_data;
+
+/* Semaphore for signaling magnet sensor interrupt */
+static K_SEM_DEFINE(magnet_sem, 0, 1);
+
+/* Counter for magnet sensor events */
+static uint32_t magnet_event_count = 0;
 
 /* ADC configuration */
 #define ADC_NODE DT_NODELABEL(adc)
@@ -47,7 +55,12 @@ static const struct adc_channel_cfg adc_channel_cfg = {
  */
 void magnet_sensor_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    LOG_INF("Magnet sensor interrupt triggered!");
+    magnet_event_count++;
+
+    LOG_INF("🧲 Magnet sensor interrupt triggered! (Event #%u)", magnet_event_count);
+
+    /* Signal the main thread that an interrupt occurred */
+    k_sem_give(&magnet_sem);
 
     /* Note: P0.20 is shared between LED and FRAM CS */
     /* When using SPI, LED will be controlled by SPI CS */
@@ -84,7 +97,7 @@ static int init_magnet_sensor(void)
     gpio_init_callback(&magnet_cb_data, magnet_sensor_callback, BIT(magnet_sensor.pin));
     gpio_add_callback(magnet_sensor.port, &magnet_cb_data);
 
-    LOG_INF("Magnet sensor initialized on pin %d", magnet_sensor.pin);
+    LOG_INF("Magnet sensor initialized on pin %d (interrupt on rising edge)", magnet_sensor.pin);
     return 0;
 }
 
@@ -222,11 +235,11 @@ static int test_fram(void)
 
     k_usleep(30); /* Consistent delay between transactions */
 
-    /* Step 2: Write Data */
+    /* Step 2: Write Data - store the event count */
     uint8_t tx_write[] = {
-        0x02,             /* Write command */
-        0x00, 0x00, 0x00, /* 24-bit address */
-        0xAA              /* Test data */
+        0x02,                                /* Write command */
+        0x00, 0x10, 0x00,                    /* 24-bit address (0x001000) */
+        (uint8_t)(magnet_event_count & 0xFF) /* Store event count as test data */
     };
     const struct spi_buf tx_buf_write = {
         .buf = tx_write,
@@ -247,7 +260,7 @@ static int test_fram(void)
     /* Step 3: Read Data */
     uint8_t tx_read[] = {
         0x03,             /* Read command */
-        0x00, 0x00, 0x00, /* 24-bit address */
+        0x00, 0x10, 0x00, /* 24-bit address */
         0x00              /* Dummy byte to receive data */
     };
     uint8_t rx_read[sizeof(tx_read)] = {0};
@@ -272,7 +285,8 @@ static int test_fram(void)
         return ret;
     }
 
-    LOG_INF("Direct SPI test - wrote 0xAA, read back 0x%02X", rx_read[4]);
+    LOG_INF("Direct SPI test - wrote event count %u, read back 0x%02X",
+            magnet_event_count, rx_read[4]);
 
     k_usleep(30); /* Consistent delay before RDID */
 
@@ -313,13 +327,39 @@ static int test_fram(void)
 }
 
 /**
+ * @brief Handle wake-up activities after magnet sensor interrupt
+ */
+static void handle_magnet_event(void)
+{
+    LOG_INF("🔋 Device woke up from sleep due to magnet sensor!");
+
+    /* Read current ADC value */
+    LOG_INF("📊 Reading sensors after wake-up...");
+    read_adc();
+
+    /* Store event in FRAM for persistence */
+    LOG_INF("💾 Storing event data to FRAM...");
+    test_fram();
+
+    /* Optional: Flash LED briefly to indicate wake-up */
+    /* Note: Commented out because LED shares pin with FRAM CS */
+    /*
+    gpio_pin_set_dt(&led, 1);
+    k_msleep(100);
+    gpio_pin_set_dt(&led, 0);
+    */
+
+    LOG_INF("✅ Event processing complete. Returning to sleep...");
+}
+
+/**
  * @brief Main application entry point
  */
 int juxta5_example_main(void)
 {
     int ret;
 
-    LOG_INF("Starting Juxta5-1 board example");
+    LOG_INF("Starting Juxta5-1 Low-Power Magnet Sensor Example");
 
     /* Initialize peripherals */
     ret = init_magnet_sensor();
@@ -341,26 +381,24 @@ int juxta5_example_main(void)
     }
 
     LOG_INF("All peripherals initialized successfully");
+    LOG_INF("🔋 Entering low-power mode - device will sleep until magnet sensor interrupt");
+    LOG_INF("🧲 Trigger the magnet sensor (P0.%02d) to wake the device", magnet_sensor.pin);
 
-    /* Main loop */
+    /* Main loop - sleep until interrupt */
     while (1)
     {
-        /* Read ADC every second */
-        read_adc();
+        /* Wait for magnet sensor interrupt (blocks until interrupt occurs) */
+        ret = k_sem_take(&magnet_sem, K_FOREVER);
+        if (ret == 0)
+        {
+            /* Process the magnet sensor event */
+            handle_magnet_event();
+        }
 
-        /* NOTE: P0.20 is shared between LED and FRAM CS */
-        /* Can only use one at a time - currently using FRAM */
+        /* Brief delay before going back to sleep */
+        k_msleep(100);
 
-        /* Blink LED (when not using FRAM) */
-        /* gpio_pin_toggle_dt(&led); */
-
-        /* Test FRAM periodically (LED disabled due to shared pin) */
-        test_fram();
-
-        /* Suppress unused function warning */
-        /* (void)test_fram; */
-
-        k_sleep(K_SECONDS(1));
+        LOG_INF("💤 Going back to sleep... (Event count: %u)", magnet_event_count);
     }
 
     return 0;
