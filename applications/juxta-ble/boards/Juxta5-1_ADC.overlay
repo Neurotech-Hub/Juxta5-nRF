@@ -1,0 +1,16 @@
+/*
+ * Device tree overlay for Juxta BLE application
+ * Disables SPI/FRAM functionality since this app only needs BLE and LED
+ */
+
+/* Disable SPI interface to prevent FRAM driver compilation */
+&spi0 {
+	status = "disabled";
+};
+
+/* Keep LED functionality but remove FRAM alias */
+/ {
+	aliases {
+		/delete-property/ spi-fram;
+	};
+}; 
