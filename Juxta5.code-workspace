@@ -1,0 +1,20 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "nrf-connect.welcome.showOnStartup": false,
+        "nrf-connect.debugging.bindings": {
+            "launch": {
+                "svdFile": "${nrf-connect.sdk:ZEPHYR_BASE}/../modules/hal/nordic/nrfx/mdk/nrf52840.svd"
+            }
+        }
+    },
+    "extensions": {
+        "recommendations": [
+            "nordic-semiconductor.nrf-connect"
+        ]
+    }
+}

@@ -26,12 +26,41 @@ LOG_MODULE_REGISTER(juxta_ble, LOG_LEVEL_DBG);
 /* GPIO specifications */
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 
+/* Active connection reference */
+static struct bt_conn *active_conn;
+
+#define DEVICE_NAME CONFIG_BT_DEVICE_NAME
+#define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
+
 /* BLE advertising data */
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(JUXTA_BLE_SERVICE_UUID)),
-    BT_DATA(BT_DATA_NAME_COMPLETE, "JUXTA-BLE", sizeof("JUXTA-BLE") - 1),
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL, JUXTA_SERVICE_UUID),
 };
+
+/* BLE scan response data */
+static const struct bt_data sd[] = {
+    BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+};
+
+/**
+ * @brief Start BLE advertising
+ */
+static int juxta_start_advertising(void)
+{
+    int ret;
+
+    /* Start advertising with scan response */
+    ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+    if (ret)
+    {
+        LOG_ERR("Advertising failed to start (err %d)", ret);
+        return ret;
+    }
+
+    LOG_INF("📡 BLE advertising started as '%s'", CONFIG_BT_DEVICE_NAME);
+    return 0;
+}
 
 /* Connection callbacks */
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -44,6 +73,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
         return;
     }
 
+    /* Store connection reference */
+    active_conn = bt_conn_ref(conn);
+
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("📱 Connected to %s", addr);
 }
@@ -54,6 +86,23 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("📱 Disconnected from %s (reason 0x%02x)", addr, reason);
+
+    /* Clear and release the active connection */
+    if (active_conn)
+    {
+        bt_conn_unref(active_conn);
+        active_conn = NULL;
+    }
+
+    /* Add a small delay before restarting advertising */
+    k_sleep(K_MSEC(100));
+
+    /* Restart advertising */
+    int err = juxta_start_advertising();
+    if (err)
+    {
+        LOG_ERR("Failed to restart advertising (err %d)", err);
+    }
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -102,35 +151,6 @@ int juxta_ble_led_set(bool state)
 }
 
 /**
- * @brief Start BLE advertising
- */
-static int start_advertising(void)
-{
-    int ret;
-
-    /* Use newer advertising API */
-    struct bt_le_adv_param adv_param = {
-        .id = BT_ID_DEFAULT,
-        .sid = 0,
-        .secondary_max_skip = 0,
-        .options = BT_LE_ADV_OPT_USE_NAME,
-        .interval_min = BT_GAP_ADV_FAST_INT_MIN_2,
-        .interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
-        .peer = NULL,
-    };
-
-    ret = bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad), NULL, 0);
-    if (ret)
-    {
-        LOG_ERR("Advertising failed to start (err %d)", ret);
-        return ret;
-    }
-
-    LOG_INF("📡 BLE advertising started as 'JUXTA-BLE'");
-    return 0;
-}
-
-/**
  * @brief Initialize Bluetooth
  */
 static int init_bluetooth(void)
@@ -155,7 +175,7 @@ static int init_bluetooth(void)
     }
 
     /* Start advertising */
-    ret = start_advertising();
+    ret = juxta_start_advertising();
     if (ret)
     {
         return ret;
@@ -217,6 +237,14 @@ int main(void)
         { /* Every 30 seconds */
             LOG_INF("💓 System running... (uptime: %u minutes)", heartbeat / 60);
         }
+    }
+
+    /* Cleanup (in case of exit) */
+    if (active_conn)
+    {
+        bt_conn_disconnect(active_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        bt_conn_unref(active_conn);
+        active_conn = NULL;
     }
 
     return 0;

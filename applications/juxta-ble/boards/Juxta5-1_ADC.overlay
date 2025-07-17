@@ -3,14 +3,22 @@
  * Disables SPI/FRAM functionality since this app only needs BLE and LED
  */
 
-/* Disable SPI interface to prevent FRAM driver compilation */
-&spi0 {
-	status = "disabled";
+/ {
+    chosen {
+        /delete-property/ zephyr,eeprom;
+    };
+
+    aliases {
+        /delete-property/ spi-fram;
+    };
 };
 
-/* Keep LED functionality but remove FRAM alias */
-/ {
-	aliases {
-		/delete-property/ spi-fram;
-	};
+&spi0 {
+    status = "disabled";
+
+    /delete-node/ fram@0;
+};
+
+&flash0 {
+    status = "disabled";
 }; 

@@ -76,17 +76,13 @@ static ssize_t write_led_char(struct bt_conn *conn, const struct bt_gatt_attr *a
     return len;
 }
 
-/* Define custom UUIDs using newer API */
-static struct bt_uuid_16 juxta_service_uuid = BT_UUID_INIT_16(JUXTA_BLE_SERVICE_UUID);
-static struct bt_uuid_16 juxta_led_char_uuid = BT_UUID_INIT_16(JUXTA_BLE_LED_CHAR_UUID);
-
 /* JUXTA BLE Service Definition */
 BT_GATT_SERVICE_DEFINE(juxta_ble_svc,
                        /* Service Declaration */
-                       BT_GATT_PRIMARY_SERVICE(&juxta_service_uuid.uuid),
+                       BT_GATT_PRIMARY_SERVICE(BT_UUID_JUXTA_SERVICE),
 
                        /* LED Control Characteristic */
-                       BT_GATT_CHARACTERISTIC(&juxta_led_char_uuid.uuid,
+                       BT_GATT_CHARACTERISTIC(BT_UUID_JUXTA_LED_CHAR,
                                               BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
                                               BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
                                               read_led_char, write_led_char, &led_char_value),
@@ -100,8 +96,8 @@ BT_GATT_SERVICE_DEFINE(juxta_ble_svc,
 int juxta_ble_service_init(void)
 {
     LOG_INF("🔵 JUXTA BLE Service initialized");
-    LOG_INF("📋 Service UUID: 0x%04X", JUXTA_BLE_SERVICE_UUID);
-    LOG_INF("💡 LED Characteristic UUID: 0x%04X", JUXTA_BLE_LED_CHAR_UUID);
+    LOG_INF("📋 Service UUID: 12340000-0000-1000-8000-00805f9b34fb");
+    LOG_INF("💡 LED Characteristic UUID: 12350000-0000-1000-8000-00805f9b34fb");
     LOG_INF("📝 LED Control: Write 0x00 (OFF) or 0x01 (ON)");
 
     /* Service is automatically registered with BT_GATT_SERVICE_DEFINE */

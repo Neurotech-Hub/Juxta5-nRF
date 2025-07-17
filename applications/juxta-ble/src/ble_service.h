@@ -17,17 +17,16 @@ extern "C"
 {
 #endif
 
-/**
- * @brief JUXTA BLE Service UUID
- * Custom 16-bit UUID: 0x1234 (for demo purposes)
- */
-#define JUXTA_BLE_SERVICE_UUID 0x1234
+/* Service UUID: 12340000-0000-1000-8000-00805F9B34FB */
+#define JUXTA_SERVICE_UUID 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x10, \
+                           0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
 
-/**
- * @brief LED Control Characteristic UUID
- * Custom 16-bit UUID: 0x1235
- */
-#define JUXTA_BLE_LED_CHAR_UUID 0x1235
+/* LED Control Characteristic UUID: 12350000-0000-1000-8000-00805F9B34FB */
+#define JUXTA_LED_CHAR_UUID 0x00, 0x00, 0x35, 0x12, 0x00, 0x00, 0x00, 0x10, \
+                            0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
+
+#define BT_UUID_JUXTA_SERVICE BT_UUID_DECLARE_128(JUXTA_SERVICE_UUID)
+#define BT_UUID_JUXTA_LED_CHAR BT_UUID_DECLARE_128(JUXTA_LED_CHAR_UUID)
 
 /**
  * @brief LED state values
