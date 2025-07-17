@@ -29,6 +29,9 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 /* Active connection reference */
 static struct bt_conn *active_conn;
 
+/* Work queue item for advertising restart */
+static struct k_work_delayable adv_work;
+
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
@@ -50,6 +53,9 @@ static int juxta_start_advertising(void)
 {
     int ret;
 
+    /* Make sure advertising is stopped first */
+    bt_le_adv_stop();
+
     /* Start advertising with scan response */
     ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (ret)
@@ -60,6 +66,20 @@ static int juxta_start_advertising(void)
 
     LOG_INF("📡 BLE advertising started as '%s'", CONFIG_BT_DEVICE_NAME);
     return 0;
+}
+
+/**
+ * @brief Work handler for restarting advertising
+ */
+static void advertising_work_handler(struct k_work *work)
+{
+    int err = juxta_start_advertising();
+    if (err)
+    {
+        LOG_ERR("Failed to restart advertising (err %d)", err);
+        /* Schedule another attempt in 2 seconds */
+        k_work_schedule(&adv_work, K_SECONDS(2));
+    }
 }
 
 /* Connection callbacks */
@@ -76,6 +96,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
     /* Store connection reference */
     active_conn = bt_conn_ref(conn);
 
+    /* Cancel any pending advertising work */
+    k_work_cancel_delayable(&adv_work);
+
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("📱 Connected to %s", addr);
 }
@@ -87,6 +110,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("📱 Disconnected from %s (reason 0x%02x)", addr, reason);
 
+    /* Stop advertising first */
+    bt_le_adv_stop();
+
     /* Clear and release the active connection */
     if (active_conn)
     {
@@ -94,15 +120,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         active_conn = NULL;
     }
 
-    /* Add a small delay before restarting advertising */
-    k_sleep(K_MSEC(100));
-
-    /* Restart advertising */
-    int err = juxta_start_advertising();
-    if (err)
-    {
-        LOG_ERR("Failed to restart advertising (err %d)", err);
-    }
+    /* Schedule advertising restart with delay */
+    k_work_schedule(&adv_work, K_MSEC(1000));
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -194,6 +213,9 @@ int main(void)
     LOG_INF("🚀 Starting JUXTA BLE Application");
     LOG_INF("📋 Board: Juxta5-1_ADC");
     LOG_INF("📟 Device: nRF52805");
+
+    /* Initialize work queue item */
+    k_work_init_delayable(&adv_work, advertising_work_handler);
 
     /* Initialize LED */
     ret = init_led();
