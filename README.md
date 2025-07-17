@@ -29,6 +29,16 @@ cd Juxta5
      ./applications/juxta-mvp/build_adc.sh
      ```
 
+6. Connect to RTT Server (Terminal):
+   ```bash
+   # Install JLinkRTTClient if not already installed
+   brew install segger-jlink   # macOS
+   
+   # Connect to RTT Server
+   JLinkRTTClient
+   ```
+   Note: Ensure your device is flashed and JLink is connected before running RTT Client.
+
 ## Project Structure
 
 - `/applications` - Application code
