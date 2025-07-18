@@ -11,9 +11,6 @@ CONFIG_SPI_NRFX=y
 # Enable Sensor support for accelerometer
 CONFIG_SENSOR=y
 
-# Enable FRAM support
+# Enable FRAM support (for future integration)
 CONFIG_EEPROM=y
-CONFIG_EEPROM_AT2X_EMUL=y
-
-# Enable interrupts and GPIO callbacks
-CONFIG_GPIO_INT_DEBOUNCE=y
+CONFIG_EEPROM_AT25=y
