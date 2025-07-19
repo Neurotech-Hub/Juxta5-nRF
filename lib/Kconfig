@@ -3,11 +3,5 @@
 # Copyright (c) 2024 NeurotechHub
 # SPDX-License-Identifier: Apache-2.0
 
-menu "JUXTA Libraries"
-
 source "lib/juxta_fram/Kconfig"
-
-# Add more library Kconfig files here as they are created
-# source "lib/other_library/Kconfig"
-
-endmenu 
+source "lib/juxta_framfs/Kconfig" 

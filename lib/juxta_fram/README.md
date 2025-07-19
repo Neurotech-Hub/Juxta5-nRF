@@ -36,46 +36,31 @@ CONFIG_JUXTA_FRAM=y
 CONFIG_JUXTA_FRAM_LOG_LEVEL_DBG=y
 ```
 
-### 2. Device Tree Configuration
+### 2. Direct Initialization (Recommended)
 
-Ensure your board's device tree includes the FRAM device:
-```dts
-&spi0 {
-    fram0: fram@0 {
-        compatible = "jedec,spi-nor";
-        reg = <0>;
-        spi-max-frequency = <8000000>;
-        size = <DT_SIZE_K(128)>;
-        has-dpd;
-        jedec-id = [04 7F 27];
-    };
-};
-
-/ {
-    aliases {
-        spi-fram = &fram0;
-    };
-};
-```
-
-### 3. Include and Use
+Since device tree configuration requires specific board setup, use direct initialization:
 
 ```c
 #include <juxta_fram/fram.h>
+#include <zephyr/drivers/spi.h>
 
-/* Device tree references */
-#define LED_NODE DT_ALIAS(led0)
-#define FRAM_NODE DT_ALIAS(spi_fram)
-
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
+/* GPIO specifications */
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static struct juxta_fram_device fram_dev;
 
 int main(void)
 {
     int ret;
     
-    /* Initialize FRAM */
-    ret = juxta_fram_init_dt(&fram_dev, DEVICE_DT_GET(FRAM_NODE), &led);
+    /* Get SPI device by label */
+    const struct device *spi_dev = device_get_binding("SPI_0");
+    if (!spi_dev) {
+        printk("Failed to get SPI device\n");
+        return -1;
+    }
+    
+    /* Initialize FRAM with direct parameters */
+    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &led); /* 1MHz SPI */
     if (ret < 0) {
         printk("FRAM init failed: %d\n", ret);
         return ret;
@@ -98,6 +83,31 @@ int main(void)
     return 0;
 }
 ```
+
+### 3. Device Tree Configuration (Advanced)
+
+For advanced users with custom device tree setup:
+
+```dts
+&spi0 {
+    fram0: fram@0 {
+        compatible = "jedec,spi-nor";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+        size = <DT_SIZE_K(128)>;
+        has-dpd;
+        jedec-id = [04 7F 27];
+    };
+};
+
+/ {
+    aliases {
+        spi-fram = &fram0;
+    };
+};
+```
+
+**Note**: Device tree initialization (`juxta_fram_init_dt`) is not available in the current implementation. Use direct initialization instead.
 
 ## API Reference
 

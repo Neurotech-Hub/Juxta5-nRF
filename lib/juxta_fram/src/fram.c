@@ -16,6 +16,7 @@ static int fram_send_command(struct juxta_fram_device *fram_dev, uint8_t cmd);
 static int fram_write_enable(struct juxta_fram_device *fram_dev);
 static int fram_ensure_spi_mode(struct juxta_fram_device *fram_dev);
 
+/* Device tree initialization function - commented out due to missing DT macros
 int juxta_fram_init_dt(struct juxta_fram_device *fram_dev,
                        const struct device *fram_node,
                        const struct gpio_dt_spec *cs_spec)
@@ -25,7 +26,7 @@ int juxta_fram_init_dt(struct juxta_fram_device *fram_dev,
         return JUXTA_FRAM_ERROR;
     }
 
-    /* Get the SPI bus device */
+    // Get the SPI bus device
     const struct device *spi_dev = device_get_binding(DT_BUS_LABEL(fram_node));
     if (!spi_dev)
     {
@@ -36,6 +37,7 @@ int juxta_fram_init_dt(struct juxta_fram_device *fram_dev,
 
     return juxta_fram_init(fram_dev, spi_dev, frequency, cs_spec);
 }
+*/
 
 int juxta_fram_init(struct juxta_fram_device *fram_dev,
                     const struct device *spi_dev,

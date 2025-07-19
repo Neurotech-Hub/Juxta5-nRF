@@ -86,9 +86,11 @@ extern "C"
      * @param cs_spec GPIO specification for chip select (use GPIO_DT_SPEC_GET)
      * @return 0 on success, negative error code on failure
      */
+    /* Commented out due to missing device tree macros
     int juxta_fram_init_dt(struct juxta_fram_device *fram_dev,
                            const struct device *fram_node,
                            const struct gpio_dt_spec *cs_spec);
+    */
 
     /**
      * @brief Initialize FRAM device with manual configuration

@@ -1,0 +1,16 @@
+# JUXTA File System Test Application Sample Configuration
+# This file is used by Twister for automated testing
+sample:
+  description: JUXTA FRAM and File System Test Application
+  name: juxta-file-system-test
+common:
+  sysbuild: true
+  build_only: true
+  integration_platforms:
+    - Juxta5-1_ADC
+tests:
+  app.fram_file_system:
+    tags:
+      - fram
+      - filesystem
+      - storage

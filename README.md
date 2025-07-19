@@ -25,8 +25,11 @@ cd Juxta5
    - Use the nRF Connect extension in VS Code
    - Or use the provided build scripts:
      ```bash
-     # For juxta-mvp
+     # For juxta-mvp (original working application)
      ./applications/juxta-mvp/build_adc.sh
+     
+     # For juxta-file-system (FRAM library testing)
+     ./applications/juxta-file-system/build.sh
      ```
 
 6. Connect to RTT Server (Terminal):
@@ -42,10 +45,32 @@ cd Juxta5
 ## Project Structure
 
 - `/applications` - Application code
-  - `juxta-mvp` - Main application
+  - `juxta-mvp` - **Original working application** (direct SPI, stable baseline)
+  - `juxta-file-system` - **FRAM library testing application** (validates libraries)
   - `juxta-ble` - Bluetooth application
+  - `juxta-axy` - Accelerometer application
 - `/boards` - Custom board definitions
 - `/lib` - Shared libraries
+  - `juxta_fram` - FRAM driver library
+  - `juxta_framfs` - FRAM file system library
+
+## Applications Overview
+
+### 🎯 `juxta-mvp` (Stable Baseline)
+- **Purpose**: Original working application with direct SPI implementation
+- **Status**: ✅ **Stable and tested**
+- **Use case**: Baseline for comparison, known working state
+- **FRAM**: Uses direct SPI commands, bypasses library
+
+### 🧪 `juxta-file-system` (Library Testing)
+- **Purpose**: Comprehensive testing of FRAM libraries
+- **Status**: ✅ **Ready for testing**
+- **Use case**: Validate `juxta_fram` and `juxta_framfs` libraries
+- **Features**: Full test suite, performance metrics, file system validation
+
+### 📱 Other Applications
+- `juxta-ble` - Bluetooth functionality
+- `juxta-axy` - Accelerometer sensor integration
 
 ## Build Configurations
 
@@ -55,9 +80,22 @@ Multiple build configurations are available:
 - `test_build.conf` - Minimal test configuration
 - `prj_with_fram_lib.conf` - Configuration with FRAM library support
 
+## Development Workflow
+
+### For New Development:
+1. **Start with `juxta-mvp`** - Verify hardware works
+2. **Test with `juxta-file-system`** - Validate libraries work
+3. **Build your application** - Use validated libraries
+
+### For Library Testing:
+1. **Build `juxta-file-system`** - Comprehensive library validation
+2. **Monitor RTT output** - Detailed test results
+3. **Verify all tests pass** - Libraries are ready for use
+
 ## Development Notes
 
 - The project uses the nRF52840 SoC
 - Custom board definitions are provided for Juxta5-1_ADC and Juxta5-1_AXY variants
 - Build artifacts are stored in the `build` directory (ignored by git)
-- VS Code workspace settings ensure consistent development environment 
+- VS Code workspace settings ensure consistent development environment
+- **FRAM Libraries**: `juxta_fram` and `juxta_framfs` are available for applications 

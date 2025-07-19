@@ -1,0 +1,24 @@
+/*
+ * Board overlay for Juxta5-1_ADC for FRAM File System testing
+ * This file configures the board for FRAM and file system testing
+ */
+
+/ {
+	chosen {
+		/* No UART available on this board */
+		zephyr,console = &uart0; /* Will be ignored since no UART */
+	};
+};
+
+/* Configure GPIO */
+&gpio0 {
+	status = "okay";
+};
+
+/* Configure SPI for FRAM */
+&spi0 {
+	status = "okay";
+	
+	/* FRAM device is already configured in board DTS */
+	/* Access via device tree alias: spi-fram */
+}; 
