@@ -1,21 +1,25 @@
 # JUXTA BLE Application
 
-A minimal BLE application for the JUXTA device with LED control via Bluetooth Low Energy characteristics.
+A BLE application for the JUXTA device with LED control via Bluetooth Low Energy characteristics and device scanning capabilities.
 
 ## Overview
 
 This application demonstrates:
 - BLE advertising and connection handling
 - Custom GATT service with LED control characteristic
+- Device scanning and discovery with RSSI reporting
+- Alternating between advertising and scanning modes
 - Foundation for OTA firmware upgrades (future feature)
 - Minimal resource usage optimized for nRF52805
 
 ## Features
 
-- 🔵 **BLE Advertising**: Advertises as "JUXTA-BLE"
+- 🔵 **BLE Advertising**: Advertises as "JUXTA-BLE" for 5 seconds
+- 🔍 **BLE Scanning**: Scans for nearby devices for 10 seconds using standard Zephyr BLE scanning API
+- 📡 **Device Discovery**: Reports discovered devices with RSSI values and device names
+- 🔄 **Automatic Alternation**: Seamlessly switches between advertising and scanning
 - 💡 **LED Control**: Control onboard LED via BLE characteristic
 - 📱 **Mobile Ready**: Compatible with BLE scanner apps and custom mobile apps
-- 🔄 **Future OTA**: Designed for easy addition of OTA firmware upgrade capabilities
 - ⚡ **Low Power**: Optimized for battery operation
 
 ## Hardware Requirements
@@ -54,6 +58,55 @@ west flash
 - **Values**:
   - `0x00` = LED OFF
   - `0x01` = LED ON
+
+## Device Discovery
+
+The application alternates between two modes:
+
+### Advertising Mode (5 seconds)
+- Device advertises as "JUXTA-BLE"
+- Accepts connections from other devices
+- LED control characteristic available when connected
+
+### Scanning Mode (10 seconds)
+- Scans for nearby BLE devices
+- Reports device addresses, names, and RSSI values
+- Displays results in a formatted table
+
+## Expected Output
+
+```
+🚀 Starting JUXTA BLE Application
+📋 Board: Juxta5-1_ADC
+📟 Device: nRF52805
+📱 Device will alternate between advertising and scanning
+📢 Advertising duration: 5 seconds
+🔍 Scanning duration: 10 seconds
+💡 LED initialized on pin P0.20
+🔵 Bluetooth initialized
+🔵 JUXTA BLE Service initialized
+📋 Service UUID: 0x1234
+💡 LED Characteristic UUID: 0x1235
+📝 LED Control: Write 0x00 (OFF) or 0x01 (ON)
+✅ All systems initialized successfully
+📱 Ready for BLE connections and device discovery!
+📢 BLE advertising started as 'JUXTA-BLE' for 5 seconds
+⏰ Advertising period complete
+✅ Advertising stopped
+🔍 Starting BLE scanning for 10 seconds...
+✅ Scanning started successfully
+📡 Found device: AA:BB:CC:DD:EE:FF, RSSI: -45, Name: iPhone
+📡 Found device: 11:22:33:44:55:66, RSSI: -67, Name: Unknown
+⏰ Scanning period complete
+✅ Scanning stopped
+📡 Discovered 2 devices:
+┌─────────────────────────────────────────────────────────────┐
+│ Address            │ RSSI │ Name                           │
+├─────────────────────────────────────────────────────────────┤
+│ AA:BB:CC:DD:EE:FF │  -45 │ iPhone                         │
+│ 11:22:33:44:55:66 │  -67 │ Unknown                        │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Usage with BLE Apps
 
@@ -96,33 +149,10 @@ await BleManager.write(
 );
 ```
 
-## Expected Output
-
-```
-🚀 Starting JUXTA BLE Application
-📋 Board: Juxta5-1_ADC
-📟 Device: nRF52805
-💡 LED initialized on pin P0.20
-🔵 Bluetooth initialized
-🔵 JUXTA BLE Service initialized
-📋 Service UUID: 0x1234
-💡 LED Characteristic UUID: 0x1235
-📝 LED Control: Write 0x00 (OFF) or 0x01 (ON)
-📡 BLE advertising started as 'JUXTA-BLE'
-✅ All systems initialized successfully
-📱 Ready for BLE connections!
-
-[When device connects:]
-📱 Connected to XX:XX:XX:XX:XX:XX
-
-[When LED characteristic is written:]
-📱 BLE: LED set to ON via characteristic write
-💡 LED turned ON
-```
-
 ## Power Consumption
 
 - **Advertising**: ~1-2mA average
+- **Scanning**: ~2-3mA average
 - **Connected (idle)**: ~0.5-1mA average
 - **LED ON**: +~2mA additional
 - **Deep sleep**: <10µA (when implemented)
@@ -132,7 +162,9 @@ await BleManager.write(
 ### Phase 1 (Current)
 - ✅ Basic BLE advertising
 - ✅ LED control characteristic
+- ✅ Device scanning and discovery
 - ✅ Connection handling
+- ✅ RSSI reporting
 
 ### Phase 2 (Planned)
 - [ ] Device Information Service (DIS)
@@ -163,7 +195,7 @@ await BleManager.write(
 ```
 applications/juxta-ble/
 ├── src/
-│   ├── main.c           # Main application and LED control
+│   ├── main.c           # Main application with state machine
 │   ├── ble_service.c    # BLE GATT service implementation
 │   └── ble_service.h    # BLE service interface
 ├── CMakeLists.txt       # Build configuration
@@ -213,7 +245,12 @@ static ssize_t read_new_char(struct bt_conn *conn, ...);
    - Verify characteristic write format
    - Check for GPIO conflicts with FRAM
 
-4. **Build errors**:
+4. **No devices found during scan**:
+   - Ensure other BLE devices are nearby and discoverable
+   - Check RSSI values (should be negative)
+   - Verify scanning configuration in `prj.conf`
+
+5. **Build errors**:
    - Ensure nRF Connect SDK is properly set up
    - Check Zephyr version compatibility
    - Verify board definition exists
@@ -238,10 +275,10 @@ JLinkRTTClient
 
 This application is designed to eventually merge with `juxta-mvp` functionality:
 
-1. **Current**: Basic BLE + LED control
+1. **Current**: Basic BLE + LED control + device scanning
 2. **Phase 1**: Add FRAM library integration
 3. **Phase 2**: Add sensor data characteristics
 4. **Phase 3**: Merge with juxta-mvp sensor functionality
 5. **Phase 4**: Add OTA firmware update capability
 
-The modular design allows for gradual feature addition while maintaining a working BLE foundation. 
+The modular design allows for gradual feature addition while maintaining a working BLE foundation with device discovery capabilities. 

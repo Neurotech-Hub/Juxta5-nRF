@@ -1,6 +1,6 @@
 /*
  * JUXTA BLE Application
- * Minimal BLE application with LED control characteristic
+ * BLE application with LED control characteristic and device scanning
  *
  * Copyright (c) 2024 NeurotechHub
  * SPDX-License-Identifier: Apache-2.0
@@ -15,6 +15,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+// Standard Zephyr BLE scanning API (no additional include needed)
 
 #include "ble_service.h"
 
@@ -32,6 +33,22 @@ static struct bt_conn *active_conn;
 /* Work queue item for advertising restart */
 static struct k_work_delayable adv_work;
 
+/* BLE state machine */
+typedef enum
+{
+    BLE_STATE_ADVERTISING,
+    BLE_STATE_SCANNING,
+    BLE_STATE_IDLE
+} ble_state_t;
+
+static ble_state_t current_state = BLE_STATE_IDLE;
+static struct k_timer state_timer;
+static struct k_work state_work;
+
+/* Advertising and scanning parameters */
+#define ADVERTISING_DURATION_MS 5000 /* 5 seconds */
+#define SCANNING_DURATION_MS 10000   /* 10 seconds */
+
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
@@ -45,6 +62,147 @@ static const struct bt_data ad[] = {
 static const struct bt_data sd[] = {
     BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
 };
+
+/* Device information for discovered devices */
+struct discovered_device
+{
+    bt_addr_le_t addr;
+    int8_t rssi;
+    char name[16]; // Reduced from 32 to 16 bytes
+    bool name_found;
+    uint32_t timestamp;
+};
+
+#define MAX_DISCOVERED_DEVICES 3 // Ultra-minimal for nRF52805 memory constraints
+static struct discovered_device discovered_devices[MAX_DISCOVERED_DEVICES];
+static uint8_t device_count = 0;
+
+/**
+ * @brief Clear discovered devices list
+ */
+static void clear_discovered_devices(void)
+{
+    memset(discovered_devices, 0, sizeof(discovered_devices));
+    device_count = 0;
+}
+
+/**
+ * @brief Add or update discovered device
+ */
+static void add_discovered_device(const bt_addr_le_t *addr, int8_t rssi, const char *name)
+{
+    uint32_t now = k_uptime_get_32();
+
+    /* Check if device already exists */
+    for (int i = 0; i < device_count; i++)
+    {
+        if (bt_addr_le_cmp(&discovered_devices[i].addr, addr) == 0)
+        {
+            /* Update existing device */
+            discovered_devices[i].rssi = rssi;
+            discovered_devices[i].timestamp = now;
+            if (name && strlen(name) > 0)
+            {
+                strncpy(discovered_devices[i].name, name, sizeof(discovered_devices[i].name) - 1);
+                discovered_devices[i].name_found = true;
+            }
+            return;
+        }
+    }
+
+    /* Add new device if space available */
+    if (device_count < MAX_DISCOVERED_DEVICES)
+    {
+        discovered_devices[device_count].addr = *addr;
+        discovered_devices[device_count].rssi = rssi;
+        discovered_devices[device_count].timestamp = now;
+        discovered_devices[device_count].name_found = false;
+
+        if (name && strlen(name) > 0)
+        {
+            strncpy(discovered_devices[device_count].name, name,
+                    sizeof(discovered_devices[device_count].name) - 1);
+            discovered_devices[device_count].name_found = true;
+        }
+
+        device_count++;
+    }
+}
+
+/**
+ * @brief Print discovered devices
+ */
+static void print_discovered_devices(void)
+{
+    if (device_count == 0)
+    {
+        LOG_INF("📡 No devices discovered during scan");
+        return;
+    }
+
+    LOG_INF("📡 Discovered %d devices:", device_count);
+
+    for (int i = 0; i < device_count; i++)
+    {
+        char addr_str[BT_ADDR_LE_STR_LEN];
+        bt_addr_le_to_str(&discovered_devices[i].addr, addr_str, sizeof(addr_str));
+
+        LOG_INF("  %s, RSSI: %d%s",
+                addr_str,
+                discovered_devices[i].rssi,
+                discovered_devices[i].name_found ? discovered_devices[i].name : " (Unknown)");
+    }
+}
+
+/**
+ * @brief BLE scan callback
+ */
+static void scan_cb(const struct bt_le_scan_recv_info *info, struct net_buf_simple *buf)
+{
+    char addr_str[BT_ADDR_LE_STR_LEN];
+    char name[16] = {0}; // Reduced from 32 to 16 bytes
+    bool name_found = false;
+
+    bt_addr_le_to_str(info->addr, addr_str, sizeof(addr_str));
+
+    /* Parse advertising data for device name */
+    while (buf->len > 1)
+    {
+        uint8_t len = net_buf_simple_pull_u8(buf);
+        uint8_t type;
+
+        if (len == 0)
+        {
+            break;
+        }
+
+        if (len > buf->len)
+        {
+            break;
+        }
+
+        type = net_buf_simple_pull_u8(buf);
+        len--;
+
+        if (type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED)
+        {
+            if (len < sizeof(name))
+            {
+                memcpy(name, net_buf_simple_pull_mem(buf, len), len);
+                name_found = true;
+            }
+        }
+        else
+        {
+            net_buf_simple_pull_mem(buf, len);
+        }
+    }
+
+    /* Add to discovered devices list */
+    add_discovered_device(info->addr, info->rssi, name_found ? name : NULL);
+
+    LOG_DBG("Found: %s, RSSI: %d", addr_str, info->rssi);
+}
 
 /**
  * @brief Start BLE advertising
@@ -64,12 +222,106 @@ static int juxta_start_advertising(void)
         return ret;
     }
 
-    LOG_INF("📡 BLE advertising started as '%s'", CONFIG_BT_DEVICE_NAME);
+    current_state = BLE_STATE_ADVERTISING;
+    LOG_INF("📢 BLE advertising started as '%s'", CONFIG_BT_DEVICE_NAME);
     return 0;
 }
 
 /**
- * @brief Work handler for restarting advertising
+ * @brief Stop BLE advertising
+ */
+static void juxta_stop_advertising(void)
+{
+    int err = bt_le_adv_stop();
+    if (err)
+    {
+        LOG_ERR("Failed to stop advertising: %d", err);
+    }
+    else
+    {
+        LOG_INF("✅ Advertising stopped");
+    }
+}
+
+/**
+ * @brief Start BLE scanning
+ */
+static int juxta_start_scanning(void)
+{
+    int err;
+
+    LOG_INF("🔍 Starting BLE scanning...");
+
+    /* Clear previous discoveries */
+    clear_discovered_devices();
+
+    err = bt_le_scan_start(BT_LE_SCAN_PASSIVE, NULL);
+    if (err)
+    {
+        LOG_ERR("Failed to start scanning: %d", err);
+        return err;
+    }
+
+    current_state = BLE_STATE_SCANNING;
+    LOG_INF("✅ Scanning started successfully");
+
+    return 0;
+}
+
+/**
+ * @brief Stop BLE scanning
+ */
+static void juxta_stop_scanning(void)
+{
+    int err = bt_le_scan_stop();
+    if (err)
+    {
+        LOG_ERR("Failed to stop scanning: %d", err);
+    }
+    else
+    {
+        LOG_INF("✅ Scanning stopped");
+    }
+}
+
+/**
+ * @brief State timer callback
+ */
+static void state_timer_callback(struct k_timer *dummy)
+{
+    k_work_submit(&state_work);
+}
+
+/**
+ * @brief State work handler
+ */
+static void state_work_handler(struct k_work *work)
+{
+    switch (current_state)
+    {
+    case BLE_STATE_ADVERTISING:
+        LOG_INF("⏰ Advertising period complete");
+        juxta_stop_advertising();
+        juxta_start_scanning();
+        k_timer_start(&state_timer, K_MSEC(SCANNING_DURATION_MS), K_NO_WAIT);
+        break;
+
+    case BLE_STATE_SCANNING:
+        LOG_INF("⏰ Scanning period complete");
+        juxta_stop_scanning();
+        print_discovered_devices();
+        juxta_start_advertising();
+        k_timer_start(&state_timer, K_MSEC(ADVERTISING_DURATION_MS), K_NO_WAIT);
+        break;
+
+    default:
+        LOG_ERR("❌ Unknown state: %d", current_state);
+        break;
+    }
+}
+
+/**
+ * @brief Work handler for restarting advertising (legacy function)
  */
 static void advertising_work_handler(struct k_work *work)
 {
@@ -96,7 +348,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
     /* Store connection reference */
     active_conn = bt_conn_ref(conn);
 
-    /* Cancel any pending advertising work */
+    /* Cancel any pending state transitions */
+    k_timer_stop(&state_timer);
     k_work_cancel_delayable(&adv_work);
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
@@ -110,9 +363,6 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("📱 Disconnected from %s (reason 0x%02x)", addr, reason);
 
-    /* Stop advertising first */
-    bt_le_adv_stop();
-
     /* Clear and release the active connection */
     if (active_conn)
     {
@@ -120,8 +370,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         active_conn = NULL;
     }
 
-    /* Schedule advertising restart with delay */
-    k_work_schedule(&adv_work, K_MSEC(1000));
+    /* Resume the advertising/scanning cycle */
+    juxta_start_advertising();
+    k_timer_start(&state_timer, K_MSEC(ADVERTISING_DURATION_MS), K_NO_WAIT);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -185,6 +436,12 @@ static int init_bluetooth(void)
 
     LOG_INF("🔵 Bluetooth initialized");
 
+    /* Initialize scan callback */
+    static struct bt_le_scan_cb scan_callbacks = {
+        .recv = scan_cb,
+    };
+    bt_le_scan_cb_register(&scan_callbacks);
+
     /* Initialize JUXTA BLE service */
     ret = juxta_ble_service_init();
     if (ret)
@@ -193,12 +450,19 @@ static int init_bluetooth(void)
         return ret;
     }
 
-    /* Start advertising */
+    /* Initialize work and timer for state machine */
+    k_work_init(&state_work, state_work_handler);
+    k_timer_init(&state_timer, state_timer_callback, NULL);
+
+    /* Start the advertising/scanning cycle */
     ret = juxta_start_advertising();
     if (ret)
     {
         return ret;
     }
+
+    /* Start the state timer */
+    k_timer_start(&state_timer, K_MSEC(ADVERTISING_DURATION_MS), K_NO_WAIT);
 
     return 0;
 }
@@ -213,6 +477,9 @@ int main(void)
     LOG_INF("🚀 Starting JUXTA BLE Application");
     LOG_INF("📋 Board: Juxta5-1_ADC");
     LOG_INF("📟 Device: nRF52805");
+    LOG_INF("📱 Device will alternate between advertising and scanning");
+    LOG_INF("📢 Advertising duration: %d seconds", ADVERTISING_DURATION_MS / 1000);
+    LOG_INF("🔍 Scanning duration: %d seconds", SCANNING_DURATION_MS / 1000);
 
     /* Initialize work queue item */
     k_work_init_delayable(&adv_work, advertising_work_handler);
@@ -234,7 +501,7 @@ int main(void)
     }
 
     LOG_INF("✅ All systems initialized successfully");
-    LOG_INF("📱 Ready for BLE connections!");
+    LOG_INF("📱 Ready for BLE connections and device discovery!");
     LOG_INF("💡 Connect and write to LED characteristic to control the LED");
 
     /* Test LED briefly */
@@ -258,6 +525,14 @@ int main(void)
         if ((++heartbeat % 30) == 0)
         { /* Every 30 seconds */
             LOG_INF("💓 System running... (uptime: %u minutes)", heartbeat / 60);
+            if (current_state == BLE_STATE_ADVERTISING)
+            {
+                LOG_DBG("📢 Still advertising...");
+            }
+            else if (current_state == BLE_STATE_SCANNING)
+            {
+                LOG_DBG("🔍 Still scanning... (Found %d devices)", device_count);
+            }
         }
     }
 
