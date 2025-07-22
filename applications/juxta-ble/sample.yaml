@@ -5,6 +5,6 @@ sample:
 common:
   build_only: true
   integration_platforms:
-    - Juxta5-1_ADC
+    - nrf52dk_nrf52832
 tests:
   app.default: {}

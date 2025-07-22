@@ -16,12 +16,22 @@ cd Juxta5
    - Select `Juxta5.code-workspace`
    - Install recommended extensions when prompted
 
-4. The nRF Connect extension should automatically detect:
+4. Install required tools:
+   ```bash
+   # Install nrfutil (required for debugging)
+   python3 -m pip install nrfutil
+   
+   # Verify installation
+   nrfutil version
+   ```
+   Note: If you get a "command not found" error after installation, you may need to add Python's bin directory to your PATH.
+
+5. The nRF Connect extension should automatically detect:
    - Your applications in `/applications`
    - Custom board definitions in `/boards`
    - Build configurations from `prj.conf` and other `.conf` files
 
-5. Build an application:
+6. Build an application:
    - Use the nRF Connect extension in VS Code
    - Or use the provided build scripts:
      ```bash
@@ -32,7 +42,7 @@ cd Juxta5
      ./applications/juxta-file-system/build.sh
      ```
 
-6. Connect to RTT Server (Terminal):
+7. Connect to RTT Server (Terminal):
    ```bash
    # Install JLinkRTTClient if not already installed
    brew install segger-jlink   # macOS
@@ -99,3 +109,7 @@ Multiple build configurations are available:
 - Build artifacts are stored in the `build` directory (ignored by git)
 - VS Code workspace settings ensure consistent development environment
 - **FRAM Libraries**: `juxta_fram` and `juxta_framfs` are available for applications 
+
+## Coding Agents
+
+Utilize Zephyr examples here: /opt/nordic/ncs/v3.0.2/zephyr/samples/bluetooth/

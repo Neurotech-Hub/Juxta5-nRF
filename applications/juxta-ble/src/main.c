@@ -48,6 +48,15 @@ static struct k_work state_work;
 /* Advertising and scanning parameters */
 #define ADVERTISING_DURATION_MS 5000 /* 5 seconds */
 #define SCANNING_DURATION_MS 10000   /* 10 seconds */
+#define SCAN_INTERVAL 0x0640         /* Scan interval of 1000ms (units of 0.625ms) */
+#define SCAN_WINDOW 0x0320           /* Scan window of 500ms (units of 0.625ms) */
+
+static const struct bt_le_scan_param scan_params = {
+    .type = BT_LE_SCAN_TYPE_PASSIVE,
+    .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+    .interval = SCAN_INTERVAL,
+    .window = SCAN_WINDOW,
+};
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -157,13 +166,12 @@ static void print_discovered_devices(void)
 /**
  * @brief BLE scan callback
  */
-static void scan_cb(const struct bt_le_scan_recv_info *info, struct net_buf_simple *buf)
+static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
+                    struct net_buf_simple *buf)
 {
     char addr_str[BT_ADDR_LE_STR_LEN];
     char name[16] = {0}; // Reduced from 32 to 16 bytes
     bool name_found = false;
-
-    bt_addr_le_to_str(info->addr, addr_str, sizeof(addr_str));
 
     /* Parse advertising data for device name */
     while (buf->len > 1)
@@ -190,6 +198,15 @@ static void scan_cb(const struct bt_le_scan_recv_info *info, struct net_buf_simp
             {
                 memcpy(name, net_buf_simple_pull_mem(buf, len), len);
                 name_found = true;
+
+                // Only process devices with names starting with "JUXTA_"
+                if (strncmp(name, "JUXTA_", 6) == 0)
+                {
+                    bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+                    LOG_INF("Found JUXTA device: %s, Name: %s, RSSI: %d",
+                            addr_str, name, rssi);
+                    add_discovered_device(addr, rssi, name);
+                }
             }
         }
         else
@@ -197,11 +214,6 @@ static void scan_cb(const struct bt_le_scan_recv_info *info, struct net_buf_simp
             net_buf_simple_pull_mem(buf, len);
         }
     }
-
-    /* Add to discovered devices list */
-    add_discovered_device(info->addr, info->rssi, name_found ? name : NULL);
-
-    LOG_DBG("Found: %s, RSSI: %d", addr_str, info->rssi);
 }
 
 /**
@@ -255,7 +267,7 @@ static int juxta_start_scanning(void)
     /* Clear previous discoveries */
     clear_discovered_devices();
 
-    err = bt_le_scan_start(BT_LE_SCAN_PASSIVE, NULL);
+    err = bt_le_scan_start(&scan_params, scan_cb);
     if (err)
     {
         LOG_ERR("Failed to start scanning: %d", err);
@@ -438,7 +450,7 @@ static int init_bluetooth(void)
 
     /* Initialize scan callback */
     static struct bt_le_scan_cb scan_callbacks = {
-        .recv = scan_cb,
+        .recv = NULL /* We'll use the direct callback instead */
     };
     bt_le_scan_cb_register(&scan_callbacks);
 
@@ -475,8 +487,8 @@ int main(void)
     int ret;
 
     LOG_INF("🚀 Starting JUXTA BLE Application");
-    LOG_INF("📋 Board: Juxta5-1_ADC");
-    LOG_INF("📟 Device: nRF52805");
+    LOG_INF("📋 Board: nRF52832 DK");
+    LOG_INF("📟 Device: nRF52832");
     LOG_INF("📱 Device will alternate between advertising and scanning");
     LOG_INF("📢 Advertising duration: %d seconds", ADVERTISING_DURATION_MS / 1000);
     LOG_INF("🔍 Scanning duration: %d seconds", SCANNING_DURATION_MS / 1000);
