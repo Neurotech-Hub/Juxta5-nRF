@@ -14,30 +14,26 @@ LOG_MODULE_REGISTER(juxta_fram, CONFIG_JUXTA_FRAM_LOG_LEVEL);
 /* Internal helper functions */
 static int fram_send_command(struct juxta_fram_device *fram_dev, uint8_t cmd);
 static int fram_write_enable(struct juxta_fram_device *fram_dev);
-static int fram_ensure_spi_mode(struct juxta_fram_device *fram_dev);
 
-/* Device tree initialization function - commented out due to missing DT macros
-int juxta_fram_init_dt(struct juxta_fram_device *fram_dev,
-                       const struct device *fram_node,
-                       const struct gpio_dt_spec *cs_spec)
+/* SPI transaction helper */
+static int fram_spi_transceive(struct juxta_fram_device *fram_dev,
+                               const struct spi_buf_set *tx_bufs,
+                               const struct spi_buf_set *rx_bufs)
 {
-    if (!fram_dev || !fram_node || !cs_spec)
-    {
-        return JUXTA_FRAM_ERROR;
-    }
+    int ret;
 
-    // Get the SPI bus device
-    const struct device *spi_dev = device_get_binding(DT_BUS_LABEL(fram_node));
-    if (!spi_dev)
-    {
-        spi_dev = DEVICE_DT_GET(DT_BUS(fram_node));
-    }
+    /* Assert CS */
+    gpio_pin_set_dt(&fram_dev->cs_gpio, 0);
 
-    uint32_t frequency = DT_PROP(fram_node, spi_max_frequency);
+    /* Perform SPI transaction */
+    ret = spi_transceive(fram_dev->spi_dev, &fram_dev->spi_cfg,
+                         tx_bufs, rx_bufs);
 
-    return juxta_fram_init(fram_dev, spi_dev, frequency, cs_spec);
+    /* Deassert CS */
+    gpio_pin_set_dt(&fram_dev->cs_gpio, 1);
+
+    return ret;
 }
-*/
 
 int juxta_fram_init(struct juxta_fram_device *fram_dev,
                     const struct device *spi_dev,
@@ -56,9 +52,9 @@ int juxta_fram_init(struct juxta_fram_device *fram_dev,
         return JUXTA_FRAM_ERROR_INIT;
     }
 
-    if (!gpio_is_ready_dt(cs_spec))
+    if (!device_is_ready(cs_spec->port))
     {
-        LOG_ERR("CS GPIO not ready");
+        LOG_ERR("CS GPIO device not ready");
         return JUXTA_FRAM_ERROR_INIT;
     }
 
@@ -69,26 +65,29 @@ int juxta_fram_init(struct juxta_fram_device *fram_dev,
         LOG_WRN("Limiting SPI frequency to %d Hz", frequency);
     }
 
-    /* Store GPIO spec for LED control */
-    fram_dev->cs_gpio = *cs_spec;
+    /* Store SPI device */
+    fram_dev->spi_dev = spi_dev;
 
     /* Configure SPI */
-    fram_dev->spi_dev = spi_dev;
     fram_dev->spi_cfg.frequency = frequency;
     fram_dev->spi_cfg.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB;
-    fram_dev->spi_cfg.slave = 0; /* Will be set from device tree if using DT init */
-    fram_dev->spi_cfg.cs.gpio.port = cs_spec->port;
-    fram_dev->spi_cfg.cs.gpio.pin = cs_spec->pin;
-    fram_dev->spi_cfg.cs.gpio.dt_flags = cs_spec->dt_flags;
-    fram_dev->spi_cfg.cs.delay = 0;
+    fram_dev->spi_cfg.slave = 0;
+
+    /* Configure CS GPIO */
+    fram_dev->cs_gpio = *cs_spec;
+    int ret = gpio_pin_configure_dt(&fram_dev->cs_gpio, GPIO_OUTPUT_ACTIVE);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure CS pin: %d", ret);
+        return JUXTA_FRAM_ERROR_INIT;
+    }
+
+    /* Deassert CS initially */
+    gpio_pin_set_dt(&fram_dev->cs_gpio, 1);
 
     fram_dev->initialized = true;
-    fram_dev->led_mode = false; /* Start in SPI mode */
 
-    LOG_INF("FRAM initialized: freq=%d Hz, CS=P%d.%02d",
-            frequency,
-            cs_spec->port ? 1 : 0,
-            cs_spec->pin);
+    LOG_INF("FRAM initialized: freq=%d Hz", frequency);
 
     return JUXTA_FRAM_OK;
 }
@@ -99,13 +98,6 @@ int juxta_fram_read_id(struct juxta_fram_device *fram_dev,
     if (!fram_dev || !fram_dev->initialized)
     {
         return JUXTA_FRAM_ERROR_INIT;
-    }
-
-    /* Ensure we're in SPI mode for FRAM operations */
-    int ret = fram_ensure_spi_mode(fram_dev);
-    if (ret < 0)
-    {
-        return ret;
     }
 
     uint8_t tx_rdid[] = {
@@ -127,7 +119,7 @@ int juxta_fram_read_id(struct juxta_fram_device *fram_dev,
         .buffers = &rx_buf,
         .count = 1};
 
-    ret = spi_transceive(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx, &rx);
+    int ret = fram_spi_transceive(fram_dev, &tx, &rx);
     if (ret < 0)
     {
         LOG_ERR("Failed to read device ID: %d", ret);
@@ -153,7 +145,6 @@ int juxta_fram_read_id(struct juxta_fram_device *fram_dev,
         read_id.product_id_1 != JUXTA_FRAM_PRODUCT_ID_1 ||
         read_id.product_id_2 != JUXTA_FRAM_PRODUCT_ID_2)
     {
-
         LOG_ERR("Device ID mismatch:");
         LOG_ERR("  Expected: 0x%02X 0x%02X 0x%02X 0x%02X",
                 JUXTA_FRAM_MANUFACTURER_ID, JUXTA_FRAM_CONTINUATION_CODE,
@@ -184,15 +175,8 @@ int juxta_fram_write(struct juxta_fram_device *fram_dev,
         return JUXTA_FRAM_ERROR_ADDR;
     }
 
-    /* Ensure we're in SPI mode for FRAM operations */
-    int ret = fram_ensure_spi_mode(fram_dev);
-    if (ret < 0)
-    {
-        return ret;
-    }
-
     /* Send Write Enable command */
-    ret = fram_write_enable(fram_dev);
+    int ret = fram_write_enable(fram_dev);
     if (ret < 0)
     {
         return ret;
@@ -216,7 +200,7 @@ int juxta_fram_write(struct juxta_fram_device *fram_dev,
         .buffers = &tx_buf_desc,
         .count = 1};
 
-    ret = spi_write(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx);
+    ret = fram_spi_transceive(fram_dev, &tx, NULL);
     if (ret < 0)
     {
         LOG_ERR("Failed to write FRAM data: %d", ret);
@@ -243,13 +227,6 @@ int juxta_fram_read(struct juxta_fram_device *fram_dev,
         return JUXTA_FRAM_ERROR_ADDR;
     }
 
-    /* Ensure we're in SPI mode for FRAM operations */
-    int ret = fram_ensure_spi_mode(fram_dev);
-    if (ret < 0)
-    {
-        return ret;
-    }
-
     /* Prepare read command with address */
     uint8_t tx_buf[4 + length]; /* cmd + 3-byte address + dummy bytes */
     uint8_t rx_buf[4 + length];
@@ -273,7 +250,7 @@ int juxta_fram_read(struct juxta_fram_device *fram_dev,
         .buffers = &rx_buf_desc,
         .count = 1};
 
-    ret = spi_transceive(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx, &rx);
+    int ret = fram_spi_transceive(fram_dev, &tx, &rx);
     if (ret < 0)
     {
         LOG_ERR("Failed to read FRAM data: %d", ret);
@@ -337,161 +314,6 @@ int juxta_fram_test(struct juxta_fram_device *fram_dev, uint32_t test_address)
     return JUXTA_FRAM_OK;
 }
 
-/* ========================================================================
- * LED Helper Functions (for shared CS/LED pin)
- * ======================================================================== */
-
-int juxta_fram_led_mode_enable(struct juxta_fram_device *fram_dev)
-{
-    if (!fram_dev || !fram_dev->initialized)
-    {
-        return JUXTA_FRAM_ERROR_INIT;
-    }
-
-    if (fram_dev->led_mode)
-    {
-        /* Already in LED mode */
-        return JUXTA_FRAM_OK;
-    }
-
-    /* Configure the pin as GPIO output */
-    int ret = gpio_pin_configure_dt(&fram_dev->cs_gpio, GPIO_OUTPUT_INACTIVE);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to configure CS pin for LED mode: %d", ret);
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    fram_dev->led_mode = true;
-    LOG_DBG("Switched to LED mode (P%d.%02d)",
-            fram_dev->cs_gpio.port ? 1 : 0,
-            fram_dev->cs_gpio.pin);
-
-    return JUXTA_FRAM_OK;
-}
-
-int juxta_fram_led_mode_disable(struct juxta_fram_device *fram_dev)
-{
-    if (!fram_dev || !fram_dev->initialized)
-    {
-        return JUXTA_FRAM_ERROR_INIT;
-    }
-
-    if (!fram_dev->led_mode)
-    {
-        /* Already in SPI mode */
-        return JUXTA_FRAM_OK;
-    }
-
-    /*
-     * When switching back to SPI mode, we don't need to reconfigure the pin
-     * because the SPI driver will handle the CS configuration during transactions.
-     * We just need to update our internal state.
-     */
-    fram_dev->led_mode = false;
-    LOG_DBG("Switched to SPI mode (P%d.%02d)",
-            fram_dev->cs_gpio.port ? 1 : 0,
-            fram_dev->cs_gpio.pin);
-
-    return JUXTA_FRAM_OK;
-}
-
-int juxta_fram_led_on(struct juxta_fram_device *fram_dev)
-{
-    if (!fram_dev || !fram_dev->initialized)
-    {
-        return JUXTA_FRAM_ERROR_INIT;
-    }
-
-    if (!fram_dev->led_mode)
-    {
-        LOG_ERR("LED operation attempted while in SPI mode. Call juxta_fram_led_mode_enable() first.");
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    int ret = gpio_pin_set_dt(&fram_dev->cs_gpio, 1);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to turn LED on: %d", ret);
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    LOG_DBG("LED turned on");
-    return JUXTA_FRAM_OK;
-}
-
-int juxta_fram_led_off(struct juxta_fram_device *fram_dev)
-{
-    if (!fram_dev || !fram_dev->initialized)
-    {
-        return JUXTA_FRAM_ERROR_INIT;
-    }
-
-    if (!fram_dev->led_mode)
-    {
-        LOG_ERR("LED operation attempted while in SPI mode. Call juxta_fram_led_mode_enable() first.");
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    int ret = gpio_pin_set_dt(&fram_dev->cs_gpio, 0);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to turn LED off: %d", ret);
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    LOG_DBG("LED turned off");
-    return JUXTA_FRAM_OK;
-}
-
-int juxta_fram_led_toggle(struct juxta_fram_device *fram_dev)
-{
-    if (!fram_dev || !fram_dev->initialized)
-    {
-        return JUXTA_FRAM_ERROR_INIT;
-    }
-
-    if (!fram_dev->led_mode)
-    {
-        LOG_ERR("LED operation attempted while in SPI mode. Call juxta_fram_led_mode_enable() first.");
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    int ret = gpio_pin_toggle_dt(&fram_dev->cs_gpio);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to toggle LED: %d", ret);
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    LOG_DBG("LED toggled");
-    return JUXTA_FRAM_OK;
-}
-
-int juxta_fram_led_set(struct juxta_fram_device *fram_dev, bool state)
-{
-    if (!fram_dev || !fram_dev->initialized)
-    {
-        return JUXTA_FRAM_ERROR_INIT;
-    }
-
-    if (!fram_dev->led_mode)
-    {
-        LOG_ERR("LED operation attempted while in SPI mode. Call juxta_fram_led_mode_enable() first.");
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    int ret = gpio_pin_set_dt(&fram_dev->cs_gpio, state ? 1 : 0);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to set LED state: %d", ret);
-        return JUXTA_FRAM_ERROR_MODE;
-    }
-
-    LOG_DBG("LED set to %s", state ? "ON" : "OFF");
-    return JUXTA_FRAM_OK;
-}
-
 /* Internal helper functions */
 
 static int fram_send_command(struct juxta_fram_device *fram_dev, uint8_t cmd)
@@ -503,7 +325,7 @@ static int fram_send_command(struct juxta_fram_device *fram_dev, uint8_t cmd)
         .buffers = &tx_buf,
         .count = 1};
 
-    int ret = spi_write(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx);
+    int ret = fram_spi_transceive(fram_dev, &tx, NULL);
     if (ret < 0)
     {
         LOG_ERR("Failed to send command 0x%02X: %d", cmd, ret);
@@ -516,14 +338,4 @@ static int fram_send_command(struct juxta_fram_device *fram_dev, uint8_t cmd)
 static int fram_write_enable(struct juxta_fram_device *fram_dev)
 {
     return fram_send_command(fram_dev, JUXTA_FRAM_CMD_WREN);
-}
-
-static int fram_ensure_spi_mode(struct juxta_fram_device *fram_dev)
-{
-    if (fram_dev->led_mode)
-    {
-        LOG_WRN("Automatically switching from LED mode to SPI mode for FRAM operation");
-        return juxta_fram_led_mode_disable(fram_dev);
-    }
-    return JUXTA_FRAM_OK;
 }

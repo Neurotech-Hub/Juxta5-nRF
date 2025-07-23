@@ -33,14 +33,6 @@ cd Juxta5
 
 6. Build an application:
    - Use the nRF Connect extension in VS Code
-   - Or use the provided build scripts:
-     ```bash
-     # For juxta-mvp (original working application)
-     ./applications/juxta-mvp/build_adc.sh
-     
-     # For juxta-file-system (FRAM library testing)
-     ./applications/juxta-file-system/build.sh
-     ```
 
 7. Connect to RTT Server (Terminal):
    ```bash
