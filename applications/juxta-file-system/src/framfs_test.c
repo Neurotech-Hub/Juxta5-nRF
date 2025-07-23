@@ -19,6 +19,7 @@ LOG_MODULE_REGISTER(framfs_test, CONFIG_LOG_DEFAULT_LEVEL);
 
 /* Device tree definitions */
 #define LED_NODE DT_ALIAS(led0)
+#define FRAM_NODE DT_ALIAS(spi_fram)
 
 /* GPIO specifications */
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
@@ -28,7 +29,31 @@ static struct juxta_fram_device fram_dev;
 static struct juxta_framfs_context fs_ctx;
 
 /**
- * @brief Test file system initialization
+ * @brief Clear FRAM contents
+ */
+static int clear_fram(void)
+{
+    uint8_t clear_buffer[256] = {0};
+    int ret;
+
+    LOG_INF("🧹 Clearing FRAM contents...");
+
+    /* Clear first 4KB in 256-byte chunks */
+    for (uint32_t addr = 0; addr < 4096; addr += sizeof(clear_buffer))
+    {
+        ret = juxta_fram_write(&fram_dev, addr, clear_buffer, sizeof(clear_buffer));
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to clear FRAM at 0x%06X: %d", addr, ret);
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Initialize file system for testing
  */
 static int test_framfs_init(void)
 {
@@ -36,23 +61,51 @@ static int test_framfs_init(void)
 
     LOG_INF("🔧 Testing file system initialization...");
 
-    /* Get SPI device by label */
-    const struct device *spi_dev = device_get_binding("SPI_0");
-    if (!spi_dev)
+    /* Get SPI device using device tree */
+    const struct device *spi_dev = DEVICE_DT_GET(DT_BUS(FRAM_NODE));
+    if (!device_is_ready(spi_dev))
     {
         LOG_ERR("Failed to get SPI device");
         return -1;
     }
 
-    /* Initialize FRAM using direct initialization */
-    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &led); /* 1MHz SPI */
+    /* Initialize FRAM first */
+    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &led);
     if (ret < 0)
     {
         LOG_ERR("Failed to initialize FRAM: %d", ret);
         return ret;
     }
 
-    /* Initialize file system */
+    /* Verify FRAM device ID */
+    ret = juxta_fram_read_id(&fram_dev, NULL);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to verify FRAM ID: %d", ret);
+        return ret;
+    }
+
+    /* Clear FRAM contents before formatting */
+    ret = clear_fram();
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Create a temporary context for formatting */
+    struct juxta_framfs_context temp_ctx;
+    temp_ctx.fram_dev = &fram_dev;
+
+    /* Format file system */
+    LOG_INF("📝 Formatting file system...");
+    ret = juxta_framfs_format(&temp_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to format file system: %d", ret);
+        return ret;
+    }
+
+    /* Now initialize file system with formatted FRAM */
     ret = juxta_framfs_init(&fs_ctx, &fram_dev);
     if (ret < 0)
     {
@@ -60,7 +113,7 @@ static int test_framfs_init(void)
         return ret;
     }
 
-    /* Get file system statistics */
+    /* Get initial file system stats */
     struct juxta_framfs_header stats;
     ret = juxta_framfs_get_stats(&fs_ctx, &stats);
     if (ret < 0)
@@ -69,14 +122,12 @@ static int test_framfs_init(void)
         return ret;
     }
 
-    LOG_INF("File system statistics:");
-    LOG_INF("  Magic:         0x%04X", stats.magic);
-    LOG_INF("  Version:       %d", stats.version);
-    LOG_INF("  File count:    %d/%d", stats.file_count, stats.max_files);
-    LOG_INF("  Next data:     0x%06X", stats.next_data_addr);
-    LOG_INF("  Total data:    %d bytes", stats.total_data_size);
+    LOG_INF("✅ File system initialized successfully:");
+    LOG_INF("  Magic:     0x%04X", stats.magic);
+    LOG_INF("  Version:   %d", stats.version);
+    LOG_INF("  Max files: %d", stats.max_files);
+    LOG_INF("  Data addr: 0x%06X", stats.next_data_addr);
 
-    LOG_INF("✅ File system initialization test passed");
     return 0;
 }
 
@@ -434,6 +485,183 @@ static int test_filesystem_stats(void)
 }
 
 /**
+ * @brief Simulate a data logging session
+ */
+static int test_data_logger_simulation(void)
+{
+    int ret;
+
+    LOG_INF("📊 Running Data Logger Simulation...");
+
+    /* Structure to simulate sensor data */
+    struct sensor_packet
+    {
+        uint32_t timestamp;
+        int16_t temperature; // 0.1°C
+        uint16_t humidity;   // 0.1%
+        uint32_t pressure;   // Pa
+        uint16_t light;      // lux
+        uint8_t battery;     // percentage
+        uint8_t flags;       // status flags
+    } __packed;
+
+    /* Create a sequence of timestamped files */
+    const char *timestamps[] = {
+        "202401201200", // 12:00
+        "202401201215", // 12:15
+        "202401201230", // 12:30
+        "202401201245", // 12:45
+        "202401201300"  // 13:00
+    };
+    int num_files = sizeof(timestamps) / sizeof(timestamps[0]);
+
+    /* Track total data written */
+    size_t total_bytes = 0;
+    int total_packets = 0;
+
+    LOG_INF("Starting data logging sequence with %d files", num_files);
+
+    for (int file_idx = 0; file_idx < num_files; file_idx++)
+    {
+        /* Create new file for this time period */
+        ret = juxta_framfs_create_active(&fs_ctx, timestamps[file_idx],
+                                         JUXTA_FRAMFS_TYPE_SENSOR_LOG);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to create file %s: %d", timestamps[file_idx], ret);
+            return ret;
+        }
+
+        LOG_INF("Created file: %s", timestamps[file_idx]);
+
+        /* Simulate collecting data for 15 minutes (1 sample every "minute") */
+        for (int minute = 0; minute < 15; minute++)
+        {
+            struct sensor_packet packet = {
+                .timestamp = k_uptime_get_32() + (minute * 60 * 1000),
+                .temperature = 200 + (minute % 5),  // 20.0°C - 20.4°C
+                .humidity = 500 + minute,           // 50.0% - 51.4%
+                .pressure = 101325 + (minute * 10), // Varying pressure
+                .light = 1000 + (minute * 50),      // Varying light
+                .battery = 95 - (file_idx * 2),     // Decreasing battery
+                .flags = 0x80 | (minute & 0x0F)     // Status flags
+            };
+
+            /* Write packet to current file */
+            ret = juxta_framfs_append(&fs_ctx, (uint8_t *)&packet, sizeof(packet));
+            if (ret < 0)
+            {
+                LOG_ERR("Failed to append packet %d to file %s: %d",
+                        minute, timestamps[file_idx], ret);
+                return ret;
+            }
+
+            total_bytes += sizeof(packet);
+            total_packets++;
+
+            /* Small delay between packets to prevent log overflow */
+            k_sleep(K_MSEC(10));
+
+            /* Every 5 packets, show a progress update */
+            if ((minute % 5) == 0)
+            {
+                LOG_INF("  Written %d packets to %s...", minute + 1, timestamps[file_idx]);
+                k_sleep(K_MSEC(100)); // Longer delay for log visibility
+            }
+        }
+
+        /* Get file info and verify size */
+        struct juxta_framfs_entry file_info;
+        ret = juxta_framfs_get_file_info(&fs_ctx, timestamps[file_idx], &file_info);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to get file info for %s: %d", timestamps[file_idx], ret);
+            return ret;
+        }
+
+        LOG_INF("File %s: %d bytes written", timestamps[file_idx], file_info.length);
+
+        /* Verify data by reading back last packet */
+        struct sensor_packet verify_packet;
+        ret = juxta_framfs_read(&fs_ctx, timestamps[file_idx],
+                                file_info.length - sizeof(struct sensor_packet),
+                                (uint8_t *)&verify_packet, sizeof(verify_packet));
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to read verification packet: %d", ret);
+            return ret;
+        }
+
+        LOG_INF("Last packet in %s:", timestamps[file_idx]);
+        LOG_INF("  Temperature: %d.%d°C",
+                verify_packet.temperature / 10, verify_packet.temperature % 10);
+        LOG_INF("  Humidity: %d.%d%%",
+                verify_packet.humidity / 10, verify_packet.humidity % 10);
+        LOG_INF("  Battery: %d%%", verify_packet.battery);
+
+        /* Seal file before moving to next */
+        ret = juxta_framfs_seal_active(&fs_ctx);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to seal file %s: %d", timestamps[file_idx], ret);
+            return ret;
+        }
+
+        /* Get filesystem stats periodically */
+        struct juxta_framfs_header stats;
+        ret = juxta_framfs_get_stats(&fs_ctx, &stats);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to getfilesystem stats: %d", ret);
+            return ret;
+        }
+
+        /* Calculate usage percentages */
+        float data_usage = ((float)stats.total_data_size / JUXTA_FRAM_SIZE_BYTES) * 100;
+        float file_usage = ((float)stats.file_count / stats.max_files) * 100;
+
+        LOG_INF("Filesystem status after file %d:", file_idx + 1);
+        LOG_INF("  Files: %d/%d (%.1f%% used)",
+                stats.file_count, stats.max_files, (double)file_usage);
+        LOG_INF("  Data: %d bytes (%.1f%% used)",
+                stats.total_data_size, (double)data_usage);
+        LOG_INF("  Next write address: 0x%06X", stats.next_data_addr);
+
+        k_sleep(K_MSEC(100)); // Small delay between files
+    }
+
+    /* Final statistics */
+    LOG_INF("📈 Data Logger Simulation Complete:");
+    LOG_INF("  Total files created: %d", num_files);
+    LOG_INF("  Total packets written: %d", total_packets);
+    LOG_INF("  Total bytes written: %d", total_bytes);
+    LOG_INF("  Average packet size: %d bytes",
+            total_bytes / total_packets);
+
+    /* List all files for verification */
+    char file_list[10][JUXTA_FRAMFS_FILENAME_LEN];
+    int file_count = juxta_framfs_list_files(&fs_ctx, file_list, 10);
+    if (file_count > 0)
+    {
+        LOG_INF("📁 Final File Listing:");
+        for (int i = 0; i < file_count; i++)
+        {
+            struct juxta_framfs_entry entry;
+            ret = juxta_framfs_get_file_info(&fs_ctx, file_list[i], &entry);
+            if (ret == 0)
+            {
+                LOG_INF("  %s: %d bytes, type=%d, flags=0x%02X",
+                        entry.filename, entry.length,
+                        entry.file_type, entry.flags);
+            }
+        }
+    }
+
+    LOG_INF("✅ Data logger simulation test passed!");
+    return 0;
+}
+
+/**
  * @brief Main file system test function
  */
 int framfs_test_main(void)
@@ -452,6 +680,10 @@ int framfs_test_main(void)
         return ret;
 
     ret = test_multiple_files();
+    if (ret < 0)
+        return ret;
+
+    ret = test_data_logger_simulation(); // Add the new test
     if (ret < 0)
         return ret;
 

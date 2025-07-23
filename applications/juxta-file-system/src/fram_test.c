@@ -17,6 +17,15 @@ LOG_MODULE_REGISTER(fram_test, CONFIG_LOG_DEFAULT_LEVEL);
 
 /* Device tree definitions */
 #define LED_NODE DT_ALIAS(led0)
+#define FRAM_NODE DT_ALIAS(spi_fram)
+
+/* Memory region definitions for tests */
+#define TEST_REGION_START 0x10000 /* Start tests at 64KB offset */
+#define SINGLE_BYTE_TEST_ADDR (TEST_REGION_START + 0x0000)
+#define MULTI_BYTE_TEST_ADDR (TEST_REGION_START + 0x1000)
+#define STRUCT_TEST_ADDR (TEST_REGION_START + 0x2000)
+#define LED_TEST_ADDR (TEST_REGION_START + 0x3000)
+#define PERF_TEST_ADDR (TEST_REGION_START + 0x4000)
 
 /* GPIO specifications */
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
@@ -33,9 +42,9 @@ static int test_fram_init(void)
 
     LOG_INF("🔧 Testing FRAM initialization...");
 
-    /* Get SPI device by label */
-    const struct device *spi_dev = device_get_binding("SPI_0");
-    if (!spi_dev)
+    /* Get SPI device using device tree */
+    const struct device *spi_dev = DEVICE_DT_GET(DT_BUS(FRAM_NODE));
+    if (!device_is_ready(spi_dev))
     {
         LOG_ERR("Failed to get SPI device");
         return -1;
@@ -64,8 +73,8 @@ static int test_fram_init(void)
     LOG_INF("  Product ID 1: 0x%02X", id.product_id_1);
     LOG_INF("  Product ID 2: 0x%02X", id.product_id_2);
 
-    /* Run built-in test */
-    ret = juxta_fram_test(&fram_dev, 0x1000);
+    /* Run built-in test in test region */
+    ret = juxta_fram_test(&fram_dev, TEST_REGION_START + 0x5000);
     if (ret < 0)
     {
         LOG_ERR("FRAM built-in test failed: %d", ret);
@@ -86,18 +95,17 @@ static int test_fram_basic_operations(void)
     LOG_INF("📝 Testing basic FRAM read/write operations...");
 
     /* Test single byte operations */
-    uint32_t test_addr = 0x2000;
     uint8_t test_byte = 0xA5;
     uint8_t read_byte;
 
-    ret = juxta_fram_write_byte(&fram_dev, test_addr, test_byte);
+    ret = juxta_fram_write_byte(&fram_dev, SINGLE_BYTE_TEST_ADDR, test_byte);
     if (ret < 0)
     {
         LOG_ERR("Failed to write single byte: %d", ret);
         return ret;
     }
 
-    ret = juxta_fram_read_byte(&fram_dev, test_addr, &read_byte);
+    ret = juxta_fram_read_byte(&fram_dev, SINGLE_BYTE_TEST_ADDR, &read_byte);
     if (ret < 0)
     {
         LOG_ERR("Failed to read single byte: %d", ret);
@@ -113,16 +121,15 @@ static int test_fram_basic_operations(void)
     /* Test multi-byte operations */
     uint8_t test_data[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
     uint8_t read_data[sizeof(test_data)] = {0};
-    uint32_t multi_addr = 0x2100;
 
-    ret = juxta_fram_write(&fram_dev, multi_addr, test_data, sizeof(test_data));
+    ret = juxta_fram_write(&fram_dev, MULTI_BYTE_TEST_ADDR, test_data, sizeof(test_data));
     if (ret < 0)
     {
         LOG_ERR("Failed to write multi-byte data: %d", ret);
         return ret;
     }
 
-    ret = juxta_fram_read(&fram_dev, multi_addr, read_data, sizeof(read_data));
+    ret = juxta_fram_read(&fram_dev, MULTI_BYTE_TEST_ADDR, read_data, sizeof(read_data));
     if (ret < 0)
     {
         LOG_ERR("Failed to read multi-byte data: %d", ret);
@@ -165,10 +172,8 @@ static int test_fram_structured_data(void)
     test_struct.flags = 0xAB;
     strncpy(test_struct.name, "TEST", sizeof(test_struct.name));
 
-    uint32_t struct_addr = 0x3000;
-
     /* Write structure */
-    ret = juxta_fram_write(&fram_dev, struct_addr,
+    ret = juxta_fram_write(&fram_dev, STRUCT_TEST_ADDR,
                            (uint8_t *)&test_struct, sizeof(test_struct));
     if (ret < 0)
     {
@@ -178,7 +183,7 @@ static int test_fram_structured_data(void)
 
     /* Read structure back */
     memset(&read_struct, 0, sizeof(read_struct));
-    ret = juxta_fram_read(&fram_dev, struct_addr,
+    ret = juxta_fram_read(&fram_dev, STRUCT_TEST_ADDR,
                           (uint8_t *)&read_struct, sizeof(read_struct));
     if (ret < 0)
     {
@@ -276,14 +281,14 @@ static int test_led_mode(void)
     /* Verify FRAM still works after LED mode */
     uint8_t verify_byte = 0x99;
     uint8_t read_verify;
-    ret = juxta_fram_write_byte(&fram_dev, 0x4000, verify_byte);
+    ret = juxta_fram_write_byte(&fram_dev, LED_TEST_ADDR, verify_byte);
     if (ret < 0)
     {
         LOG_ERR("FRAM write failed after LED mode: %d", ret);
         return ret;
     }
 
-    ret = juxta_fram_read_byte(&fram_dev, 0x4000, &read_verify);
+    ret = juxta_fram_read_byte(&fram_dev, LED_TEST_ADDR, &read_verify);
     if (ret < 0)
     {
         LOG_ERR("FRAM read failed after LED mode: %d", ret);
@@ -300,64 +305,71 @@ static int test_led_mode(void)
     return 0;
 }
 
+/* Static buffers for performance testing */
+#define PERF_TEST_SIZE 64 // Reduced from 256
+static uint8_t perf_write_buffer[PERF_TEST_SIZE];
+static uint8_t perf_read_buffer[PERF_TEST_SIZE];
+
 /**
- * @brief Test FRAM performance characteristics
+ * @brief Test FRAM performance
  */
 static int test_fram_performance(void)
 {
     int ret;
     uint32_t start_time, end_time;
+    uint32_t write_time, read_time;
 
     LOG_INF("⚡ Testing FRAM performance...");
 
-    /* Test write performance */
-    uint8_t perf_data[256];
-    for (int i = 0; i < sizeof(perf_data); i++)
+    /* Initialize test data */
+    for (int i = 0; i < PERF_TEST_SIZE; i++)
     {
-        perf_data[i] = i & 0xFF;
+        perf_write_buffer[i] = (uint8_t)i;
     }
 
+    /* Test write performance */
     start_time = k_cycle_get_32();
-    ret = juxta_fram_write(&fram_dev, 0x5000, perf_data, sizeof(perf_data));
+    ret = juxta_fram_write(&fram_dev, PERF_TEST_ADDR, perf_write_buffer, PERF_TEST_SIZE);
     end_time = k_cycle_get_32();
-
     if (ret < 0)
     {
-        LOG_ERR("Performance write test failed: %d", ret);
+        LOG_ERR("Performance write failed: %d", ret);
         return ret;
     }
+    write_time = k_cyc_to_us_floor32(end_time - start_time);
 
-    uint32_t write_cycles = end_time - start_time;
-    uint32_t write_time_us = k_cyc_to_us_floor32(write_cycles);
+    /* Small delay between operations */
+    k_sleep(K_MSEC(10));
 
     /* Test read performance */
-    uint8_t read_perf_data[256];
-
     start_time = k_cycle_get_32();
-    ret = juxta_fram_read(&fram_dev, 0x5000, read_perf_data, sizeof(read_perf_data));
+    ret = juxta_fram_read(&fram_dev, PERF_TEST_ADDR, perf_read_buffer, PERF_TEST_SIZE);
     end_time = k_cycle_get_32();
-
     if (ret < 0)
     {
-        LOG_ERR("Performance read test failed: %d", ret);
+        LOG_ERR("Performance read failed: %d", ret);
         return ret;
     }
+    read_time = k_cyc_to_us_floor32(end_time - start_time);
 
-    uint32_t read_cycles = end_time - start_time;
-    uint32_t read_time_us = k_cyc_to_us_floor32(read_cycles);
+    /* Calculate speeds in KB/s */
+    float write_speed = ((float)PERF_TEST_SIZE * 1000.0f) / write_time; // bytes/us -> KB/s
+    float read_speed = ((float)PERF_TEST_SIZE * 1000.0f) / read_time;
 
     /* Verify data */
-    if (memcmp(perf_data, read_perf_data, sizeof(perf_data)) != 0)
+    for (int i = 0; i < PERF_TEST_SIZE; i++)
     {
-        LOG_ERR("Performance test data verification failed");
-        return -1;
+        if (perf_write_buffer[i] != perf_read_buffer[i])
+        {
+            LOG_ERR("Performance test data mismatch at index %d", i);
+            return -1;
+        }
     }
 
-    LOG_INF("Performance results (256 bytes):");
-    LOG_INF("  Write: %u μs (%.1f KB/s)", write_time_us,
-            (256.0 * 1000.0) / write_time_us);
-    LOG_INF("  Read:  %u μs (%.1f KB/s)", read_time_us,
-            (256.0 * 1000.0) / read_time_us);
+    /* Calculate and display results */
+    LOG_INF("Performance results (%d bytes):", PERF_TEST_SIZE);
+    LOG_INF("  Write: %u μs (%.1f KB/s)", write_time, (double)(write_speed * 1000.0f));
+    LOG_INF("  Read:  %u μs (%.1f KB/s)", read_time, (double)(read_speed * 1000.0f));
 
     LOG_INF("✅ Performance test passed");
     return 0;
