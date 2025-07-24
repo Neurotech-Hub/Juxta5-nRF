@@ -23,6 +23,16 @@ static int framfs_find_active_file(struct juxta_framfs_context *ctx);
 static uint32_t framfs_get_entry_addr(uint16_t index);
 static uint32_t framfs_get_data_start_addr(void);
 
+/* MAC table helper functions */
+static int framfs_read_mac_header(struct juxta_framfs_context *ctx);
+static int framfs_write_mac_header(struct juxta_framfs_context *ctx);
+static int framfs_read_mac_entry(struct juxta_framfs_context *ctx, uint8_t index,
+                                 struct juxta_framfs_mac_entry *entry);
+static int framfs_write_mac_entry(struct juxta_framfs_context *ctx, uint8_t index,
+                                  const struct juxta_framfs_mac_entry *entry);
+static uint32_t framfs_get_mac_header_addr(void);
+static uint32_t framfs_get_mac_entry_addr(uint8_t index);
+
 /* ========================================================================
  * File System Management Functions
  * ======================================================================== */
@@ -63,6 +73,22 @@ int juxta_framfs_init(struct juxta_framfs_context *ctx,
         }
     }
 
+    /* Try to read existing MAC header */
+    ret = framfs_read_mac_header(ctx);
+    if (ret < 0 || ctx->mac_header.magic != JUXTA_FRAMFS_MAC_MAGIC)
+    {
+        LOG_WRN("MAC table header not found or invalid, initializing new MAC table");
+        LOG_INF("Initializing new MAC table");
+
+        /* Initialize MAC table */
+        ret = juxta_framfs_mac_clear(ctx);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to initialize MAC table: %d", ret);
+            return ret;
+        }
+    }
+
     /* Validate header */
     if (ctx->header.magic != JUXTA_FRAMFS_MAGIC)
     {
@@ -75,6 +101,20 @@ int juxta_framfs_init(struct juxta_framfs_context *ctx,
     {
         LOG_WRN("File system version mismatch: %d (expected %d)",
                 ctx->header.version, JUXTA_FRAMFS_VERSION);
+    }
+
+    /* Validate MAC header (after ensuring it's initialized) */
+    if (ctx->mac_header.magic != JUXTA_FRAMFS_MAC_MAGIC)
+    {
+        LOG_ERR("Invalid MAC table magic: 0x%04X (expected 0x%04X)",
+                ctx->mac_header.magic, JUXTA_FRAMFS_MAC_MAGIC);
+        return JUXTA_FRAMFS_ERROR_INVALID;
+    }
+
+    if (ctx->mac_header.version != JUXTA_FRAMFS_MAC_VERSION)
+    {
+        LOG_WRN("MAC table version mismatch: %d (expected %d)",
+                ctx->mac_header.version, JUXTA_FRAMFS_MAC_VERSION);
     }
 
     /* Find active file if any */
@@ -597,5 +637,303 @@ static uint32_t framfs_get_entry_addr(uint16_t index)
 static uint32_t framfs_get_data_start_addr(void)
 {
     return sizeof(struct juxta_framfs_header) +
+           (JUXTA_FRAMFS_MAX_FILES * sizeof(struct juxta_framfs_entry)) +
+           sizeof(struct juxta_framfs_mac_header) +
+           (JUXTA_FRAMFS_MAX_MAC_ADDRESSES * sizeof(struct juxta_framfs_mac_entry));
+}
+
+/* ========================================================================
+ * MAC Table Helper Functions
+ * ======================================================================== */
+
+static uint32_t framfs_get_mac_header_addr(void)
+{
+    return sizeof(struct juxta_framfs_header) +
            (JUXTA_FRAMFS_MAX_FILES * sizeof(struct juxta_framfs_entry));
+}
+
+static uint32_t framfs_get_mac_entry_addr(uint8_t index)
+{
+    return framfs_get_mac_header_addr() +
+           sizeof(struct juxta_framfs_mac_header) +
+           (index * sizeof(struct juxta_framfs_mac_entry));
+}
+
+static int framfs_read_mac_header(struct juxta_framfs_context *ctx)
+{
+    uint32_t addr = framfs_get_mac_header_addr();
+    return juxta_fram_read(ctx->fram_dev, addr,
+                           (uint8_t *)&ctx->mac_header, sizeof(ctx->mac_header));
+}
+
+static int framfs_write_mac_header(struct juxta_framfs_context *ctx)
+{
+    uint32_t addr = framfs_get_mac_header_addr();
+    return juxta_fram_write(ctx->fram_dev, addr,
+                            (uint8_t *)&ctx->mac_header, sizeof(ctx->mac_header));
+}
+
+static int framfs_read_mac_entry(struct juxta_framfs_context *ctx, uint8_t index,
+                                 struct juxta_framfs_mac_entry *entry)
+{
+    if (index >= JUXTA_FRAMFS_MAX_MAC_ADDRESSES)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    uint32_t addr = framfs_get_mac_entry_addr(index);
+    return juxta_fram_read(ctx->fram_dev, addr, (uint8_t *)entry, sizeof(*entry));
+}
+
+static int framfs_write_mac_entry(struct juxta_framfs_context *ctx, uint8_t index,
+                                  const struct juxta_framfs_mac_entry *entry)
+{
+    if (index >= JUXTA_FRAMFS_MAX_MAC_ADDRESSES)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    uint32_t addr = framfs_get_mac_entry_addr(index);
+    return juxta_fram_write(ctx->fram_dev, addr, (uint8_t *)entry, sizeof(*entry));
+}
+
+/* ========================================================================
+ * MAC Address Table API Functions
+ * ======================================================================== */
+
+int juxta_framfs_mac_find_or_add(struct juxta_framfs_context *ctx,
+                                 const uint8_t *mac_address,
+                                 uint8_t *index)
+{
+    if (!ctx || !ctx->initialized || !mac_address || !index)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* First try to find existing MAC address */
+    int ret = juxta_framfs_mac_find(ctx, mac_address, index);
+    if (ret == 0)
+    {
+        /* Found existing MAC, increment usage */
+        ret = juxta_framfs_mac_increment_usage(ctx, *index);
+        return ret;
+    }
+
+    /* MAC not found, check if table is full */
+    if (ctx->mac_header.entry_count >= JUXTA_FRAMFS_MAX_MAC_ADDRESSES)
+    {
+        LOG_ERR("MAC address table is full (%d/%d)",
+                ctx->mac_header.entry_count, JUXTA_FRAMFS_MAX_MAC_ADDRESSES);
+        return JUXTA_FRAMFS_ERROR_MAC_FULL;
+    }
+
+    /* Add new MAC address */
+    struct juxta_framfs_mac_entry new_entry;
+    memset(&new_entry, 0, sizeof(new_entry));
+    memcpy(new_entry.mac_address, mac_address, JUXTA_FRAMFS_MAC_ADDRESS_SIZE);
+    new_entry.usage_count = 1;
+    new_entry.flags = 0x01; /* Valid entry */
+
+    /* Write to next available slot */
+    uint8_t new_index = ctx->mac_header.entry_count;
+    ret = framfs_write_mac_entry(ctx, new_index, &new_entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write MAC entry: %d", ret);
+        return ret;
+    }
+
+    /* Update header */
+    ctx->mac_header.entry_count++;
+    ctx->mac_header.total_usage++;
+    ret = framfs_write_mac_header(ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to update MAC header: %d", ret);
+        return ret;
+    }
+
+    *index = new_index;
+    LOG_DBG("Added MAC address at index %d", new_index);
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_mac_find(struct juxta_framfs_context *ctx,
+                          const uint8_t *mac_address,
+                          uint8_t *index)
+{
+    if (!ctx || !ctx->initialized || !mac_address || !index)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Search through all valid entries */
+    for (uint8_t i = 0; i < ctx->mac_header.entry_count; i++)
+    {
+        struct juxta_framfs_mac_entry entry;
+        int ret = framfs_read_mac_entry(ctx, i, &entry);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to read MAC entry %d: %d", i, ret);
+            continue;
+        }
+
+        if ((entry.flags & 0x01) && /* Valid entry */
+            memcmp(entry.mac_address, mac_address, JUXTA_FRAMFS_MAC_ADDRESS_SIZE) == 0)
+        {
+            *index = i;
+            return JUXTA_FRAMFS_OK;
+        }
+    }
+
+    return JUXTA_FRAMFS_ERROR_MAC_NOT_FOUND;
+}
+
+int juxta_framfs_mac_get_by_index(struct juxta_framfs_context *ctx,
+                                  uint8_t index,
+                                  uint8_t *mac_address)
+{
+    if (!ctx || !ctx->initialized || !mac_address)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    if (index >= ctx->mac_header.entry_count)
+    {
+        LOG_ERR("MAC index out of range: %d >= %d", index, ctx->mac_header.entry_count);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    struct juxta_framfs_mac_entry entry;
+    int ret = framfs_read_mac_entry(ctx, index, &entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read MAC entry %d: %d", index, ret);
+        return ret;
+    }
+
+    if (!(entry.flags & 0x01))
+    {
+        LOG_ERR("MAC entry %d is not valid", index);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    memcpy(mac_address, entry.mac_address, JUXTA_FRAMFS_MAC_ADDRESS_SIZE);
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_mac_increment_usage(struct juxta_framfs_context *ctx,
+                                     uint8_t index)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    if (index >= ctx->mac_header.entry_count)
+    {
+        LOG_ERR("MAC index out of range: %d >= %d", index, ctx->mac_header.entry_count);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    struct juxta_framfs_mac_entry entry;
+    int ret = framfs_read_mac_entry(ctx, index, &entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read MAC entry %d: %d", index, ret);
+        return ret;
+    }
+
+    if (!(entry.flags & 0x01))
+    {
+        LOG_ERR("MAC entry %d is not valid", index);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Increment usage count (saturate at 255) */
+    if (entry.usage_count < 255)
+    {
+        entry.usage_count++;
+    }
+
+    ret = framfs_write_mac_entry(ctx, index, &entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write MAC entry %d: %d", index, ret);
+        return ret;
+    }
+
+    /* Update header total usage */
+    ctx->mac_header.total_usage++;
+    ret = framfs_write_mac_header(ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to update MAC header: %d", ret);
+        return ret;
+    }
+
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_mac_get_stats(struct juxta_framfs_context *ctx,
+                               uint8_t *entry_count,
+                               uint32_t *total_usage)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    if (entry_count)
+    {
+        *entry_count = ctx->mac_header.entry_count;
+    }
+
+    if (total_usage)
+    {
+        *total_usage = ctx->mac_header.total_usage;
+    }
+
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx)
+{
+    if (!ctx || !ctx->fram_dev)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    LOG_INF("Clearing MAC address table");
+
+    /* Initialize MAC header */
+    memset(&ctx->mac_header, 0, sizeof(ctx->mac_header));
+    ctx->mac_header.magic = JUXTA_FRAMFS_MAC_MAGIC;
+    ctx->mac_header.version = JUXTA_FRAMFS_MAC_VERSION;
+    ctx->mac_header.entry_count = 0;
+    ctx->mac_header.total_usage = 0;
+
+    /* Write header to FRAM */
+    int ret = framfs_write_mac_header(ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write MAC header: %d", ret);
+        return ret;
+    }
+
+    /* Zero out all MAC entries */
+    uint8_t zero_buffer[sizeof(struct juxta_framfs_mac_entry)] = {0};
+    for (int i = 0; i < JUXTA_FRAMFS_MAX_MAC_ADDRESSES; i++)
+    {
+        uint32_t addr = framfs_get_mac_entry_addr(i);
+        ret = juxta_fram_write(ctx->fram_dev, addr, zero_buffer, sizeof(zero_buffer));
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to clear MAC entry %d: %d", i, ret);
+            return JUXTA_FRAMFS_ERROR;
+        }
+    }
+
+    LOG_INF("MAC address table cleared successfully");
+    return JUXTA_FRAMFS_OK;
 }

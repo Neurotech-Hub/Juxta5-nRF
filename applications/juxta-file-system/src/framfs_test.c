@@ -662,6 +662,140 @@ static int test_data_logger_simulation(void)
 }
 
 /**
+ * @brief Test MAC address table functionality
+ */
+static int test_mac_address_table(void)
+{
+    int ret;
+    uint8_t mac_index;
+    uint8_t retrieved_mac[6];
+    uint8_t entry_count;
+    uint32_t total_usage;
+
+    LOG_INF("📱 Testing MAC address table functionality...");
+
+    /* Test 1: Add new MAC addresses */
+    uint8_t test_macs[][6] = {
+        {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, /* Test MAC 1 */
+        {0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78}, /* Test MAC 2 */
+        {0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34}, /* Test MAC 3 */
+        {0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0}, /* Test MAC 4 */
+        {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, /* Duplicate of MAC 1 */
+    };
+
+    LOG_INF("Adding MAC addresses...");
+    for (int i = 0; i < 5; i++)
+    {
+        ret = juxta_framfs_mac_find_or_add(&fs_ctx, test_macs[i], &mac_index);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to add MAC %d: %d", i, ret);
+            return ret;
+        }
+        LOG_INF("MAC %d added at index %d", i, mac_index);
+    }
+
+    /* Test 2: Verify statistics */
+    ret = juxta_framfs_mac_get_stats(&fs_ctx, &entry_count, &total_usage);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to get MAC stats: %d", ret);
+        return ret;
+    }
+    LOG_INF("MAC table stats: %d entries, %d total usage", entry_count, total_usage);
+
+    /* Should have 4 unique entries (5 total adds, 1 duplicate) */
+    if (entry_count != 4)
+    {
+        LOG_ERR("Expected 4 entries, got %d", entry_count);
+        return -1;
+    }
+
+    /* Test 3: Find existing MAC addresses */
+    LOG_INF("Finding existing MAC addresses...");
+    for (int i = 0; i < 4; i++)
+    {
+        ret = juxta_framfs_mac_find(&fs_ctx, test_macs[i], &mac_index);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to find MAC %d: %d", i, ret);
+            return ret;
+        }
+        LOG_INF("Found MAC %d at index %d", i, mac_index);
+    }
+
+    /* Test 4: Get MAC by index */
+    LOG_INF("Retrieving MAC addresses by index...");
+    for (int i = 0; i < 4; i++)
+    {
+        ret = juxta_framfs_mac_get_by_index(&fs_ctx, i, retrieved_mac);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to get MAC by index %d: %d", i, ret);
+            return ret;
+        }
+        LOG_INF("Index %d: %02X:%02X:%02X:%02X:%02X:%02X", i,
+                retrieved_mac[0], retrieved_mac[1], retrieved_mac[2],
+                retrieved_mac[3], retrieved_mac[4], retrieved_mac[5]);
+    }
+
+    /* Test 5: Test non-existent MAC */
+    uint8_t non_existent_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    ret = juxta_framfs_mac_find(&fs_ctx, non_existent_mac, &mac_index);
+    if (ret != JUXTA_FRAMFS_ERROR_MAC_NOT_FOUND)
+    {
+        LOG_ERR("Expected MAC_NOT_FOUND error, got %d", ret);
+        return -1;
+    }
+    LOG_INF("✅ Correctly rejected non-existent MAC");
+
+    /* Test 6: Test invalid index */
+    ret = juxta_framfs_mac_get_by_index(&fs_ctx, 255, retrieved_mac);
+    if (ret >= 0)
+    {
+        LOG_ERR("Expected error for invalid index, got %d", ret);
+        return -1;
+    }
+    LOG_INF("✅ Correctly rejected invalid index");
+
+    /* Test 7: Add many more MAC addresses to test limits */
+    LOG_INF("Testing MAC table capacity...");
+    int added_count = 4;         /* Already added 4 above */
+    for (int i = 0; i < 20; i++) /* Try to add 20 more */
+    {
+        uint8_t new_mac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, (uint8_t)i};
+        ret = juxta_framfs_mac_find_or_add(&fs_ctx, new_mac, &mac_index);
+        if (ret == 0)
+        {
+            added_count++;
+            LOG_DBG("Added MAC %d at index %d", added_count - 1, mac_index);
+        }
+        else if (ret == JUXTA_FRAMFS_ERROR_MAC_FULL)
+        {
+            LOG_INF("MAC table full at %d entries", added_count);
+            break;
+        }
+        else
+        {
+            LOG_ERR("Unexpected error adding MAC %d: %d", i, ret);
+            return ret;
+        }
+    }
+
+    /* Get final statistics */
+    ret = juxta_framfs_mac_get_stats(&fs_ctx, &entry_count, &total_usage);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to get final MAC stats: %d", ret);
+        return ret;
+    }
+    LOG_INF("Final MAC table stats: %d entries, %d total usage", entry_count, total_usage);
+
+    LOG_INF("✅ MAC address table test passed");
+    return 0;
+}
+
+/**
  * @brief Main file system test function
  */
 int framfs_test_main(void)
@@ -696,6 +830,10 @@ int framfs_test_main(void)
         return ret;
 
     ret = test_filesystem_stats();
+    if (ret < 0)
+        return ret;
+
+    ret = test_mac_address_table();
     if (ret < 0)
         return ret;
 

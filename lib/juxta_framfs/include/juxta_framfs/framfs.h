@@ -28,10 +28,17 @@ extern "C"
 #endif
 
 /* File system constants */
-#define JUXTA_FRAMFS_MAGIC 0x4652 /* "FR" */
+#define JUXTA_FRAMFS_MAGIC 0x4653 /* "FS" */
 #define JUXTA_FRAMFS_VERSION 0x01
 #define JUXTA_FRAMFS_MAX_FILES CONFIG_JUXTA_FRAMFS_MAX_FILES
 #define JUXTA_FRAMFS_FILENAME_LEN CONFIG_JUXTA_FRAMFS_FILENAME_LEN
+
+/* MAC address table constants */
+#define JUXTA_FRAMFS_MAX_MAC_ADDRESSES 128
+#define JUXTA_FRAMFS_MAC_ADDRESS_SIZE 6
+#define JUXTA_FRAMFS_MAC_TABLE_SIZE (JUXTA_FRAMFS_MAX_MAC_ADDRESSES * JUXTA_FRAMFS_MAC_ADDRESS_SIZE)
+#define JUXTA_FRAMFS_MAC_MAGIC 0x4D41 /* "MA" */
+#define JUXTA_FRAMFS_MAC_VERSION 0x01
 
 /* Entry flags */
 #define JUXTA_FRAMFS_FLAG_VALID 0x01  /* Entry is valid */
@@ -55,6 +62,8 @@ extern "C"
 #define JUXTA_FRAMFS_ERROR_NO_ACTIVE -7
 #define JUXTA_FRAMFS_ERROR_READ_ONLY -8
 #define JUXTA_FRAMFS_ERROR_SIZE -9
+#define JUXTA_FRAMFS_ERROR_MAC_FULL -10
+#define JUXTA_FRAMFS_ERROR_MAC_NOT_FOUND -11
 
     /**
      * @brief File system header structure (16 bytes)
@@ -63,7 +72,7 @@ extern "C"
      */
     struct juxta_framfs_header
     {
-        uint16_t magic;           /* 0x4652 ("FR") */
+        uint16_t magic;           /* 0x4653 ("FS") */
         uint8_t version;          /* File system version */
         uint8_t reserved1;        /* Future use */
         uint16_t file_count;      /* Current number of files */
@@ -89,14 +98,37 @@ extern "C"
     } __packed;
 
     /**
+     * @brief MAC address entry structure
+     */
+    struct juxta_framfs_mac_entry
+    {
+        uint8_t mac_address[JUXTA_FRAMFS_MAC_ADDRESS_SIZE]; /* 6-byte MAC address */
+        uint8_t usage_count;                                /* Number of times used */
+        uint8_t flags;                                      /* Status flags */
+        uint8_t reserved;                                   /* Future use */
+    } __packed;
+
+    /**
+     * @brief MAC address table header structure
+     */
+    struct juxta_framfs_mac_header
+    {
+        uint16_t magic;       /* MAC table magic number */
+        uint8_t version;      /* MAC table version */
+        uint8_t entry_count;  /* Number of valid entries */
+        uint32_t total_usage; /* Total usage across all entries */
+    } __packed;
+
+    /**
      * @brief File system context structure
      */
     struct juxta_framfs_context
     {
-        struct juxta_fram_device *fram_dev; /* Underlying FRAM device */
-        struct juxta_framfs_header header;  /* Cached header */
-        bool initialized;                   /* Initialization state */
-        int16_t active_file_index;          /* Index of active file (-1 if none) */
+        struct juxta_fram_device *fram_dev;        /* Underlying FRAM device */
+        struct juxta_framfs_header header;         /* Cached header */
+        struct juxta_framfs_mac_header mac_header; /* MAC table header */
+        bool initialized;                          /* Initialization state */
+        int16_t active_file_index;                 /* Index of active file (-1 if none) */
     };
 
     /* ========================================================================
@@ -232,6 +264,76 @@ extern "C"
      */
     int juxta_framfs_get_active_filename(struct juxta_framfs_context *ctx,
                                          char *filename);
+
+    /* ========================================================================
+     * MAC Address Table API
+     * ======================================================================== */
+
+    /**
+     * @brief Find or add a MAC address to the global table
+     *
+     * @param ctx File system context
+     * @param mac_address 6-byte MAC address
+     * @param index Pointer to store the MAC index (0-127)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_mac_find_or_add(struct juxta_framfs_context *ctx,
+                                     const uint8_t *mac_address,
+                                     uint8_t *index);
+
+    /**
+     * @brief Find a MAC address in the global table
+     *
+     * @param ctx File system context
+     * @param mac_address 6-byte MAC address
+     * @param index Pointer to store the MAC index (0-127)
+     * @return 0 on success, JUXTA_FRAMFS_ERROR_MAC_NOT_FOUND if not found
+     */
+    int juxta_framfs_mac_find(struct juxta_framfs_context *ctx,
+                              const uint8_t *mac_address,
+                              uint8_t *index);
+
+    /**
+     * @brief Get MAC address by index
+     *
+     * @param ctx File system context
+     * @param index MAC index (0-127)
+     * @param mac_address Buffer to store 6-byte MAC address
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_mac_get_by_index(struct juxta_framfs_context *ctx,
+                                      uint8_t index,
+                                      uint8_t *mac_address);
+
+    /**
+     * @brief Increment usage count for a MAC address
+     *
+     * @param ctx File system context
+     * @param index MAC index (0-127)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_mac_increment_usage(struct juxta_framfs_context *ctx,
+                                         uint8_t index);
+
+    /**
+     * @brief Get MAC table statistics
+     *
+     * @param ctx File system context
+     * @param entry_count Pointer to store number of entries
+     * @param total_usage Pointer to store total usage count
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_mac_get_stats(struct juxta_framfs_context *ctx,
+                                   uint8_t *entry_count,
+                                   uint32_t *total_usage);
+
+    /**
+     * @brief Clear the MAC address table
+     *
+     * @param ctx File system context
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx);
 
 #ifdef __cplusplus
 }
