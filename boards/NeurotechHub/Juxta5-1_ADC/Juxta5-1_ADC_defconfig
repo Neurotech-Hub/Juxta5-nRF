@@ -13,5 +13,6 @@ CONFIG_ADC=y
 CONFIG_ADC_NRFX_SAADC=y
 
 # Enable FRAM support
-CONFIG_EEPROM=y
-CONFIG_EEPROM_AT25=y
+# EEPROM drivers not needed - using custom FRAM library
+CONFIG_EEPROM=n
+CONFIG_EEPROM_AT25=n
