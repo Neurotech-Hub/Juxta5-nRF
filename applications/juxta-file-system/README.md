@@ -20,6 +20,7 @@ The working `juxta-mvp` application uses **direct SPI transactions** and bypasse
 - ✅ **Device initialization** and ID verification
 - ✅ **Basic read/write** operations (single byte and multi-byte)
 - ✅ **Structured data** storage and retrieval
+- ✅ **LED mode functionality** (shared CS/LED pin)
 - ✅ **Performance testing** (timing and throughput)
 
 ### File System Tests (`framfs_test.c`):
@@ -34,7 +35,7 @@ The working `juxta-mvp` application uses **direct SPI transactions** and bypasse
 
 - **Board**: Juxta5-1_ADC
 - **FRAM**: MB85RS1MTPW-G-APEWE1 (1Mbit)
-- **Connections**: SPI interface
+- **Connections**: SPI + shared CS/LED pin
 
 ## 🚀 Quick Start
 
@@ -93,10 +94,11 @@ The application passes if:
 
 1. **✅ FRAM Device ID** verified automatically
 2. **✅ All read/write operations** complete successfully  
-3. **✅ File system** initializes and formats correctly
-4. **✅ File operations** (create, append, read, list) work
-5. **✅ Error handling** properly rejects invalid operations
-6. **✅ Memory usage** statistics are reasonable
+3. **✅ LED mode switching** works without errors
+4. **✅ File system** initializes and formats correctly
+5. **✅ File operations** (create, append, read, list) work
+6. **✅ Error handling** properly rejects invalid operations
+7. **✅ Memory usage** statistics are reasonable
 
 ## 🚨 Troubleshooting
 

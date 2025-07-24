@@ -10,8 +10,16 @@ ls lib/juxta_framfs/   # File system library
 ```
 
 ### 2. **Build and Flash** 
-Use nRF extension in VS Code.
+```bash
+# Option A: Use nRF extension in VS Code
+# - Open: applications/juxta-file-system/
+# - Select board: Juxta5-1_ADC
+# - Build and flash
 
+# Option B: Use command line
+./applications/juxta-file-system/build.sh
+west flash
+```
 
 ### 3. **Monitor Output**
 Connect RTT console and watch for:
