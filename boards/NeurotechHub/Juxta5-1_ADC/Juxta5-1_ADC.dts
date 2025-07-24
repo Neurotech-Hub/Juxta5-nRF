@@ -12,15 +12,6 @@
 		zephyr,code-partition = &slot0_partition;
 	};
 
-	leds {
-		compatible = "gpio-leds";
-		/* Note: LED is shared with FRAM CS on P0.20 */
-		led0: led_0 {
-			gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
-			label = "LED 0 / FRAM CS";
-		};
-	};
-
 	gpio_keys {
 		compatible = "gpio-keys";
 		magnet_sensor: magnet_sensor {
@@ -30,7 +21,6 @@
 	};
 
 	aliases {
-		led0 = &led0;
 		magnet-sensor = &magnet_sensor;
 		spi-fram = &fram0;
 	};

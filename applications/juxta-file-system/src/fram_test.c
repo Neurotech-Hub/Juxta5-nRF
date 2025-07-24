@@ -16,7 +16,6 @@
 LOG_MODULE_REGISTER(fram_test, CONFIG_LOG_DEFAULT_LEVEL);
 
 /* Device tree definitions */
-#define LED_NODE DT_ALIAS(led0)
 #define FRAM_NODE DT_ALIAS(spi_fram)
 
 /* Memory region definitions for tests */
@@ -24,11 +23,10 @@ LOG_MODULE_REGISTER(fram_test, CONFIG_LOG_DEFAULT_LEVEL);
 #define SINGLE_BYTE_TEST_ADDR (TEST_REGION_START + 0x0000)
 #define MULTI_BYTE_TEST_ADDR (TEST_REGION_START + 0x1000)
 #define STRUCT_TEST_ADDR (TEST_REGION_START + 0x2000)
-#define LED_TEST_ADDR (TEST_REGION_START + 0x3000)
 #define PERF_TEST_ADDR (TEST_REGION_START + 0x4000)
 
-/* GPIO specifications */
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
+/* Get CS GPIO from devicetree */
+static const struct gpio_dt_spec cs_gpio = GPIO_DT_SPEC_GET_BY_IDX(DT_PARENT(FRAM_NODE), cs_gpios, 0);
 
 /* FRAM device instance */
 static struct juxta_fram_device fram_dev;
@@ -51,7 +49,7 @@ static int test_fram_init(void)
     }
 
     /* Initialize FRAM using direct initialization */
-    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &led); /* 1MHz SPI */
+    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &cs_gpio); /* 1MHz SPI */
     if (ret < 0)
     {
         LOG_ERR("Failed to initialize FRAM: %d", ret);
@@ -208,103 +206,6 @@ static int test_fram_structured_data(void)
     return 0;
 }
 
-/**
- * @brief Test LED mode functionality (shared CS/LED pin)
- */
-static int test_led_mode(void)
-{
-    int ret;
-
-    LOG_INF("💡 Testing LED mode (shared CS/LED pin)...");
-
-    /* Test LED mode enable */
-    ret = juxta_fram_led_mode_enable(&fram_dev);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to enable LED mode: %d", ret);
-        return ret;
-    }
-
-    if (!juxta_fram_is_led_mode(&fram_dev))
-    {
-        LOG_ERR("LED mode not properly enabled");
-        return -1;
-    }
-
-    /* Test LED operations */
-    LOG_INF("Blinking LED 3 times...");
-    for (int i = 0; i < 3; i++)
-    {
-        ret = juxta_fram_led_on(&fram_dev);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to turn LED on: %d", ret);
-            return ret;
-        }
-        k_msleep(200);
-
-        ret = juxta_fram_led_off(&fram_dev);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to turn LED off: %d", ret);
-            return ret;
-        }
-        k_msleep(200);
-    }
-
-    /* Test toggle function */
-    for (int i = 0; i < 4; i++)
-    {
-        ret = juxta_fram_led_toggle(&fram_dev);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to toggle LED: %d", ret);
-            return ret;
-        }
-        k_msleep(150);
-    }
-
-    /* Switch back to SPI mode */
-    ret = juxta_fram_led_mode_disable(&fram_dev);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to disable LED mode: %d", ret);
-        return ret;
-    }
-
-    if (juxta_fram_is_led_mode(&fram_dev))
-    {
-        LOG_ERR("LED mode not properly disabled");
-        return -1;
-    }
-
-    /* Verify FRAM still works after LED mode */
-    uint8_t verify_byte = 0x99;
-    uint8_t read_verify;
-    ret = juxta_fram_write_byte(&fram_dev, LED_TEST_ADDR, verify_byte);
-    if (ret < 0)
-    {
-        LOG_ERR("FRAM write failed after LED mode: %d", ret);
-        return ret;
-    }
-
-    ret = juxta_fram_read_byte(&fram_dev, LED_TEST_ADDR, &read_verify);
-    if (ret < 0)
-    {
-        LOG_ERR("FRAM read failed after LED mode: %d", ret);
-        return ret;
-    }
-
-    if (verify_byte != read_verify)
-    {
-        LOG_ERR("FRAM verification failed after LED mode");
-        return -1;
-    }
-
-    LOG_INF("✅ LED mode test passed");
-    return 0;
-}
-
 /* Static buffers for performance testing */
 #define PERF_TEST_SIZE 64 // Reduced from 256
 static uint8_t perf_write_buffer[PERF_TEST_SIZE];
@@ -394,10 +295,6 @@ int fram_test_main(void)
         return ret;
 
     ret = test_fram_structured_data();
-    if (ret < 0)
-        return ret;
-
-    ret = test_led_mode();
     if (ret < 0)
         return ret;
 

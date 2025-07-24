@@ -10,6 +10,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 #include <juxta_fram/fram.h>
 #include <juxta_framfs/framfs.h>
 #include <string.h>
@@ -18,11 +19,10 @@
 LOG_MODULE_REGISTER(framfs_test, CONFIG_LOG_DEFAULT_LEVEL);
 
 /* Device tree definitions */
-#define LED_NODE DT_ALIAS(led0)
 #define FRAM_NODE DT_ALIAS(spi_fram)
 
-/* GPIO specifications */
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
+/* Get CS GPIO from devicetree */
+static const struct gpio_dt_spec cs_gpio = GPIO_DT_SPEC_GET_BY_IDX(DT_PARENT(FRAM_NODE), cs_gpios, 0);
 
 /* FRAM and file system instances */
 static struct juxta_fram_device fram_dev;
@@ -70,7 +70,7 @@ static int test_framfs_init(void)
     }
 
     /* Initialize FRAM first */
-    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &led);
+    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &cs_gpio);
     if (ret < 0)
     {
         LOG_ERR("Failed to initialize FRAM: %d", ret);

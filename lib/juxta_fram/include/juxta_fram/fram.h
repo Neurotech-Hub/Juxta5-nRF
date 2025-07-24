@@ -25,9 +25,8 @@ extern "C"
     {
         const struct device *spi_dev;
         struct spi_config spi_cfg;
-        struct gpio_dt_spec cs_gpio; /* Store GPIO spec for LED control */
+        struct gpio_dt_spec cs_gpio; /* Store GPIO spec for CS control */
         bool initialized;
-        bool led_mode; /* Track if pin is in LED mode */
     };
 
     /**
@@ -182,85 +181,6 @@ extern "C"
      * @return 0 on success, negative error code on failure
      */
     int juxta_fram_test(struct juxta_fram_device *fram_dev, uint32_t test_address);
-
-    /* ========================================================================
-     * LED Helper Functions (for shared CS/LED pin)
-     * ======================================================================== */
-
-    /**
-     * @brief Switch the shared pin to LED mode (GPIO control)
-     *
-     * This function configures the shared CS/LED pin for GPIO output control.
-     * After calling this, you can use the LED control functions below.
-     * You must call this before any LED operations and after FRAM operations.
-     *
-     * @param fram_dev Pointer to initialized FRAM device
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_fram_led_mode_enable(struct juxta_fram_device *fram_dev);
-
-    /**
-     * @brief Switch the shared pin back to SPI CS mode
-     *
-     * This function prepares the pin for FRAM SPI operations.
-     * Call this before any FRAM read/write operations if you've been using LED mode.
-     *
-     * @param fram_dev Pointer to initialized FRAM device
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_fram_led_mode_disable(struct juxta_fram_device *fram_dev);
-
-    /**
-     * @brief Turn LED on
-     *
-     * The pin must be in LED mode (call juxta_fram_led_mode_enable first).
-     *
-     * @param fram_dev Pointer to initialized FRAM device
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_fram_led_on(struct juxta_fram_device *fram_dev);
-
-    /**
-     * @brief Turn LED off
-     *
-     * The pin must be in LED mode (call juxta_fram_led_mode_enable first).
-     *
-     * @param fram_dev Pointer to initialized FRAM device
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_fram_led_off(struct juxta_fram_device *fram_dev);
-
-    /**
-     * @brief Toggle LED state
-     *
-     * The pin must be in LED mode (call juxta_fram_led_mode_enable first).
-     *
-     * @param fram_dev Pointer to initialized FRAM device
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_fram_led_toggle(struct juxta_fram_device *fram_dev);
-
-    /**
-     * @brief Set LED state
-     *
-     * The pin must be in LED mode (call juxta_fram_led_mode_enable first).
-     *
-     * @param fram_dev Pointer to initialized FRAM device
-     * @param state LED state (1 = on, 0 = off)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_fram_led_set(struct juxta_fram_device *fram_dev, bool state);
-
-    /**
-     * @brief Check if the device is currently in LED mode
-     *
-     * @param fram_dev Pointer to initialized FRAM device
-     * @return true if in LED mode, false if in SPI mode
-     */
-    static inline bool juxta_fram_is_led_mode(struct juxta_fram_device *fram_dev)
-    {
-        return fram_dev ? fram_dev->led_mode : false;
-    }
 
 #ifdef __cplusplus
 }

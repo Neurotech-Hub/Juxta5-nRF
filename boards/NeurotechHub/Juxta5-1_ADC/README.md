@@ -26,7 +26,7 @@ The Juxta5-1_ADC is a sensor-focused board based on the nRF52805 SoC designed fo
 | P0.14 | MISO     | Input     | SPI Master In Slave Out              |
 | P0.16 | SCK      | Output    | SPI Serial Clock                     |
 | P0.18 | MOSI     | Output    | SPI Master Out Slave In              |
-| P0.20 | CS/LED   | Output    | **Shared**: FRAM Chip Select and LED |
+| P0.20 | CS       | Output    | FRAM Chip Select                     |
 | P0.21 | RESET    | Input     | System reset                         |
 | G1    | SWDCLK   | -         | SWD debug clock                      |
 | F1    | SWDIO    | -         | SWD debug data                       |
@@ -116,24 +116,15 @@ See `applications/juxta-mvp/src/juxta5_example.c` for a complete example demonst
 - SPI FRAM read/write operations
 - ADC differential measurements
 - GPIO interrupt handling
-- Shared LED/CS pin management
 
 ## Usage Notes
 
-### Shared LED/CS Pin (P0.20)
-**Important**: Pin P0.20 is shared between the LED and FRAM chip select. You must manage this carefully in your application:
-
-- **When using FRAM**: The SPI driver automatically controls the CS signal
-- **When using LED**: Manually control the GPIO pin
-- **Cannot use both simultaneously**: Choose one function at a time
+### FRAM CS Pin (P0.20)
+Pin P0.20 is dedicated to FRAM chip select control. The SPI driver automatically manages the CS signal for FRAM operations.
 
 ### Example Usage Pattern
 ```c
-/* Option 1: Use as LED */
-gpio_pin_set_dt(&led, 1);  // Turn on LED
-gpio_pin_set_dt(&led, 0);  // Turn off LED
-
-/* Option 2: Use as FRAM CS (handled by SPI driver) */
+/* FRAM operations (CS handled by SPI driver) */
 eeprom_write(fram_dev, addr, data, len);
 eeprom_read(fram_dev, addr, data, len);
 ```
@@ -154,7 +145,6 @@ eeprom_read(fram_dev, addr, data, len);
 ### Common Issues
 
 1. **SPI Communication Fails**
-   - Check that P0.20 is not being used as LED simultaneously
    - Verify SPI wiring (MOSI, MISO, SCK, CS)
    - Check SPI frequency (max 8MHz for FRAM)
 
@@ -191,7 +181,6 @@ Since there's no UART, use:
 - FRAM should respond to SPI commands
 - ADC should provide differential measurements
 - Magnet sensor should trigger interrupts
-- LED should toggle on P0.20
 
 ## Support
 For issues specific to this board definition, check:
