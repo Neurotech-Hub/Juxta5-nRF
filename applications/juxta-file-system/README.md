@@ -1,138 +1,201 @@
 # JUXTA File System Test Application
 
-A comprehensive test application for the JUXTA FRAM library (`juxta_fram`) and FRAM file system (`juxta_framfs`).
+A comprehensive test suite for the JUXTA FRAM file system, designed to validate the `juxta_fram` and `juxta_framfs` libraries on the Juxta5-1_ADC board.
 
-## 🎯 Purpose
+## Overview
 
-This application validates both libraries in real hardware:
+This application provides a complete testing framework for:
+- **FRAM Library** (`juxta_fram`) - Low-level FRAM device operations
+- **File System** (`juxta_framfs`) - High-level file system with MAC indexing and data encoding
 
-1. **FRAM Library Testing** - Validates the low-level `juxta_fram` library
-2. **File System Testing** - Tests the high-level `juxta_framfs` file system
-3. **Integration Testing** - Ensures both libraries work together properly
+## Quick Start
 
-## 🏗️ Why This Application Exists
+### Prerequisites
+- Nordic nRF Connect SDK v3.0.2+
+- Juxta5-1_ADC board with MB85RS1MT FRAM
+- Zephyr development environment
 
-The working `juxta-mvp` application uses **direct SPI transactions** and bypasses the FRAM library entirely. This dedicated test application ensures the FRAM libraries actually work in hardware before building applications on top of them.
+### Building and Running
 
-## 📋 Test Coverage
-
-### FRAM Library Tests (`fram_test.c`):
-- ✅ **Device initialization** and ID verification
-- ✅ **Basic read/write** operations (single byte and multi-byte)
-- ✅ **Structured data** storage and retrieval
-- ✅ **LED mode functionality** (shared CS/LED pin)
-- ✅ **Performance testing** (timing and throughput)
-
-### File System Tests (`framfs_test.c`):
-- ✅ **File system initialization** and formatting
-- ✅ **Basic file operations** (create, append, read, seal)
-- ✅ **Multiple file management** (list, info, switching)
-- ✅ **Sensor data storage** (structured time-series data)
-- ✅ **Error handling** (limits, duplicates, validation)
-- ✅ **Usage statistics** (memory utilization, file counts)
-
-## 🔧 Hardware Requirements
-
-- **Board**: Juxta5-1_ADC
-- **FRAM**: MB85RS1MTPW-G-APEWE1 (1Mbit)
-- **Connections**: SPI + shared CS/LED pin
-
-## 🚀 Quick Start
-
-### 1. Required Configuration
-```ini
-# prj.conf essential settings
-CONFIG_GPIO=y
-CONFIG_SPI=y
-CONFIG_SPI_NRFX=y
-CONFIG_JUXTA_FRAM=y
-CONFIG_JUXTA_FRAMFS=y
-CONFIG_LOG=y
-CONFIG_LOG_DEFAULT_LEVEL=3
-CONFIG_CBPRINTF_FP_SUPPORT=y
-CONFIG_LOG_BACKEND_FORMAT_TIMESTAMP=y
-CONFIG_MAIN_STACK_SIZE=4096  # Required for data logging tests
-```
-
-### 2. Build and Flash
 ```bash
-# Using nRF extension in VS Code:
-# - Select board: Juxta5-1_ADC  
-# - Build and flash normally
+# Build the application
+west build -b Juxta5-1_ADC applications/juxta-file-system
+
+# Flash to device
+west flash
+
+# Monitor output
+west espressif monitor
 ```
 
-### 3. Monitor Output
-The application provides comprehensive test output via RTT console.
+### Expected Output
 
-## 📊 Performance Metrics
+```
+╔══════════════════════════════════════════════════════════════╗
+║              JUXTA File System Test Application              ║
+║                        Version 1.0.0                         ║
+╠══════════════════════════════════════════════════════════════╣
+║  Tests:                                                      ║
+║  • FRAM Library (juxta_fram)                                ║
+║  • File System (juxta_framfs)                               ║
+║                                                              ║
+║  Board: Juxta5-1_ADC                                        ║
+║  FRAM:  MB85RS1MTPW-G-APEWE1 (1Mbit)                        ║
+╚══════════════════════════════════════════════════════════════╝
 
-Based on extensive testing:
+[00:00:08.679] <inf> main: 🚀 Running Full Test Suite
+[00:00:08.679] <inf> main: 📋 Step 1: FRAM Library Test
+[00:00:08.679] <inf> fram_test: 🚀 Starting FRAM Library Test Suite
+...
+[00:00:13.738] <inf> main: 🎉 All tests completed successfully!
 
-- **FRAM Write**: ~200-250 KB/s
-- **FRAM Read**: ~250-300 KB/s
-- **File System Overhead**: 1.57% (2064 bytes)
-  - Header: 16 bytes
-  - Index: 2048 bytes (64 files × 32 bytes)
-- **Available Storage**: 126KB for data
-- **Memory Requirements**:
-  - Main stack: 4KB minimum
-  - Heap: 4KB recommended
-  - System workqueue: 2KB
+╔══════════════════════════════════════════════════════════════╗
+║                        TEST RESULTS                         ║
+║                                                              ║
+║  ✅ FRAM Library:    PASSED                                 ║
+║  ✅ File System:     PASSED                                 ║
+║  ✅ MAC Address Table: PASSED                               ║
+║  ✅ Encoding/Decoding: PASSED                               ║
+║                                                              ║
+║  🎯 Ready for application development!                      ║
+╚══════════════════════════════════════════════════════════════╝
+```
 
-## 🎚️ Test Modes
+## Test Coverage
 
+### FRAM Library Tests
+- **Initialization** - Device setup and ID verification
+- **Basic Operations** - Read/write functionality validation
+- **Structured Data** - Complex data structure handling
+- **Performance** - Speed and throughput measurement
+
+### File System Tests
+- **Basic File Operations** - Create, write, read, seal files
+- **Multiple File Management** - Handle multiple files simultaneously
+- **Data Logger Simulation** - Real-world logging scenarios
+- **Sensor Data Storage** - Time-series data handling
+- **Limits and Error Handling** - Edge cases and error conditions
+- **MAC Address Table** - Global MAC indexing system
+- **Encoding/Decoding** - Binary data format handling
+- **High-level Append Functions** - Specialized record types
+- **File System Statistics** - Usage reporting and monitoring
+
+## Practical Usage Examples
+
+### Basic File Operations
+```c
+#include <juxta_framfs/framfs.h>
+
+// Initialize file system
+struct juxta_framfs_context fs_ctx;
+juxta_framfs_init(&fs_ctx, &fram_dev);
+
+// Create a daily log file
+juxta_framfs_create_active(&fs_ctx, "20240120", JUXTA_FRAMFS_TYPE_SENSOR_LOG);
+
+// Append sensor data
+uint8_t sensor_data[] = {0x12, 0x34, 0x56, 0x78};
+juxta_framfs_append(&fs_ctx, sensor_data, sizeof(sensor_data));
+
+// Seal file when done
+juxta_framfs_seal_active(&fs_ctx);
+```
+
+### High-level Data Logging
+```c
+// Log device scan with MAC indexing
+uint8_t macs[][6] = {{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
+int8_t rssi[] = {-45};
+juxta_framfs_append_device_scan(&fs_ctx, 1234, 5, macs, rssi, 1);
+
+// Log system events
+juxta_framfs_append_simple_record(&fs_ctx, 567, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
+juxta_framfs_append_battery_record(&fs_ctx, 890, 87);
+```
+
+### File System Statistics
+```c
+struct juxta_framfs_header stats;
+juxta_framfs_get_stats(&fs_ctx, &stats);
+
+printf("Files: %d/%d, Data: %d bytes, Next: 0x%06X\n",
+       stats.file_count, JUXTA_FRAMFS_MAX_FILES,
+       stats.total_data_size, stats.next_data_addr);
+```
+
+## Configuration
+
+### Board Configuration
+The application uses the Juxta5-1_ADC board configuration:
+- **SPI Frequency**: 1MHz
+- **CS Pin**: P0.20 (dedicated to FRAM)
+- **FRAM Size**: 1Mbit (131,072 bytes)
+
+### Test Modes
 Modify `CURRENT_TEST_MODE` in `main.c`:
+- `TEST_MODE_FRAM_ONLY` - Test FRAM library only
+- `TEST_MODE_FRAMFS_ONLY` - Test file system only
+- `TEST_MODE_FULL` - Complete test suite (default)
+- `TEST_MODE_INTERACTIVE` - Interactive menu
 
-- **`TEST_MODE_FRAM_ONLY`** - Test FRAM library only
-- **`TEST_MODE_FRAMFS_ONLY`** - Test file system only
-- **`TEST_MODE_FULL`** - Test both (default)
-- **`TEST_MODE_INTERACTIVE`** - Interactive menu
+## Performance Characteristics
 
-## 🔍 Success Criteria
+- **Write Speed**: 200-250 KB/s
+- **Read Speed**: 250-300 KB/s
+- **Memory Overhead**: 1.57% of FRAM (1,293 bytes)
+- **File Limit**: 64 files maximum
+- **MAC Address Index**: 128 unique devices
+- **Daily Logging**: ~14.9 days of minute-based data
 
-The application passes if:
+## Troubleshooting
 
-1. **✅ FRAM Device ID** verified automatically
-2. **✅ All read/write operations** complete successfully  
-3. **✅ LED mode switching** works without errors
-4. **✅ File system** initializes and formats correctly
-5. **✅ File operations** (create, append, read, list) work
-6. **✅ Error handling** properly rejects invalid operations
-7. **✅ Memory usage** statistics are reasonable
+### Common Issues
 
-## 🚨 Troubleshooting
-
-### Build Issues:
-- **Stack overflow**: Ensure `CONFIG_MAIN_STACK_SIZE=4096`
-- **Float formatting**: Enable `CONFIG_CBPRINTF_FP_SUPPORT=y`
-- **Missing headers**: Verify `CONFIG_JUXTA_FRAM=y` and `CONFIG_JUXTA_FRAMFS=y`
-
-### Runtime Issues:
-- **FRAM init failed**: Check SPI and GPIO device tree configuration
-- **Device ID mismatch**: Verify FRAM is properly connected
-- **File system errors**: Check FRAM read/write operations work first
-
-## 📁 File Structure
-
+**FRAM Not Detected**
 ```
-applications/juxta-file-system/
-├── CMakeLists.txt              # Build configuration
-├── prj.conf                    # Project configuration  
-├── boards/Juxta5-1_ADC.overlay # Board-specific settings
-├── src/
-│   ├── main.c                  # Test orchestration
-│   ├── fram_test.c             # FRAM library tests
-│   └── framfs_test.c           # File system tests
-└── README.md                   # This file
+<err> fram_test: Failed to initialize FRAM: -1
+```
+- Check SPI connections and CS pin configuration
+- Verify FRAM device ID in device tree
+
+**File System Errors**
+```
+<err> framfs_test: Failed to create active file: -6
+```
+- File system may need formatting
+- Check available space and file limits
+
+**MAC Table Full**
+```
+<err> juxta_framfs: MAC table full
+```
+- Clear MAC table or reduce device count
+- Maximum 128 unique MAC addresses
+
+### Debug Output
+Enable debug logging in `prj.conf`:
+```
+CONFIG_LOG_DEFAULT_LEVEL=4
+CONFIG_LOG_LEVEL_DEBUG=y
 ```
 
-## 🔄 Next Steps
+## Development
 
-If all tests pass:
+### Adding New Tests
+1. Create test function in `fram_test.c` or `framfs_test.c`
+2. Add to test sequence in main function
+3. Update test results display
 
-1. **✅ FRAM library is validated** - safe to use in applications
-2. **✅ File system is working** - ready for real sensor logging
-3. **✅ Integration confirmed** - both libraries work together
-4. **🚀 Ready for application development** using both libraries
+### Customizing Test Data
+Modify test data structures and parameters in test functions to match your application requirements.
 
-This application provides the foundation for confident development of sensor logging applications using the JUXTA FRAM file system! 
+## License
+
+Apache-2.0 License - see LICENSE file for details.
+
+## Support
+
+For issues and questions:
+- Check the library documentation in `lib/juxta_framfs/README.md`
+- Review test output for specific error codes
+- Verify hardware connections and device tree configuration 

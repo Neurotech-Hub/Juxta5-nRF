@@ -15,18 +15,10 @@ config JUXTA_FRAMFS_LOG_LEVEL
 	  Sets log level for JUXTA FRAMFS library.
 	  0 = OFF, 1 = ERROR, 2 = WARNING, 3 = INFO, 4 = DEBUG
 
-config JUXTA_FRAMFS_MAX_FILES
-	int "Maximum number of files"
-	default 64
-	range 1 256
-	help
-	  Maximum number of files that can be stored in the file system.
-	  Each file entry uses 32 bytes of FRAM for metadata.
-
 config JUXTA_FRAMFS_FILENAME_LEN
 	int "Maximum filename length"
-	default 16
-	range 8 32
+	default 12
+	range 8 16
 	help
 	  Maximum length of filenames including null terminator.
 	  Must be a multiple of 4 for alignment.

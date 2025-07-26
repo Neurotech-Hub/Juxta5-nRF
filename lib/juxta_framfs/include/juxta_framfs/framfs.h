@@ -24,13 +24,13 @@ extern "C"
 #endif
 
 #ifndef CONFIG_JUXTA_FRAMFS_FILENAME_LEN
-#define CONFIG_JUXTA_FRAMFS_FILENAME_LEN 16
+#define CONFIG_JUXTA_FRAMFS_FILENAME_LEN 12
 #endif
 
 /* File system constants */
 #define JUXTA_FRAMFS_MAGIC 0x4653 /* "FS" */
 #define JUXTA_FRAMFS_VERSION 0x01
-#define JUXTA_FRAMFS_MAX_FILES CONFIG_JUXTA_FRAMFS_MAX_FILES
+#define JUXTA_FRAMFS_MAX_FILES 64
 #define JUXTA_FRAMFS_FILENAME_LEN CONFIG_JUXTA_FRAMFS_FILENAME_LEN
 
 /* MAC address table constants */
@@ -51,6 +51,20 @@ extern "C"
 #define JUXTA_FRAMFS_TYPE_CONFIG 0x02
 #define JUXTA_FRAMFS_TYPE_COMPRESSED 0x80 /* High bit = compressed */
 
+/* Record type codes */
+#define JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY 0x00
+#define JUXTA_FRAMFS_RECORD_TYPE_DEVICE_MIN 0x01 /* 1 device */
+#define JUXTA_FRAMFS_RECORD_TYPE_DEVICE_MAX 0x80 /* 128 devices */
+#define JUXTA_FRAMFS_RECORD_TYPE_BOOT 0xF1
+#define JUXTA_FRAMFS_RECORD_TYPE_CONNECTED 0xF2
+#define JUXTA_FRAMFS_RECORD_TYPE_SETTINGS 0xF3
+#define JUXTA_FRAMFS_RECORD_TYPE_BATTERY 0xF4
+#define JUXTA_FRAMFS_RECORD_TYPE_ERROR 0xF5
+
+/* Error types */
+#define JUXTA_FRAMFS_ERROR_TYPE_INIT 0x00
+#define JUXTA_FRAMFS_ERROR_TYPE_BLE 0x01
+
 /* Error codes */
 #define JUXTA_FRAMFS_OK 0
 #define JUXTA_FRAMFS_ERROR -1
@@ -66,7 +80,7 @@ extern "C"
 #define JUXTA_FRAMFS_ERROR_MAC_NOT_FOUND -11
 
     /**
-     * @brief File system header structure (16 bytes)
+     * @brief File system header structure (13 bytes)
      *
      * Stored at FRAM address 0x0000
      */
@@ -74,17 +88,15 @@ extern "C"
     {
         uint16_t magic;           /* 0x4653 ("FS") */
         uint8_t version;          /* File system version */
-        uint8_t reserved1;        /* Future use */
-        uint16_t file_count;      /* Current number of files */
-        uint16_t max_files;       /* Maximum files supported */
+        uint8_t file_count;       /* Current number of files */
         uint32_t next_data_addr;  /* Next available data address */
         uint32_t total_data_size; /* Total data bytes written */
     } __packed;
 
     /**
-     * @brief File entry structure (32 bytes aligned)
+     * @brief File entry structure (20 bytes aligned)
      *
-     * Stored in index table starting at address 0x0010
+     * Stored in index table starting at address 0x000D
      */
     struct juxta_framfs_entry
     {
@@ -93,30 +105,65 @@ extern "C"
         uint32_t length;                          /* Data length in bytes */
         uint8_t flags;                            /* Status flags */
         uint8_t file_type;                        /* File type identifier */
-        uint16_t reserved;                        /* Future use */
-        uint8_t padding[12];                      /* Pad to 32 bytes */
+        uint8_t padding[6];                       /* Pad to 20 bytes */
     } __packed;
 
     /**
-     * @brief MAC address entry structure
+     * @brief MAC address entry structure (9 bytes)
      */
     struct juxta_framfs_mac_entry
     {
         uint8_t mac_address[JUXTA_FRAMFS_MAC_ADDRESS_SIZE]; /* 6-byte MAC address */
         uint8_t usage_count;                                /* Number of times used */
         uint8_t flags;                                      /* Status flags */
-        uint8_t reserved;                                   /* Future use */
     } __packed;
 
     /**
-     * @brief MAC address table header structure
+     * @brief MAC address table header structure (4 bytes)
      */
     struct juxta_framfs_mac_header
     {
-        uint16_t magic;       /* MAC table magic number */
-        uint8_t version;      /* MAC table version */
-        uint8_t entry_count;  /* Number of valid entries */
-        uint32_t total_usage; /* Total usage across all entries */
+        uint16_t magic;      /* MAC table magic number */
+        uint8_t version;     /* MAC table version */
+        uint8_t entry_count; /* Number of valid entries */
+    } __packed;
+
+    /**
+     * @brief Device scan record structure (variable length)
+     *
+     * Used for type 0x01-0x80 records (1-128 devices)
+     * Total size: 4 + (2 * device_count) bytes
+     */
+    struct juxta_framfs_device_record
+    {
+        uint16_t minute;          /* 0-1439 for full day */
+        uint8_t type;             /* Number of devices (1-128) */
+        uint8_t motion_count;     /* Motion events this minute */
+        uint8_t mac_indices[128]; /* MAC address indices (0-127) */
+        int8_t rssi_values[128];  /* RSSI values for each device */
+    } __packed;
+
+    /**
+     * @brief Simple record structure (3 bytes)
+     *
+     * Used for type 0x00, 0xF1, 0xF2, 0xF5 records
+     */
+    struct juxta_framfs_simple_record
+    {
+        uint16_t minute; /* 0-1439 for full day */
+        uint8_t type;    /* Record type */
+    } __packed;
+
+    /**
+     * @brief Battery record structure (4 bytes)
+     *
+     * Used for type 0xF4 records
+     */
+    struct juxta_framfs_battery_record
+    {
+        uint16_t minute; /* 0-1439 for full day */
+        uint8_t type;    /* Record type (0xF4) */
+        uint8_t level;   /* Battery level (0-100) */
     } __packed;
 
     /**
@@ -334,6 +381,116 @@ extern "C"
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx);
+
+    /* ========================================================================
+     * Data Encoding/Decoding API
+     * ======================================================================== */
+
+    /**
+     * @brief Encode device scan record into buffer
+     *
+     * @param record Device record structure to encode
+     * @param buffer Buffer to store encoded data (variable length)
+     * @param buffer_size Size of buffer (must be >= 4 + 2*device_count)
+     * @return Number of bytes encoded on success, negative error code on failure
+     */
+    int juxta_framfs_encode_device_record(const struct juxta_framfs_device_record *record,
+                                          uint8_t *buffer,
+                                          size_t buffer_size);
+
+    /**
+     * @brief Decode device scan record from buffer
+     *
+     * @param buffer Buffer containing encoded data
+     * @param buffer_size Size of buffer
+     * @param record Device record structure to populate
+     * @return Number of bytes decoded on success, negative error code on failure
+     */
+    int juxta_framfs_decode_device_record(const uint8_t *buffer,
+                                          size_t buffer_size,
+                                          struct juxta_framfs_device_record *record);
+
+    /**
+     * @brief Encode simple record into buffer
+     *
+     * @param record Simple record structure to encode
+     * @param buffer Buffer to store encoded data (3 bytes)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_encode_simple_record(const struct juxta_framfs_simple_record *record,
+                                          uint8_t *buffer);
+
+    /**
+     * @brief Decode simple record from buffer
+     *
+     * @param buffer Buffer containing encoded data (3 bytes)
+     * @param record Simple record structure to populate
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_decode_simple_record(const uint8_t *buffer,
+                                          struct juxta_framfs_simple_record *record);
+
+    /**
+     * @brief Encode battery record into buffer
+     *
+     * @param record Battery record structure to encode
+     * @param buffer Buffer to store encoded data (4 bytes)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_encode_battery_record(const struct juxta_framfs_battery_record *record,
+                                           uint8_t *buffer);
+
+    /**
+     * @brief Decode battery record from buffer
+     *
+     * @param buffer Buffer containing encoded data (4 bytes)
+     * @param record Battery record structure to populate
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_decode_battery_record(const uint8_t *buffer,
+                                           struct juxta_framfs_battery_record *record);
+
+    /**
+     * @brief Append device scan record to active file with MAC indexing
+     *
+     * @param ctx File system context
+     * @param minute Minute of day (0-1439)
+     * @param motion_count Motion events this minute
+     * @param mac_addresses Array of MAC addresses (6 bytes each)
+     * @param rssi_values Array of RSSI values
+     * @param device_count Number of devices (1-128)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
+                                        uint16_t minute,
+                                        uint8_t motion_count,
+                                        const uint8_t (*mac_addresses)[6],
+                                        const int8_t *rssi_values,
+                                        uint8_t device_count);
+
+    /**
+     * @brief Append simple record to active file
+     *
+     * @param ctx File system context
+     * @param minute Minute of day (0-1439)
+     * @param type Record type (0x00, 0xF1, 0xF2, 0xF5)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_simple_record(struct juxta_framfs_context *ctx,
+                                          uint16_t minute,
+                                          uint8_t type);
+
+    /**
+     * @brief Append battery record to active file
+     *
+     * @param ctx File system context
+     * @param minute Minute of day (0-1439)
+     * @param level Battery level (0-100)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_battery_record(struct juxta_framfs_context *ctx,
+                                           uint16_t minute,
+                                           uint8_t level);
 
 #ifdef __cplusplus
 }

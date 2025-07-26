@@ -142,7 +142,6 @@ int juxta_framfs_format(struct juxta_framfs_context *ctx)
     ctx->header.magic = JUXTA_FRAMFS_MAGIC;
     ctx->header.version = JUXTA_FRAMFS_VERSION;
     ctx->header.file_count = 0;
-    ctx->header.max_files = JUXTA_FRAMFS_MAX_FILES;
     ctx->header.next_data_addr = framfs_get_data_start_addr();
     ctx->header.total_data_size = 0;
 
@@ -220,10 +219,10 @@ int juxta_framfs_create_active(struct juxta_framfs_context *ctx,
     }
 
     /* Check if we have space for another file */
-    if (ctx->header.file_count >= ctx->header.max_files)
+    if (ctx->header.file_count >= JUXTA_FRAMFS_MAX_FILES)
     {
         LOG_ERR("File system full (%d/%d files)",
-                ctx->header.file_count, ctx->header.max_files);
+                ctx->header.file_count, JUXTA_FRAMFS_MAX_FILES);
         return JUXTA_FRAMFS_ERROR_FULL;
     }
 
@@ -745,7 +744,6 @@ int juxta_framfs_mac_find_or_add(struct juxta_framfs_context *ctx,
 
     /* Update header */
     ctx->mac_header.entry_count++;
-    ctx->mac_header.total_usage++;
     ret = framfs_write_mac_header(ctx);
     if (ret < 0)
     {
@@ -863,15 +861,6 @@ int juxta_framfs_mac_increment_usage(struct juxta_framfs_context *ctx,
         return ret;
     }
 
-    /* Update header total usage */
-    ctx->mac_header.total_usage++;
-    ret = framfs_write_mac_header(ctx);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to update MAC header: %d", ret);
-        return ret;
-    }
-
     return JUXTA_FRAMFS_OK;
 }
 
@@ -891,7 +880,7 @@ int juxta_framfs_mac_get_stats(struct juxta_framfs_context *ctx,
 
     if (total_usage)
     {
-        *total_usage = ctx->mac_header.total_usage;
+        *total_usage = 0; /* No longer tracked */
     }
 
     return JUXTA_FRAMFS_OK;
@@ -911,7 +900,6 @@ int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx)
     ctx->mac_header.magic = JUXTA_FRAMFS_MAC_MAGIC;
     ctx->mac_header.version = JUXTA_FRAMFS_MAC_VERSION;
     ctx->mac_header.entry_count = 0;
-    ctx->mac_header.total_usage = 0;
 
     /* Write header to FRAM */
     int ret = framfs_write_mac_header(ctx);
@@ -936,4 +924,272 @@ int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx)
 
     LOG_INF("MAC address table cleared successfully");
     return JUXTA_FRAMFS_OK;
+}
+
+/* ========================================================================
+ * Data Encoding/Decoding Functions
+ * ======================================================================== */
+
+int juxta_framfs_encode_device_record(const struct juxta_framfs_device_record *record,
+                                      uint8_t *buffer,
+                                      size_t buffer_size)
+{
+    if (!record || !buffer)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Calculate required buffer size */
+    size_t required_size = 4 + (2 * record->type); /* minute + type + motion + mac_indices + rssi_values */
+    if (buffer_size < required_size)
+    {
+        LOG_ERR("Buffer too small: %zu < %zu", buffer_size, required_size);
+        return JUXTA_FRAMFS_ERROR_SIZE;
+    }
+
+    /* Validate device count */
+    if (record->type == 0 || record->type > 128)
+    {
+        LOG_ERR("Invalid device count: %d", record->type);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Encode fixed fields */
+    buffer[0] = (record->minute >> 8) & 0xFF; /* minute high byte */
+    buffer[1] = record->minute & 0xFF;        /* minute low byte */
+    buffer[2] = record->type;                 /* device count */
+    buffer[3] = record->motion_count;         /* motion count */
+
+    /* Encode variable fields */
+    size_t offset = 4;
+    for (int i = 0; i < record->type; i++)
+    {
+        buffer[offset + i] = record->mac_indices[i];                /* MAC index */
+        buffer[offset + record->type + i] = record->rssi_values[i]; /* RSSI value */
+    }
+
+    return (int)required_size;
+}
+
+int juxta_framfs_decode_device_record(const uint8_t *buffer,
+                                      size_t buffer_size,
+                                      struct juxta_framfs_device_record *record)
+{
+    if (!buffer || !record || buffer_size < 4)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Decode fixed fields */
+    record->minute = (buffer[0] << 8) | buffer[1]; /* minute */
+    record->type = buffer[2];                      /* device count */
+    record->motion_count = buffer[3];              /* motion count */
+
+    /* Validate device count */
+    if (record->type == 0 || record->type > 128)
+    {
+        LOG_ERR("Invalid device count: %d", record->type);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Calculate required buffer size */
+    size_t required_size = 4 + (2 * record->type);
+    if (buffer_size < required_size)
+    {
+        LOG_ERR("Buffer too small: %zu < %zu", buffer_size, required_size);
+        return JUXTA_FRAMFS_ERROR_SIZE;
+    }
+
+    /* Decode variable fields */
+    size_t offset = 4;
+    for (int i = 0; i < record->type; i++)
+    {
+        record->mac_indices[i] = buffer[offset + i];                        /* MAC index */
+        record->rssi_values[i] = (int8_t)buffer[offset + record->type + i]; /* RSSI value */
+    }
+
+    return (int)required_size;
+}
+
+int juxta_framfs_encode_simple_record(const struct juxta_framfs_simple_record *record,
+                                      uint8_t *buffer)
+{
+    if (!record || !buffer)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    buffer[0] = (record->minute >> 8) & 0xFF; /* minute high byte */
+    buffer[1] = record->minute & 0xFF;        /* minute low byte */
+    buffer[2] = record->type;                 /* record type */
+
+    return 3; /* 3 bytes */
+}
+
+int juxta_framfs_decode_simple_record(const uint8_t *buffer,
+                                      struct juxta_framfs_simple_record *record)
+{
+    if (!buffer || !record)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    record->minute = (buffer[0] << 8) | buffer[1]; /* minute */
+    record->type = buffer[2];                      /* record type */
+
+    return 3; /* 3 bytes */
+}
+
+int juxta_framfs_encode_battery_record(const struct juxta_framfs_battery_record *record,
+                                       uint8_t *buffer)
+{
+    if (!record || !buffer)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    buffer[0] = (record->minute >> 8) & 0xFF; /* minute high byte */
+    buffer[1] = record->minute & 0xFF;        /* minute low byte */
+    buffer[2] = record->type;                 /* record type (0xF4) */
+    buffer[3] = record->level;                /* battery level */
+
+    return 4; /* 4 bytes */
+}
+
+int juxta_framfs_decode_battery_record(const uint8_t *buffer,
+                                       struct juxta_framfs_battery_record *record)
+{
+    if (!buffer || !record)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    record->minute = (buffer[0] << 8) | buffer[1]; /* minute */
+    record->type = buffer[2];                      /* record type */
+    record->level = buffer[3];                     /* battery level */
+
+    return 4; /* 4 bytes */
+}
+
+int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
+                                    uint16_t minute,
+                                    uint8_t motion_count,
+                                    const uint8_t (*mac_addresses)[6],
+                                    const int8_t *rssi_values,
+                                    uint8_t device_count)
+{
+    if (!ctx || !ctx->initialized || !mac_addresses || !rssi_values)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    if (device_count == 0 || device_count > 128)
+    {
+        LOG_ERR("Invalid device count: %d", device_count);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Prepare device record */
+    struct juxta_framfs_device_record record;
+    record.minute = minute;
+    record.type = device_count;
+    record.motion_count = motion_count;
+
+    /* Process MAC addresses and get indices */
+    for (int i = 0; i < device_count; i++)
+    {
+        uint8_t mac_index;
+        int ret = juxta_framfs_mac_find_or_add(ctx, mac_addresses[i], &mac_index);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to process MAC address %d: %d", i, ret);
+            return ret;
+        }
+        record.mac_indices[i] = mac_index;
+        record.rssi_values[i] = rssi_values[i];
+    }
+
+    /* Encode record */
+    uint8_t buffer[4 + (2 * 128)]; /* Maximum size for 128 devices */
+    int encoded_size = juxta_framfs_encode_device_record(&record, buffer, sizeof(buffer));
+    if (encoded_size < 0)
+    {
+        LOG_ERR("Failed to encode device record: %d", encoded_size);
+        return encoded_size;
+    }
+
+    /* Append to active file */
+    return juxta_framfs_append(ctx, buffer, encoded_size);
+}
+
+int juxta_framfs_append_simple_record(struct juxta_framfs_context *ctx,
+                                      uint16_t minute,
+                                      uint8_t type)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Validate record type */
+    if (type != JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY &&
+        type != JUXTA_FRAMFS_RECORD_TYPE_BOOT &&
+        type != JUXTA_FRAMFS_RECORD_TYPE_CONNECTED &&
+        type != JUXTA_FRAMFS_RECORD_TYPE_ERROR)
+    {
+        LOG_ERR("Invalid simple record type: 0x%02X", type);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Prepare simple record */
+    struct juxta_framfs_simple_record record;
+    record.minute = minute;
+    record.type = type;
+
+    /* Encode record */
+    uint8_t buffer[3];
+    int ret = juxta_framfs_encode_simple_record(&record, buffer);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to encode simple record: %d", ret);
+        return ret;
+    }
+
+    /* Append to active file */
+    return juxta_framfs_append(ctx, buffer, 3);
+}
+
+int juxta_framfs_append_battery_record(struct juxta_framfs_context *ctx,
+                                       uint16_t minute,
+                                       uint8_t level)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Validate battery level */
+    if (level > 100)
+    {
+        LOG_ERR("Invalid battery level: %d", level);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Prepare battery record */
+    struct juxta_framfs_battery_record record;
+    record.minute = minute;
+    record.type = JUXTA_FRAMFS_RECORD_TYPE_BATTERY;
+    record.level = level;
+
+    /* Encode record */
+    uint8_t buffer[4];
+    int ret = juxta_framfs_encode_battery_record(&record, buffer);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to encode battery record: %d", ret);
+        return ret;
+    }
+
+    /* Append to active file */
+    return juxta_framfs_append(ctx, buffer, 4);
 }

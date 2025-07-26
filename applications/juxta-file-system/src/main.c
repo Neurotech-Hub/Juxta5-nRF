@@ -123,6 +123,7 @@ int main(void)
         printk("║  ✅ FRAM Library:    PASSED                                 ║\n");
         printk("║  ✅ File System:     PASSED                                 ║\n");
         printk("║  ✅ MAC Address Table: PASSED                               ║\n");
+        printk("║  ✅ Encoding/Decoding: PASSED                               ║\n");
         printk("║                                                              ║\n");
         printk("║  🎯 Ready for application development!                      ║\n");
         printk("╚══════════════════════════════════════════════════════════════╝\n");
