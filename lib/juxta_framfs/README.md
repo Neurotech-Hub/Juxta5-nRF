@@ -311,6 +311,158 @@ struct juxta_framfs_battery_record {
 - **File Limit**: 64 files maximum
 - **Filename Length**: 12 characters maximum
 
+## Primary API (Time-Aware File Management)
+
+The primary API automatically handles daily file management based on RTC time. This is the recommended approach for most applications:
+
+### Basic Setup
+```c
+#include <juxta_framfs/framfs.h>
+
+/* RTC time function (returns YYYYMMDD format) */
+uint32_t get_current_date(void)
+{
+    // Your RTC implementation here
+    // Return date in format: 20240120 for January 20, 2024
+    return 20240120;
+}
+
+/* Initialize with automatic time management */
+struct juxta_framfs_context fs_ctx;
+struct juxta_framfs_ctx ctx;
+
+juxta_framfs_init(&fs_ctx, &fram_dev);
+juxta_framfs_init_with_time(&ctx, &fs_ctx, get_current_date, true);
+```
+
+### Primary API Usage
+```c
+/* Data is automatically written to the correct daily file */
+juxta_framfs_append_data(&ctx, sensor_data, sizeof(sensor_data));
+
+/* Device scans with automatic file switching */
+uint8_t macs[][6] = {{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
+int8_t rssi[] = {-45};
+juxta_framfs_append_device_scan_data(&ctx, 1234, 5, macs, rssi, 1);
+
+/* System events with automatic file management */
+juxta_framfs_append_simple_record_data(&ctx, 567, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
+juxta_framfs_append_battery_record_data(&ctx, 890, 87);
+```
+
+### File Management
+```c
+/* Check current active file */
+char current_file[13];
+juxta_framfs_get_current_filename(&ctx, current_file);
+printf("Current file: %s\n", current_file);
+
+/* Force advance to next day */
+juxta_framfs_advance_to_next_day(&ctx);
+```
+
+### Benefits of Primary API
+- **Automatic**: No need to manually check dates before writes
+- **Simple**: Clean function names without "_time_" prefix
+- **Power Safe**: File switching is atomic and power-fail safe
+- **Flexible**: Can be enabled/disabled per application
+- **Recommended**: This is the primary API for most use cases
+
+## Advanced API (Direct File System Access)
+
+For advanced applications that need direct control over file management:
+
+```c
+/* Direct file system operations */
+juxta_framfs_create_active(&fs_ctx, "20240120", JUXTA_FRAMFS_TYPE_SENSOR_LOG);
+juxta_framfs_append(&fs_ctx, data, length);
+juxta_framfs_seal_active(&fs_ctx);
+```
+
+### When to Use Advanced API
+- **Custom file naming**: Non-standard filename patterns
+- **Manual control**: Explicit file creation and sealing
+- **Special cases**: Configuration files, temporary data
+- **Debugging**: Direct access for testing and diagnostics
+
+## Legacy API (Backward Compatibility)
+
+The legacy time-aware functions are still available for backward compatibility:
+
+```c
+/* Legacy API (deprecated, use primary API instead) */
+struct juxta_framfs_time_ctx time_ctx;
+juxta_framfs_time_init(&time_ctx, &fs_ctx, get_current_date, true);
+juxta_framfs_time_append(&time_ctx, data, length);
+```
+
+## Practical Example
+
+Here's how the primary API works in a typical sensor logging application:
+
+```c
+#include <juxta_framfs/framfs.h>
+
+/* RTC time function - your application provides this */
+uint32_t get_rtc_date(void)
+{
+    // Get current date from your RTC implementation
+    // Return format: 20240120 for January 20, 2024
+    return rtc_get_date(); // Your RTC function
+}
+
+/* Application setup */
+struct juxta_framfs_context fs_ctx;
+struct juxta_framfs_ctx ctx;
+
+void app_init(void)
+{
+    /* Initialize FRAM and file system */
+    juxta_fram_init(&fram_dev, spi_dev, 8000000, &led);
+    juxta_framfs_init(&fs_ctx, &fram_dev);
+    
+    /* Initialize with automatic time management */
+    juxta_framfs_init_with_time(&ctx, &fs_ctx, get_rtc_date, true);
+}
+
+/* Sensor data logging - automatically goes to correct daily file */
+void log_sensor_data(void)
+{
+    struct sensor_reading reading = {
+        .timestamp = k_uptime_get_32(),
+        .temperature = 250,  // 25.0°C
+        .humidity = 450,     // 45.0%
+        .pressure = 101325   // 1013.25 hPa
+    };
+    
+    /* Automatically writes to today's file (e.g., "20240120") */
+    juxta_framfs_append_data(&ctx, (uint8_t*)&reading, sizeof(reading));
+}
+
+/* Device scan logging - automatically handles file switching */
+void log_device_scan(void)
+{
+    uint8_t macs[][6] = {{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
+    int8_t rssi[] = {-45};
+    
+    /* Automatically switches to new file if date changed */
+    juxta_framfs_append_device_scan_data(&ctx, 1234, 5, macs, rssi, 1);
+}
+
+/* System events - always go to current daily file */
+void log_system_events(void)
+{
+    juxta_framfs_append_simple_record_data(&ctx, 567, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
+    juxta_framfs_append_battery_record_data(&ctx, 890, 87);
+}
+```
+
+### Key Benefits
+- **No manual file management**: Data automatically goes to the correct daily file
+- **Automatic date switching**: When the date changes, a new file is created automatically
+- **Power safe**: File switching is atomic and survives power failures
+- **Simple API**: Just call `juxta_framfs_append()` and it handles everything
+
 ## Thread Safety
 
 The library is **not thread-safe**. Use appropriate synchronization if accessing from multiple threads.

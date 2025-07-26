@@ -13,6 +13,7 @@ target_sources(app PRIVATE
     src/main.c
     src/fram_test.c
     src/framfs_test.c
+    src/framfs_time_test.c
 )
 
 # Add include directories for our libraries

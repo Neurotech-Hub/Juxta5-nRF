@@ -1193,3 +1193,210 @@ int juxta_framfs_append_battery_record(struct juxta_framfs_context *ctx,
     /* Append to active file */
     return juxta_framfs_append(ctx, buffer, 4);
 }
+
+/* ========================================================================
+ * Primary File System API (Time-Aware)
+ * ======================================================================== */
+
+int juxta_framfs_init_with_time(struct juxta_framfs_ctx *ctx,
+                                struct juxta_framfs_context *fs_ctx,
+                                uint32_t (*get_rtc_time)(void),
+                                bool auto_management)
+{
+    if (!ctx || !fs_ctx || !get_rtc_time)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    if (!fs_ctx->initialized)
+    {
+        LOG_ERR("File system context not initialized");
+        return JUXTA_FRAMFS_ERROR_INIT;
+    }
+
+    /* Initialize time context */
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->fs_ctx = fs_ctx;
+    ctx->get_rtc_time = get_rtc_time;
+    ctx->auto_file_management = auto_management;
+
+    /* Get current date and initialize filename */
+    ctx->current_file_date = get_rtc_time();
+    snprintf(ctx->current_filename, sizeof(ctx->current_filename),
+             "%08X", ctx->current_file_date);
+
+    LOG_INF("File system initialized with time management for date: %s", ctx->current_filename);
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_ensure_current_file(struct juxta_framfs_ctx *ctx)
+{
+    if (!ctx || !ctx->fs_ctx)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Get current date from RTC */
+    uint32_t current_date = ctx->get_rtc_time();
+
+    /* Check if we need to switch files */
+    if (current_date != ctx->current_file_date)
+    {
+        LOG_INF("Date changed from %08X to %08X, switching files",
+                ctx->current_file_date, current_date);
+
+        /* Seal current file if it exists and is active */
+        if (ctx->fs_ctx->active_file_index >= 0)
+        {
+            int ret = juxta_framfs_seal_active(ctx->fs_ctx);
+            if (ret < 0)
+            {
+                LOG_ERR("Failed to seal current file: %d", ret);
+                return ret;
+            }
+        }
+
+        /* Update context with new date */
+        ctx->current_file_date = current_date;
+        snprintf(ctx->current_filename, sizeof(ctx->current_filename),
+                 "%08X", current_date);
+
+        /* Create new active file */
+        int ret = juxta_framfs_create_active(ctx->fs_ctx,
+                                             ctx->current_filename,
+                                             JUXTA_FRAMFS_TYPE_SENSOR_LOG);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to create new active file: %d", ret);
+            return ret;
+        }
+
+        LOG_INF("Created new active file: %s", ctx->current_filename);
+    }
+
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_append_data(struct juxta_framfs_ctx *ctx,
+                             const uint8_t *data,
+                             size_t length)
+{
+    if (!ctx || !data || length == 0)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Ensure correct file is active */
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Append data to active file */
+    return juxta_framfs_append(ctx->fs_ctx, data, length);
+}
+
+int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
+                                         uint16_t minute,
+                                         uint8_t motion_count,
+                                         const uint8_t (*mac_addresses)[6],
+                                         const int8_t *rssi_values,
+                                         uint8_t device_count)
+{
+    if (!ctx)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Ensure correct file is active */
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Append device scan to active file */
+    return juxta_framfs_append_device_scan(ctx->fs_ctx, minute, motion_count,
+                                           mac_addresses, rssi_values, device_count);
+}
+
+int juxta_framfs_append_simple_record_data(struct juxta_framfs_ctx *ctx,
+                                           uint16_t minute,
+                                           uint8_t type)
+{
+    if (!ctx)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Ensure correct file is active */
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Append simple record to active file */
+    return juxta_framfs_append_simple_record(ctx->fs_ctx, minute, type);
+}
+
+int juxta_framfs_append_battery_record_data(struct juxta_framfs_ctx *ctx,
+                                            uint16_t minute,
+                                            uint8_t level)
+{
+    if (!ctx)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Ensure correct file is active */
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Append battery record to active file */
+    return juxta_framfs_append_battery_record(ctx->fs_ctx, minute, level);
+}
+
+int juxta_framfs_get_current_filename(struct juxta_framfs_ctx *ctx,
+                                      char *filename)
+{
+    if (!ctx || !filename)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    strncpy(filename, ctx->current_filename, JUXTA_FRAMFS_FILENAME_LEN);
+    filename[JUXTA_FRAMFS_FILENAME_LEN - 1] = '\0';
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_advance_to_next_day(struct juxta_framfs_ctx *ctx)
+{
+    if (!ctx)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Force a date check and file switch */
+    uint32_t old_date = ctx->current_file_date;
+    ctx->current_file_date = 0; /* Force update */
+
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    if (ctx->current_file_date != old_date)
+    {
+        LOG_INF("Advanced to next day: %s", ctx->current_filename);
+    }
+
+    return JUXTA_FRAMFS_OK;
+}
+
+/* Legacy compatibility functions removed for now - focus on primary API */

@@ -123,6 +123,22 @@ printf("Files: %d/%d, Data: %d bytes, Next: 0x%06X\n",
        stats.total_data_size, stats.next_data_addr);
 ```
 
+### Time-Aware API (Primary)
+```c
+/* Initialize with automatic time management */
+struct juxta_framfs_context fs_ctx;
+struct juxta_framfs_ctx ctx;
+
+juxta_framfs_init(&fs_ctx, &fram_dev);
+juxta_framfs_init_with_time(&ctx, &fs_ctx, get_rtc_date, true);
+
+/* Automatic file management - data goes to correct daily file */
+juxta_framfs_append_data(&ctx, sensor_data, sizeof(sensor_data));
+juxta_framfs_append_device_scan_data(&ctx, minute, motion, macs, rssi, count);
+juxta_framfs_append_simple_record_data(&ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
+juxta_framfs_append_battery_record_data(&ctx, minute, 87);
+```
+
 ## Configuration
 
 ### Board Configuration
@@ -136,6 +152,7 @@ Modify `CURRENT_TEST_MODE` in `main.c`:
 - `TEST_MODE_FRAM_ONLY` - Test FRAM library only
 - `TEST_MODE_FRAMFS_ONLY` - Test file system only
 - `TEST_MODE_FULL` - Complete test suite (default)
+- `TEST_MODE_TIME_API` - Test new time-aware API
 - `TEST_MODE_INTERACTIVE` - Interactive menu
 
 ## Performance Characteristics

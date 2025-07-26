@@ -35,6 +35,34 @@ Connect RTT console and watch for:
 [INF] 🎉 All tests completed successfully!
 ```
 
+## 🧪 Test Modes
+
+The application supports multiple test modes. Edit `src/main.c` line ~26:
+
+### **Full Test Suite (Default)**
+```c
+#define CURRENT_TEST_MODE TEST_MODE_FULL
+```
+Tests everything: FRAM library, file system, and time-aware API.
+
+### **Time-Aware API Only**
+```c
+#define CURRENT_TEST_MODE TEST_MODE_TIME_API
+```
+Tests only the new primary API with automatic file management.
+
+### **Individual Components**
+```c
+#define CURRENT_TEST_MODE TEST_MODE_FRAM_ONLY      // Just FRAM library
+#define CURRENT_TEST_MODE TEST_MODE_FRAMFS_ONLY    // Just file system
+```
+
+### **Interactive Mode**
+```c
+#define CURRENT_TEST_MODE TEST_MODE_INTERACTIVE
+```
+Runs all tests in sequence with user prompts.
+
 ## ✅ Success Indicators
 
 1. **FRAM Device ID verified** - Shows hardware is connected

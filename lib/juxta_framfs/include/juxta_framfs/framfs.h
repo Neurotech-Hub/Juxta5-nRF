@@ -492,6 +492,135 @@ extern "C"
                                            uint16_t minute,
                                            uint8_t level);
 
+    /* ========================================================================
+     * Primary File System API (Time-Aware)
+     * ======================================================================== */
+
+    /**
+     * @brief File system context with automatic time-based file management
+     *
+     * This is the primary API for most applications. It automatically handles
+     * file creation and switching based on RTC time, ensuring data is always
+     * written to the correct daily file.
+     */
+    struct juxta_framfs_ctx
+    {
+        struct juxta_framfs_context *fs_ctx; /* Underlying file system context */
+        uint32_t current_file_date;          /* Current file date (YYYYMMDD) */
+        char current_filename[13];           /* Current filename (YYYYMMDD) */
+        bool auto_file_management;           /* Enable automatic file management */
+        uint32_t (*get_rtc_time)(void);      /* RTC time function pointer */
+    };
+
+    /**
+     * @brief Initialize file system with automatic time management
+     *
+     * This is the primary initialization function for most applications.
+     * It sets up automatic daily file management based on RTC time.
+     *
+     * @param ctx File system context to initialize
+     * @param fs_ctx Underlying file system context
+     * @param get_rtc_time Function to get current RTC time (returns YYYYMMDD)
+     * @param auto_management Enable automatic file management
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_init_with_time(struct juxta_framfs_ctx *ctx,
+                                    struct juxta_framfs_context *fs_ctx,
+                                    uint32_t (*get_rtc_time)(void),
+                                    bool auto_management);
+
+    /**
+     * @brief Ensure correct file is active for current time
+     *
+     * This function checks if the current active file matches the current date.
+     * If not, it seals the current file and creates a new one.
+     *
+     * @param ctx File system context
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_ensure_current_file(struct juxta_framfs_ctx *ctx);
+
+    /**
+     * @brief Append data with automatic file management (PRIMARY API)
+     *
+     * This is the primary function for writing data. It automatically ensures
+     * the correct daily file is active before appending data.
+     *
+     * @param ctx File system context
+     * @param data Data to append
+     * @param length Length of data
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_data(struct juxta_framfs_ctx *ctx,
+                                 const uint8_t *data,
+                                 size_t length);
+
+    /**
+     * @brief Append device scan with automatic file management (PRIMARY API)
+     *
+     * @param ctx File system context
+     * @param minute Minute of day (0-1439)
+     * @param motion_count Motion events this minute
+     * @param mac_addresses Array of MAC addresses
+     * @param rssi_values Array of RSSI values
+     * @param device_count Number of devices
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
+                                             uint16_t minute,
+                                             uint8_t motion_count,
+                                             const uint8_t (*mac_addresses)[6],
+                                             const int8_t *rssi_values,
+                                             uint8_t device_count);
+
+    /**
+     * @brief Append simple record with automatic file management (PRIMARY API)
+     *
+     * @param ctx File system context
+     * @param minute Minute of day (0-1439)
+     * @param type Record type
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_simple_record_data(struct juxta_framfs_ctx *ctx,
+                                               uint16_t minute,
+                                               uint8_t type);
+
+    /**
+     * @brief Append battery record with automatic file management (PRIMARY API)
+     *
+     * @param ctx File system context
+     * @param minute Minute of day (0-1439)
+     * @param level Battery level (0-100)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_battery_record_data(struct juxta_framfs_ctx *ctx,
+                                                uint16_t minute,
+                                                uint8_t level);
+
+    /**
+     * @brief Get current active filename
+     *
+     * @param ctx File system context
+     * @param filename Buffer to store filename
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_current_filename(struct juxta_framfs_ctx *ctx,
+                                          char *filename);
+
+    /**
+     * @brief Seal current file and create new one for next day
+     *
+     * @param ctx File system context
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_advance_to_next_day(struct juxta_framfs_ctx *ctx);
+
+    /* ========================================================================
+     * Legacy/Advanced API (Direct File System Access)
+     * ======================================================================== */
+
+    /* Legacy compatibility removed for now - focus on primary API */
+
 #ifdef __cplusplus
 }
 #endif
