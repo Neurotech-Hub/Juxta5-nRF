@@ -83,6 +83,7 @@ static void test_vitals_timestamp(void)
 static void test_vitals_battery(void)
 {
     LOG_INF("🧪 Testing battery monitoring...");
+    LOG_INF("──────────────────────────────────────────────────────────────");
 
     /* Update vitals to read battery */
     int ret = juxta_vitals_update(&test_vitals);
@@ -97,8 +98,69 @@ static void test_vitals_battery(void)
     uint8_t battery_percent = juxta_vitals_get_battery_percent(&test_vitals);
     bool low_battery = juxta_vitals_is_low_battery(&test_vitals);
 
-    LOG_INF("✅ Battery reading: %dmV (%d%%)", battery_mv, battery_percent);
-    LOG_INF("✅ Low battery flag: %s", low_battery ? "true" : "false");
+    LOG_INF("Battery voltage thresholds:");
+    LOG_INF("  Full:     %d mV", JUXTA_VITALS_BATTERY_FULL_MV);
+    LOG_INF("  Low:      %d mV", JUXTA_VITALS_BATTERY_LOW_MV);
+    LOG_INF("  Critical: %d mV", JUXTA_VITALS_BATTERY_CRITICAL_MV);
+    LOG_INF("");
+
+    LOG_INF("Current battery status:");
+    LOG_INF("  Voltage:  %d mV", battery_mv);
+    LOG_INF("  Level:    %d%%", battery_percent);
+    LOG_INF("  State:    %s", low_battery ? "CRITICAL" : (battery_percent < 20 ? "LOW" : "NORMAL"));
+
+    /* Validate readings */
+    if (battery_mv == 0)
+    {
+        LOG_ERR("❌ Invalid battery voltage reading (0 mV)");
+        return;
+    }
+
+    /* Check voltage is in expected range for 3V system */
+    if (battery_mv < 2000 || battery_mv > 3300)
+    {
+        LOG_ERR("❌ Battery voltage out of expected range: %d mV", battery_mv);
+        LOG_ERR("   Expected: 2000-3300 mV for 3V system");
+        return;
+    }
+
+    /* Verify percentage calculation */
+    uint32_t expected_percent;
+    if (battery_mv >= JUXTA_VITALS_BATTERY_FULL_MV)
+    {
+        expected_percent = 100;
+    }
+    else if (battery_mv <= JUXTA_VITALS_BATTERY_LOW_MV)
+    {
+        expected_percent = 0;
+    }
+    else
+    {
+        uint32_t range = JUXTA_VITALS_BATTERY_FULL_MV - JUXTA_VITALS_BATTERY_LOW_MV;
+        uint32_t current = battery_mv - JUXTA_VITALS_BATTERY_LOW_MV;
+        expected_percent = (current * 100) / range;
+    }
+
+    if (battery_percent != expected_percent)
+    {
+        LOG_ERR("❌ Battery percentage calculation error");
+        LOG_ERR("   Got: %d%%, Expected: %d%%", battery_percent, expected_percent);
+        return;
+    }
+
+    /* Verify low battery flag */
+    bool expected_low = (battery_mv <= JUXTA_VITALS_BATTERY_CRITICAL_MV);
+    if (low_battery != expected_low)
+    {
+        LOG_ERR("❌ Low battery flag error");
+        LOG_ERR("   Got: %s, Expected: %s",
+                low_battery ? "true" : "false",
+                expected_low ? "true" : "false");
+        return;
+    }
+
+    LOG_INF("✅ Battery monitoring verified successfully");
+    LOG_INF("──────────────────────────────────────────────────────────────");
 }
 
 static void test_vitals_system(void)
