@@ -207,6 +207,58 @@ extern "C"
      */
     int juxta_vitals_set_temperature_monitoring(struct juxta_vitals_ctx *ctx, bool enable);
 
+    /* ========================================================================
+     * File System Integration Functions
+     * ======================================================================== */
+
+    /**
+     * @brief Get current date in YYYYMMDD format for file system operations
+     *
+     * This function is designed for integration with file systems that need
+     * daily file management. It returns the current date in YYYYMMDD format
+     * suitable for use as a filename.
+     *
+     * @param ctx Vitals context
+     * @return Date in YYYYMMDD format, or 0 if timestamp not set
+     */
+    uint32_t juxta_vitals_get_file_date(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Get current minute of day (0-1439) for time-series data
+     *
+     * This function converts the current timestamp to minutes since midnight,
+     * which is commonly used for time-series data logging and file system
+     * record timestamps.
+     *
+     * @param ctx Vitals context
+     * @return Minutes since midnight (0-1439), or 0 if timestamp not set
+     */
+    uint16_t juxta_vitals_get_minute_of_day(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Validate battery level for file system operations
+     *
+     * This function validates that a battery level is within acceptable
+     * range (0-100) for storage in file system records.
+     *
+     * @param level Battery level to validate
+     * @return true if valid (0-100), false otherwise
+     */
+    bool juxta_vitals_validate_battery_level(uint8_t level);
+
+    /**
+     * @brief Get battery level with validation for file system storage
+     *
+     * This function gets the current battery level and validates it for
+     * storage in file system records. It's designed for integration with
+     * file systems that need to store battery data.
+     *
+     * @param ctx Vitals context
+     * @param level Pointer to store validated battery level
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_vitals_get_validated_battery_level(struct juxta_vitals_ctx *ctx, uint8_t *level);
+
 #ifdef __cplusplus
 }
 #endif

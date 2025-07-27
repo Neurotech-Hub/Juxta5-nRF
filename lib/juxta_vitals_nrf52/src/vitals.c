@@ -13,6 +13,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include "juxta_vitals_nrf52/vitals.h"
 
 LOG_MODULE_REGISTER(juxta_vitals_nrf52, CONFIG_JUXTA_VITALS_NRF52_LOG_LEVEL);
@@ -452,12 +453,75 @@ int juxta_vitals_set_battery_monitoring(struct juxta_vitals_ctx *ctx, bool enabl
 
 int juxta_vitals_set_temperature_monitoring(struct juxta_vitals_ctx *ctx, bool enable)
 {
-    if (!ctx)
+    if (!ctx || !ctx->initialized)
     {
-        return JUXTA_VITALS_ERROR_INVALID_PARAM;
+        return JUXTA_VITALS_ERROR_NOT_READY;
     }
 
     ctx->temperature_monitoring = enable;
     LOG_INF("Temperature monitoring %s", enable ? "enabled" : "disabled");
+    return JUXTA_VITALS_OK;
+}
+
+/* ========================================================================
+ * File System Integration Functions
+ * ======================================================================== */
+
+uint32_t juxta_vitals_get_file_date(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return 0;
+    }
+
+    /* Use the existing date function - it's already in YYYYMMDD format */
+    return juxta_vitals_get_date_yyyymmdd(ctx);
+}
+
+uint16_t juxta_vitals_get_minute_of_day(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !ctx->initialized || ctx->current_timestamp == 0)
+    {
+        return 0;
+    }
+
+    /* Convert timestamp to minutes since midnight */
+    struct tm timeinfo;
+    time_t time_sec = (time_t)ctx->current_timestamp;
+    gmtime_r(&time_sec, &timeinfo);
+
+    return (uint16_t)(timeinfo.tm_hour * 60 + timeinfo.tm_min);
+}
+
+bool juxta_vitals_validate_battery_level(uint8_t level)
+{
+    /* Battery level should be 0-100 */
+    return level <= 100;
+}
+
+int juxta_vitals_get_validated_battery_level(struct juxta_vitals_ctx *ctx, uint8_t *level)
+{
+    if (!ctx || !ctx->initialized || !level)
+    {
+        return JUXTA_VITALS_ERROR_NOT_READY;
+    }
+
+    if (!ctx->battery_monitoring)
+    {
+        LOG_WRN("Battery monitoring not enabled");
+        return JUXTA_VITALS_ERROR_NOT_READY;
+    }
+
+    /* Get current battery level */
+    uint8_t current_level = juxta_vitals_get_battery_percent(ctx);
+
+    /* Validate the level */
+    if (!juxta_vitals_validate_battery_level(current_level))
+    {
+        LOG_WRN("Invalid battery level: %d", current_level);
+        return JUXTA_VITALS_ERROR_INVALID_PARAM;
+    }
+
+    *level = current_level;
     return JUXTA_VITALS_OK;
 }

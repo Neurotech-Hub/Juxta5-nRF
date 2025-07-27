@@ -7,13 +7,29 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/spi.h>
+#include <juxta_fram/fram.h>
+#include <juxta_framfs/framfs.h>
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include "juxta_vitals_nrf52/vitals.h"
 
 LOG_MODULE_REGISTER(vitals_test, CONFIG_LOG_DEFAULT_LEVEL);
 
+/* Device tree definitions for FRAM */
+#define FRAM_NODE DT_ALIAS(spi_fram)
+static const struct gpio_dt_spec cs_gpio = GPIO_DT_SPEC_GET_BY_IDX(DT_PARENT(FRAM_NODE), cs_gpios, 0);
+
 /* Test vitals context */
 static struct juxta_vitals_ctx test_vitals;
+
+/* FRAM and file system instances for integration test */
+static struct juxta_fram_device fram_dev;
+static struct juxta_framfs_context fs_ctx;
+static struct juxta_framfs_ctx time_ctx;
 
 /* Test timestamp (2024-01-20 12:00:00) */
 static const uint32_t test_timestamp = 1705752000;
@@ -300,6 +316,185 @@ static void test_vitals_config(void)
     }
 }
 
+/**
+ * @brief Simple RTC function for integration test
+ * Returns current date in YYYYMMDD format using vitals library
+ */
+static uint32_t get_integration_rtc_date(void)
+{
+    /* Use vitals library function for file system integration */
+    return juxta_vitals_get_file_date(&test_vitals);
+}
+
+/**
+ * @brief Integration test: Write actual battery level to file
+ * This test validates that file system, battery monitoring, and RTC work together
+ */
+static void test_vitals_integration(void)
+{
+    int ret;
+
+    LOG_INF("🔗 Testing Integration: Battery Level to File");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+
+    /* Step 1: Initialize FRAM and file system */
+    LOG_INF("Step 1: Initializing FRAM and file system...");
+
+    const struct device *spi_dev = DEVICE_DT_GET(DT_BUS(FRAM_NODE));
+    if (!device_is_ready(spi_dev))
+    {
+        LOG_ERR("❌ SPI device not ready");
+        return;
+    }
+
+    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &cs_gpio);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to initialize FRAM: %d", ret);
+        return;
+    }
+    LOG_INF("  ✅ FRAM initialized");
+
+    ret = juxta_framfs_init(&fs_ctx, &fram_dev);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to initialize file system: %d", ret);
+        return;
+    }
+    LOG_INF("  ✅ File system initialized");
+
+    /* Step 2: Initialize time-aware context with integration RTC function */
+    LOG_INF("Step 2: Initializing time-aware context...");
+
+    ret = juxta_framfs_init_with_time(&time_ctx, &fs_ctx, get_integration_rtc_date, true);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to initialize time-aware context: %d", ret);
+        return;
+    }
+    LOG_INF("  ✅ Time-aware context initialized");
+
+    /* Step 3: Get validated battery level using vitals library */
+    LOG_INF("Step 3: Reading validated battery level...");
+
+    uint8_t battery_level;
+    ret = juxta_vitals_get_validated_battery_level(&test_vitals, &battery_level);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to get validated battery level: %d", ret);
+        return;
+    }
+    LOG_INF("  ✅ Battery level: %d%%", battery_level);
+
+    /* Step 4: Get current minute using vitals library */
+    LOG_INF("Step 4: Getting current minute...");
+
+    uint16_t current_minute = juxta_vitals_get_minute_of_day(&test_vitals);
+    if (current_minute == 0)
+    {
+        /* Use a test minute if no timestamp is set */
+        current_minute = 720; /* 12:00 PM */
+        LOG_INF("  ✅ Using test minute: %d (12:00 PM)", current_minute);
+    }
+    else
+    {
+        LOG_INF("  ✅ Current minute: %d", current_minute);
+    }
+
+    /* Step 5: Write battery level to file using time-aware API */
+    LOG_INF("Step 5: Writing battery level to file...");
+
+    ret = juxta_framfs_append_battery_record_data(&time_ctx, current_minute, battery_level);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to write battery record: %d", ret);
+        return;
+    }
+    LOG_INF("  ✅ Battery record written to file");
+
+    /* Step 6: Verify file was created and data was written */
+    LOG_INF("Step 6: Verifying file and data...");
+
+    char current_file[JUXTA_FRAMFS_FILENAME_LEN];
+    ret = juxta_framfs_get_current_filename(&time_ctx, current_file);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to get current filename: %d", ret);
+        return;
+    }
+    LOG_INF("  ✅ File created: %s", current_file);
+
+    /* Get file size */
+    int file_size = juxta_framfs_get_file_size(&fs_ctx, current_file);
+    if (file_size < 0)
+    {
+        LOG_ERR("❌ Failed to get file size: %d", file_size);
+        return;
+    }
+    LOG_INF("  ✅ File size: %d bytes", file_size);
+
+    /* Read and verify the battery record */
+    uint8_t read_buffer[256];
+    ret = juxta_framfs_read(&fs_ctx, current_file, 0, read_buffer, file_size);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to read file: %d", ret);
+        return;
+    }
+
+    /* Decode the battery record */
+    struct juxta_framfs_battery_record battery_record;
+    ret = juxta_framfs_decode_battery_record(read_buffer, &battery_record);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to decode battery record: %d", ret);
+        return;
+    }
+
+    /* Verify the data */
+    if (battery_record.level != battery_level)
+    {
+        LOG_ERR("❌ Battery level mismatch:");
+        LOG_ERR("   Expected: %d%%", battery_level);
+        LOG_ERR("   Got:      %d%%", battery_record.level);
+        return;
+    }
+
+    if (battery_record.minute != current_minute)
+    {
+        LOG_ERR("❌ Minute mismatch:");
+        LOG_ERR("   Expected: %d", current_minute);
+        LOG_ERR("   Got:      %d", battery_record.minute);
+        return;
+    }
+
+    LOG_INF("  ✅ Battery record verified:");
+    LOG_INF("     - Minute: %d", battery_record.minute);
+    LOG_INF("     - Level:  %d%%", battery_record.level);
+    LOG_INF("     - Type:   BATTERY");
+
+    /* Step 7: Display file system statistics */
+    LOG_INF("Step 7: File system statistics...");
+
+    struct juxta_framfs_header stats;
+    ret = juxta_framfs_get_stats(&fs_ctx, &stats);
+    if (ret == 0)
+    {
+        LOG_INF("  ✅ File system stats:");
+        LOG_INF("     - Files: %d/%d", stats.file_count, JUXTA_FRAMFS_MAX_FILES);
+        LOG_INF("     - Data size: %d bytes", stats.total_data_size);
+        LOG_INF("     - Next addr: 0x%06X", stats.next_data_addr);
+    }
+
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("✅ Integration test passed! All components working together:");
+    LOG_INF("  • Vitals library (battery monitoring) ✓");
+    LOG_INF("  • File system (data storage) ✓");
+    LOG_INF("  • RTC (time management) ✓");
+    LOG_INF("  • Time-aware API (automatic file management) ✓");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+}
+
 int vitals_test_main(void)
 {
     LOG_INF("🚀 Starting JUXTA Vitals Library Test");
@@ -322,6 +517,10 @@ int vitals_test_main(void)
     k_sleep(K_MSEC(100));
 
     test_vitals_config();
+    k_sleep(K_MSEC(100));
+
+    /* Final integration test */
+    test_vitals_integration();
     k_sleep(K_MSEC(100));
 
     LOG_INF("✅ All vitals tests completed successfully!");

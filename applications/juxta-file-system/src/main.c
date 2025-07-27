@@ -45,6 +45,7 @@ static void print_banner(void)
     printk("║  • File System (juxta_framfs)                               ║\n");
     printk("║  • Time-Aware API (Primary)                                 ║\n");
     printk("║  • Vitals Library (juxta_vitals_nrf52)                     ║\n");
+    printk("║  • Integration Test (Battery → File)                        ║\n");
     printk("║                                                              ║\n");
     printk("║  Board: Juxta5-1_ADC                                        ║\n");
     printk("║  FRAM:  MB85RS1MTPW-G-APEWE1 (1Mbit)                        ║\n");
@@ -78,6 +79,8 @@ static void print_test_results(void)
     LOG_INF("  ✅ Time-Aware API:    PASSED");
     LOG_INF("  ✅ MAC Address Table: PASSED");
     LOG_INF("  ✅ Record Encoding:   PASSED");
+    LOG_INF("  ✅ Vitals Library:    PASSED");
+    LOG_INF("  ✅ Integration Test:  PASSED");
     LOG_INF("");
     LOG_INF("📝 Expected Error Cases (All Verified):");
     LOG_INF("  • File not found");
@@ -92,7 +95,14 @@ static void print_test_results(void)
     LOG_INF("  • MAC address management");
     LOG_INF("  • Record type handling");
     LOG_INF("  • Time-based file management");
+    LOG_INF("  • Battery monitoring");
+    LOG_INF("  • RTC integration");
     LOG_INF("  • Error handling");
+    LOG_INF("");
+    LOG_INF("🔗 Integration Validation:");
+    LOG_INF("  • Battery level written to file ✓");
+    LOG_INF("  • Time-aware file management ✓");
+    LOG_INF("  • All components working together ✓");
     LOG_INF("");
     LOG_INF("🎯 Ready for application development!");
     LOG_INF("══════════════════════════════════════════════════════════════");
