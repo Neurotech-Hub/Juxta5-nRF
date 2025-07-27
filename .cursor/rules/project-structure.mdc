@@ -26,3 +26,65 @@ description:
 globs:
 alwaysApply: true
 ---
+
+# Configuration File Standards
+
+## Board Defconfig (`*_defconfig`)
+Board configuration files should ONLY contain:
+- Hardware protection settings (MPU, stack protection)
+- Basic peripheral enablement (GPIO, SPI, ADC, RTC)
+- Hardware-specific driver configs
+- Hardware limitations/restrictions
+- Default console method
+
+Example:
+```kconfig
+# Hardware Protection
+CONFIG_ARM_MPU=y
+CONFIG_HW_STACK_PROTECTION=y
+
+# Essential Hardware Peripherals
+CONFIG_GPIO=y
+CONFIG_SPI=y
+CONFIG_ADC=y
+
+# Hardware Limitations
+CONFIG_UART_NRFX=n
+```
+
+## Project Config (`prj.conf`)
+Project configuration files should contain:
+- Library enablement
+- Sensor subsystem configs
+- Advanced peripheral settings
+- Logging configuration
+- Memory and thread settings
+- Application-specific overrides
+
+Example:
+```kconfig
+# Libraries
+CONFIG_JUXTA_FRAM=y
+CONFIG_JUXTA_FRAMFS=y
+
+# Logging
+CONFIG_LOG=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+
+# Memory & Threads
+CONFIG_MAIN_STACK_SIZE=4096
+```
+
+## Key Principles
+1. Board defconfigs define hardware capabilities
+2. Project configs define software behavior
+3. No duplication between files
+4. Hardware settings belong in defconfig
+5. Application settings belong in prj.conf
+
+## Migration Guidelines
+When moving settings between files:
+1. Hardware-related configs → defconfig
+2. Software/application configs → prj.conf
+3. Remove duplicates, keeping in defconfig
+4. Document hardware limitations in defconfig

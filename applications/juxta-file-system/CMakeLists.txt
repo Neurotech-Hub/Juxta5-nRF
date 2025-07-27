@@ -4,9 +4,7 @@
 # Copyright (c) 2024 NeurotechHub
 # SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.20.0)
-
-# Set CMake policies
+cmake_minimum_required(VERSION 3.21)
 cmake_policy(SET CMP0057 NEW)
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
