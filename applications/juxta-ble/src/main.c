@@ -189,11 +189,11 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                 memcpy(name, net_buf_simple_pull_mem(buf, len), len);
                 name_found = true;
 
-                // Only process devices with names starting with "JUXTA_"
-                if (strncmp(name, "JUXTA_", 6) == 0)
+                // Process devices with names matching "JX_XXXXXX" pattern (JX_ + 6 characters)
+                if (strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
                 {
                     bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-                    LOG_INF("Found JUXTA device: %s, Name: %s, RSSI: %d",
+                    LOG_INF("Found JX device: %s, Name: %s, RSSI: %d",
                             addr_str, name, rssi);
                     add_discovered_device(addr, rssi, name);
                 }
