@@ -7,6 +7,8 @@
 	chosen {
 		/* No UART available on this board */
 		zephyr,console = &uart0; /* Will be ignored since no UART */
+		/* ADC controller for battery monitoring */
+		zephyr,adc-controller = &adc;
 	};
 };
 
@@ -21,4 +23,9 @@
 	
 	/* FRAM device is already configured in board DTS */
 	/* Access via device tree alias: spi-fram */
+};
+
+/* Configure ADC for battery monitoring */
+&adc {
+	status = "okay";
 }; 

@@ -15,6 +15,7 @@ LOG_MODULE_REGISTER(main, CONFIG_LOG_DEFAULT_LEVEL);
 extern int fram_test_main(void);
 extern int framfs_test_main(void);
 extern int framfs_time_test_main(void);
+extern int vitals_test_main(void);
 
 /* Test mode selection */
 enum test_mode
@@ -23,11 +24,12 @@ enum test_mode
     TEST_MODE_FRAMFS_ONLY, /* Test file system only */
     TEST_MODE_FULL,        /* Test both in sequence */
     TEST_MODE_TIME_API,    /* Test new time-aware API */
+    TEST_MODE_VITALS,      /* Test vitals library */
     TEST_MODE_INTERACTIVE  /* Interactive menu */
 };
 
 /* Configure which test to run */
-#define CURRENT_TEST_MODE TEST_MODE_FULL
+#define CURRENT_TEST_MODE TEST_MODE_TIME_API
 
 /* Hardcoded RTC function for testing - defined in framfs_time_test.c */
 
@@ -42,6 +44,7 @@ static void print_banner(void)
     printk("║  • FRAM Library (juxta_fram)                                ║\n");
     printk("║  • File System (juxta_framfs)                               ║\n");
     printk("║  • Time-Aware API (Primary)                                 ║\n");
+    printk("║  • Vitals Library (juxta_vitals_nrf52)                     ║\n");
     printk("║                                                              ║\n");
     printk("║  Board: Juxta5-1_ADC                                        ║\n");
     printk("║  FRAM:  MB85RS1MTPW-G-APEWE1 (1Mbit)                        ║\n");
@@ -56,7 +59,8 @@ static void run_interactive_menu(void)
     printk("  2. File System Test Only  \n");
     printk("  3. Full Test Suite\n");
     printk("  4. Time-Aware API Test\n");
-    printk("  5. Continuous Testing\n");
+    printk("  5. Vitals Library Test\n");
+    printk("  6. Continuous Testing\n");
     printk("\n");
     printk("💡 To change test mode, modify CURRENT_TEST_MODE in main.c\n");
     printk("🔄 Running full test suite by default...\n\n");
@@ -115,6 +119,17 @@ int main(void)
         LOG_INF("✅ Time-Aware API test completed successfully");
         break;
 
+    case TEST_MODE_VITALS:
+        LOG_INF("💓 Running Vitals Library Test");
+        ret = vitals_test_main();
+        if (ret < 0)
+        {
+            LOG_ERR("❌ Vitals library test failed: %d", ret);
+            return ret;
+        }
+        LOG_INF("✅ Vitals library test completed successfully");
+        break;
+
     case TEST_MODE_INTERACTIVE:
         run_interactive_menu();
         ret = fram_test_main();
@@ -127,6 +142,11 @@ int main(void)
         {
             k_sleep(K_SECONDS(1));
             ret = framfs_time_test_main();
+        }
+        if (ret == 0)
+        {
+            k_sleep(K_SECONDS(1));
+            ret = vitals_test_main();
         }
         break;
 
@@ -147,6 +167,7 @@ int main(void)
         printk("║  ✅ MAC Address Table: PASSED                               ║\n");
         printk("║  ✅ Encoding/Decoding: PASSED                               ║\n");
         printk("║  ✅ Time-Aware API:   PASSED                                ║\n");
+        printk("║  ✅ Vitals Library:   PASSED                                ║\n");
         printk("║                                                              ║\n");
         printk("║  🎯 Ready for application development!                      ║\n");
         printk("╚══════════════════════════════════════════════════════════════╝\n");

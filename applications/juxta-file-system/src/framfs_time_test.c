@@ -13,6 +13,7 @@
 #include <zephyr/sys/util.h>
 #include <juxta_fram/fram.h>
 #include <juxta_framfs/framfs.h>
+#include <juxta_vitals_nrf52/vitals.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -29,21 +30,31 @@ static struct juxta_fram_device fram_dev;
 static struct juxta_framfs_context fs_ctx;
 static struct juxta_framfs_ctx time_ctx;
 
-/* Hardcoded RTC function for testing */
+/* Vitals monitoring instance */
+static struct juxta_vitals_ctx vitals_ctx;
+
+/* RTC function that uses vitals library */
 static uint32_t get_test_rtc_date(void)
 {
-    /* Return a hardcoded date for testing: 2024-01-20 */
-    return 20240120;
+    /* Get current date from vitals library */
+    uint32_t date = juxta_vitals_get_date_yyyymmdd(&vitals_ctx);
+    if (date == 0)
+    {
+        /* Fallback to hardcoded date if vitals not initialized */
+        LOG_WRN("Vitals not initialized, using fallback date");
+        return 20240120;
+    }
+    return date;
 }
 
 /**
- * @brief Test time-aware API initialization
+ * @brief Test time-aware API initialization with vitals integration
  */
 static int test_time_api_init(void)
 {
     int ret;
 
-    LOG_INF("🔧 Testing time-aware API initialization...");
+    LOG_INF("🔧 Testing time-aware API initialization with vitals...");
 
     /* Initialize FRAM first */
     const struct device *spi_dev = DEVICE_DT_GET(DT_BUS(FRAM_NODE));
@@ -58,6 +69,40 @@ static int test_time_api_init(void)
     {
         LOG_ERR("Failed to initialize FRAM: %d", ret);
         return ret;
+    }
+
+    /* Initialize vitals monitoring */
+    LOG_INF("Initializing vitals monitoring...");
+    ret = juxta_vitals_init(&vitals_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to initialize vitals: %d", ret);
+        return ret;
+    }
+
+    /* Set initial timestamp (2024-01-20 12:00:00) */
+    uint32_t initial_timestamp = 1705752000; /* 2024-01-20 12:00:00 UTC */
+    ret = juxta_vitals_set_timestamp(&vitals_ctx, initial_timestamp);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set initial timestamp: %d", ret);
+        return ret;
+    }
+
+    /* Update vitals to get initial readings */
+    ret = juxta_vitals_update(&vitals_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to update vitals: %d", ret);
+        return ret;
+    }
+
+    /* Display initial vitals */
+    char vitals_summary[128];
+    ret = juxta_vitals_get_summary(&vitals_ctx, vitals_summary, sizeof(vitals_summary));
+    if (ret > 0)
+    {
+        LOG_INF("Initial vitals: %s", vitals_summary);
     }
 
     /* Initialize basic file system */
@@ -215,39 +260,149 @@ static int test_time_simple_records(void)
 }
 
 /**
- * @brief Test time-aware battery record operations
+ * @brief Test time-aware battery record operations with real vitals data
  */
 static int test_time_battery_records(void)
 {
     int ret;
 
-    LOG_INF("🔋 Testing time-aware battery record operations...");
+    LOG_INF("🔋 Testing time-aware battery record operations with real vitals data...");
 
-    /* Test various battery levels */
-    ret = juxta_framfs_append_battery_record_data(&time_ctx, 1200, 95);
+    /* Update vitals to get current battery reading */
+    ret = juxta_vitals_update(&vitals_ctx);
     if (ret < 0)
     {
-        LOG_ERR("Failed to append battery record (95%%): %d", ret);
+        LOG_ERR("Failed to update vitals: %d", ret);
         return ret;
     }
-    LOG_INF("✅ Battery record (95%%) append successful");
 
-    ret = juxta_framfs_append_battery_record_data(&time_ctx, 1300, 87);
+    /* Get real battery data */
+    uint16_t battery_mv = juxta_vitals_get_battery_mv(&vitals_ctx);
+    uint8_t battery_percent = juxta_vitals_get_battery_percent(&vitals_ctx);
+    bool low_battery = juxta_vitals_is_low_battery(&vitals_ctx);
+
+    LOG_INF("Real battery data:");
+    LOG_INF("  Voltage: %dmV", battery_mv);
+    LOG_INF("  Level: %d%%", battery_percent);
+    LOG_INF("  Low battery: %s", low_battery ? "YES" : "NO");
+
+    /* Log battery record with real data */
+    uint16_t current_minute = (juxta_vitals_get_time_hhmmss(&vitals_ctx) / 100) % 1440;
+    ret = juxta_framfs_append_battery_record_data(&time_ctx, current_minute, battery_percent);
     if (ret < 0)
     {
-        LOG_ERR("Failed to append battery record (87%%): %d", ret);
+        LOG_ERR("Failed to append real battery record: %d", ret);
         return ret;
     }
-    LOG_INF("✅ Battery record (87%%) append successful");
+    LOG_INF("✅ Real battery record (%d%%) logged successfully", battery_percent);
 
-    ret = juxta_framfs_append_battery_record_data(&time_ctx, 1400, 23);
-    if (ret < 0)
+    /* Simulate battery drain over time */
+    for (int i = 1; i <= 3; i++)
     {
-        LOG_ERR("Failed to append battery record (23%%): %d", ret);
-        return ret;
-    }
-    LOG_INF("✅ Battery record (23%%) append successful");
+        /* Simulate time passing */
+        k_sleep(K_MSEC(100));
 
+        /* Update vitals (simulates new reading) */
+        ret = juxta_vitals_update(&vitals_ctx);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to update vitals for simulation %d: %d", i, ret);
+            return ret;
+        }
+
+        /* Get updated battery data */
+        battery_percent = juxta_vitals_get_battery_percent(&vitals_ctx);
+        current_minute = (juxta_vitals_get_time_hhmmss(&vitals_ctx) / 100) % 1440;
+
+        /* Log battery record */
+        ret = juxta_framfs_append_battery_record_data(&time_ctx, current_minute, battery_percent);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to append simulated battery record %d: %d", i, ret);
+            return ret;
+        }
+        LOG_INF("✅ Simulated battery record %d (%d%%) logged", i, battery_percent);
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Test real-time vitals logging with time progression
+ */
+static int test_realtime_vitals_logging(void)
+{
+    int ret;
+
+    LOG_INF("⏰ Testing real-time vitals logging with time progression...");
+
+    /* Simulate time progression and log vitals */
+    for (int minute = 0; minute < 5; minute++)
+    {
+        /* Update vitals */
+        ret = juxta_vitals_update(&vitals_ctx);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to update vitals for minute %d: %d", minute, ret);
+            return ret;
+        }
+
+        /* Get current vitals */
+        uint16_t battery_mv = juxta_vitals_get_battery_mv(&vitals_ctx);
+        uint8_t battery_percent = juxta_vitals_get_battery_percent(&vitals_ctx);
+        int8_t temperature = juxta_vitals_get_temperature(&vitals_ctx);
+        uint32_t uptime = juxta_vitals_get_uptime(&vitals_ctx);
+        uint32_t current_time = juxta_vitals_get_time_hhmmss(&vitals_ctx);
+
+        LOG_INF("Minute %d vitals:", minute);
+        LOG_INF("  Time: %06u", current_time);
+        LOG_INF("  Battery: %dmV (%d%%)", battery_mv, battery_percent);
+        LOG_INF("  Temperature: %d°C", temperature);
+        LOG_INF("  Uptime: %us", uptime);
+
+        /* Log battery record */
+        ret = juxta_framfs_append_battery_record_data(&time_ctx, minute, battery_percent);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to log battery record for minute %d: %d", minute, ret);
+            return ret;
+        }
+
+        /* Log system event (boot, connected, etc.) */
+        if (minute == 0)
+        {
+            ret = juxta_framfs_append_simple_record_data(&time_ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
+            if (ret < 0)
+            {
+                LOG_ERR("Failed to log boot record: %d", ret);
+                return ret;
+            }
+            LOG_INF("✅ Logged boot event");
+        }
+        else if (minute == 2)
+        {
+            ret = juxta_framfs_append_simple_record_data(&time_ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_CONNECTED);
+            if (ret < 0)
+            {
+                LOG_ERR("Failed to log connected record: %d", ret);
+                return ret;
+            }
+            LOG_INF("✅ Logged connected event");
+        }
+
+        /* Small delay to simulate time passing */
+        k_sleep(K_MSEC(200));
+    }
+
+    /* Display final vitals summary */
+    char vitals_summary[128];
+    ret = juxta_vitals_get_summary(&vitals_ctx, vitals_summary, sizeof(vitals_summary));
+    if (ret > 0)
+    {
+        LOG_INF("Final vitals summary: %s", vitals_summary);
+    }
+
+    LOG_INF("✅ Real-time vitals logging test completed");
     return 0;
 }
 
@@ -391,22 +546,27 @@ int framfs_time_test_main(void)
     if (ret < 0)
         return ret;
 
-    /* Step 5: Test battery record operations */
+    /* Step 5: Test battery record operations with real vitals data */
     ret = test_time_battery_records();
     if (ret < 0)
         return ret;
 
-    /* Step 6: Test file management */
+    /* Step 6: Test real-time vitals logging */
+    ret = test_realtime_vitals_logging();
+    if (ret < 0)
+        return ret;
+
+    /* Step 7: Test file management */
     ret = test_time_file_management();
     if (ret < 0)
         return ret;
 
-    /* Step 7: Test error handling */
+    /* Step 8: Test error handling */
     ret = test_time_error_handling();
     if (ret < 0)
         return ret;
 
-    /* Step 8: Test legacy compatibility */
+    /* Step 9: Test legacy compatibility */
     ret = test_legacy_compatibility();
     if (ret < 0)
         return ret;

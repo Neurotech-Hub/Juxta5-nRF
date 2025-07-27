@@ -1,0 +1,38 @@
+# Copyright (c) 2024 NeurotechHub
+# SPDX-License-Identifier: Apache-2.0
+
+# JUXTA Vitals Library Configuration
+#
+# Copyright (c) 2024 NeurotechHub
+# SPDX-License-Identifier: Apache-2.0
+
+config JUXTA_VITALS_NRF52
+	bool "JUXTA Vitals Library for nRF52"
+	help
+	  Enable the JUXTA Vitals library for nRF52 devices.
+	  
+	  This library provides:
+	  - RTC timestamp management
+	  - Battery voltage monitoring
+	  - Basic system health monitoring
+
+if JUXTA_VITALS_NRF52
+
+module = JUXTA_VITALS_NRF52
+module-str = juxta_vitals_nrf52
+source "subsys/logging/Kconfig.template.log_config"
+
+config JUXTA_VITALS_NRF52_BATTERY_UPDATE_INTERVAL
+	int "Battery update interval (seconds)"
+	default 60
+	range 10 3600
+	help
+	  How often to update battery voltage reading.
+
+config JUXTA_VITALS_NRF52_ENABLE_TEMPERATURE
+	bool "Enable temperature monitoring"
+	default y
+	help
+	  Enable internal temperature sensor monitoring.
+
+endif # JUXTA_VITALS_NRF52 

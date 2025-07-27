@@ -4,7 +4,6 @@ sample:
   description: JUXTA FRAM and File System Test Application
   name: juxta-file-system-test
 common:
-  sysbuild: true
   build_only: true
   integration_platforms:
     - Juxta5-1_ADC

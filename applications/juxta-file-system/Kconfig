@@ -10,71 +10,10 @@ menu "Zephyr"
 source "Kconfig.zephyr"
 endmenu
 
-# JUXTA FRAM Library Configuration
-config JUXTA_FRAM
-	bool "JUXTA FRAM Library"
-	depends on SPI && GPIO
-	help
-	  Enable the JUXTA FRAM library for communicating with
-	  MB85RS1MT FRAM memory devices over SPI.
-	  
-	  This library provides a clean API for:
-	  - Device initialization and ID verification
-	  - Reading and writing data
-	  - Error handling and logging
-	  
-	  Requires SPI and GPIO drivers to be enabled.
-
-if JUXTA_FRAM
-
-module = JUXTA_FRAM
-module-str = juxta_fram
-source "subsys/logging/Kconfig.template.log_config"
-
-config JUXTA_FRAM_INIT_PRIORITY
-	int "JUXTA FRAM library initialization priority"
-	default 70
-	help
-	  Initialization priority for the JUXTA FRAM library.
-	  Must be higher than SPI and GPIO driver priorities.
-
-endif # JUXTA_FRAM
-
-# JUXTA FRAM File System Library Configuration
-config JUXTA_FRAMFS
-	bool "JUXTA FRAM File System Library"
-	depends on JUXTA_FRAM
-	help
-	  Enable the JUXTA FRAM file system library. This provides a simple
-	  append-only file system on top of the JUXTA FRAM driver.
-
-if JUXTA_FRAMFS
-
-config JUXTA_FRAMFS_LOG_LEVEL
-	int "JUXTA FRAMFS Log Level"
-	default 3
-	range 0 4
-	help
-	  Sets log level for JUXTA FRAMFS library.
-	  0 = OFF, 1 = ERROR, 2 = WARNING, 3 = INFO, 4 = DEBUG
-
-config JUXTA_FRAMFS_MAX_FILES
-	int "Maximum number of files"
-	default 64
-	range 1 256
-	help
-	  Maximum number of files that can be stored in the file system.
-	  Each file entry uses 32 bytes of FRAM for metadata.
-
-config JUXTA_FRAMFS_FILENAME_LEN
-	int "Maximum filename length"
-	default 16
-	range 8 32
-	help
-	  Maximum length of filenames including null terminator.
-	  Must be a multiple of 4 for alignment.
-
-endif # JUXTA_FRAMFS
+# Source library configurations
+rsource "../../lib/juxta_fram/Kconfig"
+rsource "../../lib/juxta_framfs/Kconfig"
+rsource "../../lib/juxta_vitals_nrf52/Kconfig"
 
 module = APP
 module-str = APP
