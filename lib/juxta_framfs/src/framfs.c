@@ -706,16 +706,16 @@ static int framfs_write_mac_entry(struct juxta_framfs_context *ctx, uint8_t inde
  * ======================================================================== */
 
 int juxta_framfs_mac_find_or_add(struct juxta_framfs_context *ctx,
-                                 const uint8_t *mac_address,
+                                 const uint8_t *mac_id,
                                  uint8_t *index)
 {
-    if (!ctx || !ctx->initialized || !mac_address || !index)
+    if (!ctx || !ctx->initialized || !mac_id || !index)
     {
         return JUXTA_FRAMFS_ERROR;
     }
 
-    /* First try to find existing MAC address */
-    int ret = juxta_framfs_mac_find(ctx, mac_address, index);
+    /* First try to find existing MAC ID */
+    int ret = juxta_framfs_mac_find(ctx, mac_id, index);
     if (ret == 0)
     {
         /* Found existing MAC, increment usage */
@@ -726,15 +726,15 @@ int juxta_framfs_mac_find_or_add(struct juxta_framfs_context *ctx,
     /* MAC not found, check if table is full */
     if (ctx->mac_header.entry_count >= JUXTA_FRAMFS_MAX_MAC_ADDRESSES)
     {
-        LOG_ERR("MAC address table is full (%d/%d)",
+        LOG_ERR("MAC ID table is full (%d/%d)",
                 ctx->mac_header.entry_count, JUXTA_FRAMFS_MAX_MAC_ADDRESSES);
         return JUXTA_FRAMFS_ERROR_MAC_FULL;
     }
 
-    /* Add new MAC address */
+    /* Add new MAC ID */
     struct juxta_framfs_mac_entry new_entry;
     memset(&new_entry, 0, sizeof(new_entry));
-    memcpy(new_entry.mac_address, mac_address, JUXTA_FRAMFS_MAC_ADDRESS_SIZE);
+    memcpy(new_entry.mac_id, mac_id, JUXTA_FRAMFS_MAC_ADDRESS_SIZE);
     new_entry.usage_count = 1;
     new_entry.flags = 0x01; /* Valid entry */
 
@@ -757,15 +757,15 @@ int juxta_framfs_mac_find_or_add(struct juxta_framfs_context *ctx,
     }
 
     *index = new_index;
-    LOG_DBG("Added MAC address at index %d", new_index);
+    LOG_DBG("Added MAC ID at index %d", new_index);
     return JUXTA_FRAMFS_OK;
 }
 
 int juxta_framfs_mac_find(struct juxta_framfs_context *ctx,
-                          const uint8_t *mac_address,
+                          const uint8_t *mac_id,
                           uint8_t *index)
 {
-    if (!ctx || !ctx->initialized || !mac_address || !index)
+    if (!ctx || !ctx->initialized || !mac_id || !index)
     {
         return JUXTA_FRAMFS_ERROR;
     }
@@ -782,7 +782,7 @@ int juxta_framfs_mac_find(struct juxta_framfs_context *ctx,
         }
 
         if ((entry.flags & 0x01) && /* Valid entry */
-            memcmp(entry.mac_address, mac_address, JUXTA_FRAMFS_MAC_ADDRESS_SIZE) == 0)
+            memcmp(entry.mac_id, mac_id, JUXTA_FRAMFS_MAC_ADDRESS_SIZE) == 0)
         {
             *index = i;
             return JUXTA_FRAMFS_OK;
@@ -794,9 +794,9 @@ int juxta_framfs_mac_find(struct juxta_framfs_context *ctx,
 
 int juxta_framfs_mac_get_by_index(struct juxta_framfs_context *ctx,
                                   uint8_t index,
-                                  uint8_t *mac_address)
+                                  uint8_t *mac_id)
 {
-    if (!ctx || !ctx->initialized || !mac_address)
+    if (!ctx || !ctx->initialized || !mac_id)
     {
         return JUXTA_FRAMFS_ERROR;
     }
@@ -821,7 +821,7 @@ int juxta_framfs_mac_get_by_index(struct juxta_framfs_context *ctx,
         return JUXTA_FRAMFS_ERROR;
     }
 
-    memcpy(mac_address, entry.mac_address, JUXTA_FRAMFS_MAC_ADDRESS_SIZE);
+    memcpy(mac_id, entry.mac_id, JUXTA_FRAMFS_MAC_ADDRESS_SIZE);
     return JUXTA_FRAMFS_OK;
 }
 
@@ -1079,11 +1079,11 @@ int juxta_framfs_decode_battery_record(const uint8_t *buffer,
 int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
                                     uint16_t minute,
                                     uint8_t motion_count,
-                                    const uint8_t (*mac_addresses)[6],
+                                    const uint8_t (*mac_ids)[3],
                                     const int8_t *rssi_values,
                                     uint8_t device_count)
 {
-    if (!ctx || !ctx->initialized || !mac_addresses || !rssi_values)
+    if (!ctx || !ctx->initialized || !mac_ids || !rssi_values)
     {
         return JUXTA_FRAMFS_ERROR;
     }
@@ -1100,14 +1100,14 @@ int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
     record.type = device_count;
     record.motion_count = motion_count;
 
-    /* Process MAC addresses and get indices */
+    /* Process MAC IDs and get indices */
     for (int i = 0; i < device_count; i++)
     {
         uint8_t mac_index;
-        int ret = juxta_framfs_mac_find_or_add(ctx, mac_addresses[i], &mac_index);
+        int ret = juxta_framfs_mac_find_or_add(ctx, mac_ids[i], &mac_index);
         if (ret < 0)
         {
-            LOG_ERR("Failed to process MAC address %d: %d", i, ret);
+            LOG_ERR("Failed to process MAC ID %d: %d", i, ret);
             return ret;
         }
         record.mac_indices[i] = mac_index;
@@ -1312,7 +1312,7 @@ int juxta_framfs_append_data(struct juxta_framfs_ctx *ctx,
 int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
                                          uint16_t minute,
                                          uint8_t motion_count,
-                                         const uint8_t (*mac_addresses)[6],
+                                         const uint8_t (*mac_ids)[3],
                                          const int8_t *rssi_values,
                                          uint8_t device_count)
 {
@@ -1330,7 +1330,7 @@ int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
 
     /* Append device scan to active file */
     return juxta_framfs_append_device_scan(ctx->fs_ctx, minute, motion_count,
-                                           mac_addresses, rssi_values, device_count);
+                                           mac_ids, rssi_values, device_count);
 }
 
 int juxta_framfs_append_simple_record_data(struct juxta_framfs_ctx *ctx,

@@ -103,10 +103,10 @@ juxta_framfs_seal_active(&fs_ctx);
 
 ### High-level Data Logging
 ```c
-// Log device scan with MAC indexing
-uint8_t macs[][6] = {{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
+// Log device scan with MAC indexing (3-byte MAC IDs)
+uint8_t mac_ids[][3] = {{0x55, 0x66, 0x77}}; // Last 3 bytes of MAC
 int8_t rssi[] = {-45};
-juxta_framfs_append_device_scan(&fs_ctx, 1234, 5, macs, rssi, 1);
+juxta_framfs_append_device_scan(&fs_ctx, 1234, 5, mac_ids, rssi, 1);
 
 // Log system events
 juxta_framfs_append_simple_record(&fs_ctx, 567, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
@@ -134,7 +134,7 @@ juxta_framfs_init_with_time(&ctx, &fs_ctx, get_rtc_date, true);
 
 /* Automatic file management - data goes to correct daily file */
 juxta_framfs_append_data(&ctx, sensor_data, sizeof(sensor_data));
-juxta_framfs_append_device_scan_data(&ctx, minute, motion, macs, rssi, count);
+juxta_framfs_append_device_scan_data(&ctx, minute, motion, mac_ids, rssi, count);
 juxta_framfs_append_simple_record_data(&ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
 juxta_framfs_append_battery_record_data(&ctx, minute, 87);
 ```
@@ -161,7 +161,7 @@ Modify `CURRENT_TEST_MODE` in `main.c`:
 - **Read Speed**: 250-300 KB/s
 - **Memory Overhead**: 1.57% of FRAM (1,293 bytes)
 - **File Limit**: 64 files maximum
-- **MAC Address Index**: 128 unique devices
+- **MAC ID Index**: 128 unique devices (3-byte format)
 - **Daily Logging**: ~14.9 days of minute-based data
 
 ## Troubleshooting

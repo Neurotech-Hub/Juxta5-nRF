@@ -15,8 +15,8 @@ A lightweight, append-only file system for FRAM storage on embedded systems. Bui
 ```
 0x0000: FileSystemHeader (13 bytes)
 0x000D: FileEntry[0-63] (1,280 bytes) - 64 × 20 bytes
-0x050D: Global MAC Index (1,156 bytes) - 4 + (128 × 9)
-0x09C9: File data starts here
+0x050D: Global MAC Index (772 bytes) - 4 + (128 × 6)
+0x07C9: File data starts here
 ```
 
 ## API Layers
@@ -58,6 +58,19 @@ The library provides two API layers:
 #define JUXTA_FRAMFS_ERROR_TYPE_BLE 0x01
 ```
 
+## MAC ID Format
+
+The file system uses 3-byte packed MAC IDs instead of full 6-byte MAC addresses to save memory:
+
+```c
+/* MAC ID format (3 bytes) */
+uint8_t mac_id[3] = {0x55, 0x66, 0x77}; // Last 3 bytes of MAC address
+
+/* Example: Full MAC 12:34:56:78:9A:BC becomes MAC ID 0x9A:0xBC:0x00 */
+```
+
+This reduces the MAC table size from 1,156 bytes to 772 bytes (33% savings).
+
 ## Record Types
 
 ```c
@@ -88,7 +101,7 @@ juxta_framfs_init_with_time(&ctx, &fs_ctx, get_rtc_date, true);
 juxta_framfs_append_data(&ctx, sensor_data, sizeof(sensor_data));
 
 /* Record types with automatic file management */
-juxta_framfs_append_device_scan_data(&ctx, minute, motion, macs, rssi, count);
+juxta_framfs_append_device_scan_data(&ctx, minute, motion, mac_ids, rssi, count);
 juxta_framfs_append_simple_record_data(&ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
 juxta_framfs_append_battery_record_data(&ctx, minute, battery_level);
 ```
@@ -160,7 +173,7 @@ Any error not listed above should be investigated.
 - **Metadata Overhead**: 0.89% of FRAM (1,293 bytes)
 - **File Limit**: 64 files maximum
 - **Filename Length**: 12 characters maximum
-- **MAC Table**: 128 addresses maximum
+- **MAC ID Table**: 128 devices maximum (3-byte format)
 
 ## Thread Safety
 

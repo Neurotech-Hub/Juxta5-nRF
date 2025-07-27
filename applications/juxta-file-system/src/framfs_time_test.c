@@ -201,12 +201,12 @@ static int test_time_file_management(void)
 
     /* Write device scan record */
     LOG_INF("  → Writing device scan record...");
-    uint8_t mac_addresses[][6] = {
-        {0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
-        {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}};
+    uint8_t mac_ids[][3] = {
+        {0x55, 0x66, 0x77},  /* Last 3 bytes of MAC: 0x556677 */
+        {0xEE, 0xFF, 0x00}}; /* Last 3 bytes of MAC: 0xEEFF00 */
     int8_t rssi_values[] = {-45, -60};
     ret = juxta_framfs_append_device_scan_data(&time_ctx, 123, 5,
-                                               mac_addresses, rssi_values, 2);
+                                               mac_ids, rssi_values, 2);
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to append device scan: %d", ret);
@@ -215,14 +215,10 @@ static int test_time_file_management(void)
     LOG_INF("  ✅ Device scan record written:");
     LOG_INF("     - Minute: 123");
     LOG_INF("     - Motion count: 5");
-    LOG_INF("     - Device 1: %02X:%02X:%02X:%02X:%02X:%02X (RSSI: %d)",
-            mac_addresses[0][0], mac_addresses[0][1], mac_addresses[0][2],
-            mac_addresses[0][3], mac_addresses[0][4], mac_addresses[0][5],
-            rssi_values[0]);
-    LOG_INF("     - Device 2: %02X:%02X:%02X:%02X:%02X:%02X (RSSI: %d)",
-            mac_addresses[1][0], mac_addresses[1][1], mac_addresses[1][2],
-            mac_addresses[1][3], mac_addresses[1][4], mac_addresses[1][5],
-            rssi_values[1]);
+    LOG_INF("     - Device 1: MAC ID %02X%02X%02X (RSSI: %d)",
+            mac_ids[0][0], mac_ids[0][1], mac_ids[0][2], rssi_values[0]);
+    LOG_INF("     - Device 2: MAC ID %02X%02X%02X (RSSI: %d)",
+            mac_ids[1][0], mac_ids[1][1], mac_ids[1][2], rssi_values[1]);
 
     /* Test 4: Record decoding */
     LOG_INF("Test 4: Record decoding");

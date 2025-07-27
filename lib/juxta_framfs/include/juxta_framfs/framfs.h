@@ -35,10 +35,10 @@ extern "C"
 
 /* MAC address table constants */
 #define JUXTA_FRAMFS_MAX_MAC_ADDRESSES 128
-#define JUXTA_FRAMFS_MAC_ADDRESS_SIZE 6
+#define JUXTA_FRAMFS_MAC_ADDRESS_SIZE 3 /* 3-byte packed MAC ID */
 #define JUXTA_FRAMFS_MAC_TABLE_SIZE (JUXTA_FRAMFS_MAX_MAC_ADDRESSES * JUXTA_FRAMFS_MAC_ADDRESS_SIZE)
 #define JUXTA_FRAMFS_MAC_MAGIC 0x4D41 /* "MA" */
-#define JUXTA_FRAMFS_MAC_VERSION 0x01
+#define JUXTA_FRAMFS_MAC_VERSION 0x02 /* Version bump for new format */
 
 /* Entry flags */
 #define JUXTA_FRAMFS_FLAG_VALID 0x01  /* Entry is valid */
@@ -109,13 +109,13 @@ extern "C"
     } __packed;
 
     /**
-     * @brief MAC address entry structure (9 bytes)
+     * @brief MAC address entry structure (6 bytes)
      */
     struct juxta_framfs_mac_entry
     {
-        uint8_t mac_address[JUXTA_FRAMFS_MAC_ADDRESS_SIZE]; /* 6-byte MAC address */
-        uint8_t usage_count;                                /* Number of times used */
-        uint8_t flags;                                      /* Status flags */
+        uint8_t mac_id[JUXTA_FRAMFS_MAC_ADDRESS_SIZE]; /* 3-byte packed MAC ID */
+        uint8_t usage_count;                           /* Number of times used */
+        uint8_t flags;                                 /* Status flags */
     } __packed;
 
     /**
@@ -317,40 +317,40 @@ extern "C"
      * ======================================================================== */
 
     /**
-     * @brief Find or add a MAC address to the global table
+     * @brief Find or add a MAC ID to the global table
      *
      * @param ctx File system context
-     * @param mac_address 6-byte MAC address
+     * @param mac_id 3-byte packed MAC ID
      * @param index Pointer to store the MAC index (0-127)
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_mac_find_or_add(struct juxta_framfs_context *ctx,
-                                     const uint8_t *mac_address,
+                                     const uint8_t *mac_id,
                                      uint8_t *index);
 
     /**
-     * @brief Find a MAC address in the global table
+     * @brief Find a MAC ID in the global table
      *
      * @param ctx File system context
-     * @param mac_address 6-byte MAC address
+     * @param mac_id 3-byte packed MAC ID
      * @param index Pointer to store the MAC index (0-127)
      * @return 0 on success, JUXTA_FRAMFS_ERROR_MAC_NOT_FOUND if not found
      */
     int juxta_framfs_mac_find(struct juxta_framfs_context *ctx,
-                              const uint8_t *mac_address,
+                              const uint8_t *mac_id,
                               uint8_t *index);
 
     /**
-     * @brief Get MAC address by index
+     * @brief Get MAC ID by index
      *
      * @param ctx File system context
      * @param index MAC index (0-127)
-     * @param mac_address Buffer to store 6-byte MAC address
+     * @param mac_id Buffer to store 3-byte packed MAC ID
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_mac_get_by_index(struct juxta_framfs_context *ctx,
                                       uint8_t index,
-                                      uint8_t *mac_address);
+                                      uint8_t *mac_id);
 
     /**
      * @brief Increment usage count for a MAC address
@@ -456,7 +456,7 @@ extern "C"
      * @param ctx File system context
      * @param minute Minute of day (0-1439)
      * @param motion_count Motion events this minute
-     * @param mac_addresses Array of MAC addresses (6 bytes each)
+     * @param mac_ids Array of MAC IDs (3 bytes each)
      * @param rssi_values Array of RSSI values
      * @param device_count Number of devices (1-128)
      * @return 0 on success, negative error code on failure
@@ -464,7 +464,7 @@ extern "C"
     int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
                                         uint16_t minute,
                                         uint8_t motion_count,
-                                        const uint8_t (*mac_addresses)[6],
+                                        const uint8_t (*mac_ids)[3],
                                         const int8_t *rssi_values,
                                         uint8_t device_count);
 
@@ -561,7 +561,7 @@ extern "C"
      * @param ctx File system context
      * @param minute Minute of day (0-1439)
      * @param motion_count Motion events this minute
-     * @param mac_addresses Array of MAC addresses
+     * @param mac_ids Array of MAC IDs (3 bytes each)
      * @param rssi_values Array of RSSI values
      * @param device_count Number of devices
      * @return 0 on success, negative error code on failure
@@ -569,7 +569,7 @@ extern "C"
     int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
                                              uint16_t minute,
                                              uint8_t motion_count,
-                                             const uint8_t (*mac_addresses)[6],
+                                             const uint8_t (*mac_ids)[3],
                                              const int8_t *rssi_values,
                                              uint8_t device_count);
 
