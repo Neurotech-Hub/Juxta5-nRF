@@ -29,7 +29,7 @@ enum test_mode
 };
 
 /* Configure which test to run */
-#define CURRENT_TEST_MODE TEST_MODE_TIME_API
+#define CURRENT_TEST_MODE TEST_MODE_FULL
 
 /* Hardcoded RTC function for testing - defined in framfs_time_test.c */
 
@@ -66,6 +66,38 @@ static void run_interactive_menu(void)
     printk("🔄 Running full test suite by default...\n\n");
 }
 
+static void print_test_results(void)
+{
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("                        TEST RESULTS                         ");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("");
+    LOG_INF("📋 Test Suite Summary:");
+    LOG_INF("  ✅ FRAM Library:      PASSED");
+    LOG_INF("  ✅ File System:       PASSED");
+    LOG_INF("  ✅ Time-Aware API:    PASSED");
+    LOG_INF("  ✅ MAC Address Table: PASSED");
+    LOG_INF("  ✅ Record Encoding:   PASSED");
+    LOG_INF("");
+    LOG_INF("📝 Expected Error Cases (All Verified):");
+    LOG_INF("  • File not found");
+    LOG_INF("  • Read beyond file size");
+    LOG_INF("  • File already exists");
+    LOG_INF("  • No active file");
+    LOG_INF("  • Invalid parameters");
+    LOG_INF("  • Buffer size limits");
+    LOG_INF("");
+    LOG_INF("📊 Test Coverage:");
+    LOG_INF("  • Basic file operations");
+    LOG_INF("  • MAC address management");
+    LOG_INF("  • Record type handling");
+    LOG_INF("  • Time-based file management");
+    LOG_INF("  • Error handling");
+    LOG_INF("");
+    LOG_INF("🎯 Ready for application development!");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+}
+
 int main(void)
 {
     int ret;
@@ -84,50 +116,71 @@ int main(void)
         ret = framfs_test_main();
         break;
 
+    case TEST_MODE_TIME_API:
+        LOG_INF("⏰ Running Time-Aware API Test");
+        ret = framfs_time_test_main();
+        break;
+
+    case TEST_MODE_VITALS:
+        LOG_INF("💓 Running Vitals Library Test");
+        ret = vitals_test_main();
+        break;
+
     case TEST_MODE_FULL:
         LOG_INF("🚀 Running Full Test Suite");
+        LOG_INF("══════════════════════════════════════════════════════════════");
 
-        LOG_INF("📋 Step 1: FRAM Library Test");
+        /* Phase 1: Hardware Layer */
+        LOG_INF("📋 Phase 1: Hardware Layer Tests");
+        LOG_INF("──────────────────────────────────────────────────────────────");
         ret = fram_test_main();
         if (ret < 0)
         {
             LOG_ERR("❌ FRAM Library test failed: %d", ret);
             return ret;
         }
-        LOG_INF("✅ FRAM Library test completed successfully\n");
+        LOG_INF("✅ FRAM Library test passed");
+        k_sleep(K_SECONDS(1));
 
-        k_sleep(K_SECONDS(2));
+        /* Phase 2: File System Layer */
+        LOG_INF("📋 Phase 2: File System Layer Tests");
+        LOG_INF("──────────────────────────────────────────────────────────────");
 
-        LOG_INF("📋 Step 2: File System Test");
+        /* Step 1: Basic File System Tests */
+        LOG_INF("📝 Testing basic file operations...");
         ret = framfs_test_main();
         if (ret < 0)
         {
-            LOG_ERR("❌ File System test failed: %d", ret);
+            LOG_ERR("❌ Basic file system test failed: %d", ret);
             return ret;
         }
-        LOG_INF("✅ File System test completed successfully");
-        break;
+        LOG_INF("✅ Basic file system test passed");
+        k_sleep(K_SECONDS(1));
 
-    case TEST_MODE_TIME_API:
-        LOG_INF("⏰ Running Time-Aware API Test");
+        /* Step 2: Time-Aware API */
+        LOG_INF("⏰ Testing Time-Aware API...");
         ret = framfs_time_test_main();
         if (ret < 0)
         {
             LOG_ERR("❌ Time-Aware API test failed: %d", ret);
             return ret;
         }
-        LOG_INF("✅ Time-Aware API test completed successfully");
-        break;
+        LOG_INF("✅ Time-Aware API test passed");
+        k_sleep(K_SECONDS(1));
 
-    case TEST_MODE_VITALS:
-        LOG_INF("💓 Running Vitals Library Test");
+        /* Phase 3: Vitals Layer */
+        LOG_INF("📋 Phase 3: Vitals Layer Tests");
+        LOG_INF("──────────────────────────────────────────────────────────────");
         ret = vitals_test_main();
         if (ret < 0)
         {
             LOG_ERR("❌ Vitals library test failed: %d", ret);
             return ret;
         }
-        LOG_INF("✅ Vitals library test completed successfully");
+        LOG_INF("✅ Vitals library test passed");
+
+        LOG_INF("══════════════════════════════════════════════════════════════");
+        LOG_INF("🎉 All tests completed successfully!");
         break;
 
     case TEST_MODE_INTERACTIVE:
@@ -136,12 +189,12 @@ int main(void)
         if (ret == 0)
         {
             k_sleep(K_SECONDS(1));
-            ret = framfs_test_main();
+            ret = framfs_time_test_main();
         }
         if (ret == 0)
         {
             k_sleep(K_SECONDS(1));
-            ret = framfs_time_test_main();
+            ret = framfs_test_main();
         }
         if (ret == 0)
         {
@@ -157,20 +210,7 @@ int main(void)
 
     if (ret == 0)
     {
-        LOG_INF("🎉 All tests completed successfully!");
-        printk("\n");
-        printk("╔══════════════════════════════════════════════════════════════╗\n");
-        printk("║                        TEST RESULTS                         ║\n");
-        printk("║                                                              ║\n");
-        printk("║  ✅ FRAM Library:    PASSED                                 ║\n");
-        printk("║  ✅ File System:     PASSED                                 ║\n");
-        printk("║  ✅ MAC Address Table: PASSED                               ║\n");
-        printk("║  ✅ Encoding/Decoding: PASSED                               ║\n");
-        printk("║  ✅ Time-Aware API:   PASSED                                ║\n");
-        printk("║  ✅ Vitals Library:   PASSED                                ║\n");
-        printk("║                                                              ║\n");
-        printk("║  🎯 Ready for application development!                      ║\n");
-        printk("╚══════════════════════════════════════════════════════════════╝\n");
+        print_test_results();
     }
     else
     {

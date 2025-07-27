@@ -204,9 +204,10 @@ int juxta_framfs_create_active(struct juxta_framfs_context *ctx,
         return JUXTA_FRAMFS_ERROR;
     }
 
+    /* Validate filename length first */
     if (strlen(filename) >= JUXTA_FRAMFS_FILENAME_LEN)
     {
-        LOG_ERR("Filename too long: %s", filename);
+        LOG_WRN("Filename too long: %s", filename);
         return JUXTA_FRAMFS_ERROR_SIZE;
     }
 
@@ -214,14 +215,14 @@ int juxta_framfs_create_active(struct juxta_framfs_context *ctx,
     int existing_index = framfs_find_file(ctx, filename);
     if (existing_index >= 0)
     {
-        LOG_ERR("File already exists: %s", filename);
+        LOG_WRN("File already exists: %s", filename);
         return JUXTA_FRAMFS_ERROR_EXISTS;
     }
 
     /* Check if we have space for another file */
     if (ctx->header.file_count >= JUXTA_FRAMFS_MAX_FILES)
     {
-        LOG_ERR("File system full (%d/%d files)",
+        LOG_WRN("File system full (%d/%d files)",
                 ctx->header.file_count, JUXTA_FRAMFS_MAX_FILES);
         return JUXTA_FRAMFS_ERROR_FULL;
     }
@@ -282,9 +283,10 @@ int juxta_framfs_append(struct juxta_framfs_context *ctx,
         return JUXTA_FRAMFS_ERROR;
     }
 
+    /* Check active file */
     if (ctx->active_file_index < 0)
     {
-        LOG_ERR("No active file for append operation");
+        LOG_WRN("No active file for append operation");
         return JUXTA_FRAMFS_ERROR_NO_ACTIVE;
     }
 
@@ -300,7 +302,7 @@ int juxta_framfs_append(struct juxta_framfs_context *ctx,
     /* Verify it's still active */
     if (!(entry.flags & JUXTA_FRAMFS_FLAG_ACTIVE))
     {
-        LOG_ERR("File is not active: %s", entry.filename);
+        LOG_WRN("File is not active: %s", entry.filename);
         return JUXTA_FRAMFS_ERROR_READ_ONLY;
     }
 
@@ -308,7 +310,7 @@ int juxta_framfs_append(struct juxta_framfs_context *ctx,
     uint32_t write_addr = entry.start_addr + entry.length;
     if (write_addr + length > JUXTA_FRAM_SIZE_BYTES)
     {
-        LOG_ERR("Append would exceed FRAM size");
+        LOG_WRN("Append would exceed FRAM size");
         return JUXTA_FRAMFS_ERROR_FULL;
     }
 
@@ -400,7 +402,7 @@ int juxta_framfs_read(struct juxta_framfs_context *ctx,
     int file_index = framfs_find_file(ctx, filename);
     if (file_index < 0)
     {
-        LOG_ERR("File not found: %s", filename);
+        LOG_WRN("File not found: %s", filename);
         return JUXTA_FRAMFS_ERROR_NOT_FOUND;
     }
 
@@ -416,7 +418,7 @@ int juxta_framfs_read(struct juxta_framfs_context *ctx,
     /* Validate read bounds */
     if (offset >= entry.length)
     {
-        LOG_ERR("Read offset beyond file size: %d >= %d", offset, entry.length);
+        LOG_WRN("Read offset beyond file size: %d >= %d", offset, entry.length);
         return JUXTA_FRAMFS_ERROR_SIZE;
     }
 
@@ -452,6 +454,7 @@ int juxta_framfs_get_file_size(struct juxta_framfs_context *ctx,
     int file_index = framfs_find_file(ctx, filename);
     if (file_index < 0)
     {
+        LOG_WRN("File not found: %s", filename);
         return JUXTA_FRAMFS_ERROR_NOT_FOUND;
     }
 
@@ -479,6 +482,7 @@ int juxta_framfs_get_file_info(struct juxta_framfs_context *ctx,
     int file_index = framfs_find_file(ctx, filename);
     if (file_index < 0)
     {
+        LOG_WRN("File not found: %s", filename);
         return JUXTA_FRAMFS_ERROR_NOT_FOUND;
     }
 
@@ -531,6 +535,7 @@ int juxta_framfs_get_active_filename(struct juxta_framfs_context *ctx,
 
     if (ctx->active_file_index < 0)
     {
+        LOG_WRN("No active file");
         return JUXTA_FRAMFS_ERROR_NO_ACTIVE;
     }
 
@@ -798,7 +803,7 @@ int juxta_framfs_mac_get_by_index(struct juxta_framfs_context *ctx,
 
     if (index >= ctx->mac_header.entry_count)
     {
-        LOG_ERR("MAC index out of range: %d >= %d", index, ctx->mac_header.entry_count);
+        LOG_WRN("MAC index out of range: %d >= %d", index, ctx->mac_header.entry_count);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -812,7 +817,7 @@ int juxta_framfs_mac_get_by_index(struct juxta_framfs_context *ctx,
 
     if (!(entry.flags & 0x01))
     {
-        LOG_ERR("MAC entry %d is not valid", index);
+        LOG_WRN("MAC entry %d is not valid", index);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -830,7 +835,7 @@ int juxta_framfs_mac_increment_usage(struct juxta_framfs_context *ctx,
 
     if (index >= ctx->mac_header.entry_count)
     {
-        LOG_ERR("MAC index out of range: %d >= %d", index, ctx->mac_header.entry_count);
+        LOG_WRN("MAC index out of range: %d >= %d", index, ctx->mac_header.entry_count);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -844,7 +849,7 @@ int juxta_framfs_mac_increment_usage(struct juxta_framfs_context *ctx,
 
     if (!(entry.flags & 0x01))
     {
-        LOG_ERR("MAC entry %d is not valid", index);
+        LOG_WRN("MAC entry %d is not valid", index);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -943,14 +948,14 @@ int juxta_framfs_encode_device_record(const struct juxta_framfs_device_record *r
     size_t required_size = 4 + (2 * record->type); /* minute + type + motion + mac_indices + rssi_values */
     if (buffer_size < required_size)
     {
-        LOG_ERR("Buffer too small: %zu < %zu", buffer_size, required_size);
+        LOG_WRN("Buffer too small: %zu < %zu", buffer_size, required_size);
         return JUXTA_FRAMFS_ERROR_SIZE;
     }
 
     /* Validate device count */
     if (record->type == 0 || record->type > 128)
     {
-        LOG_ERR("Invalid device count: %d", record->type);
+        LOG_WRN("Invalid device count: %d", record->type);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -988,7 +993,7 @@ int juxta_framfs_decode_device_record(const uint8_t *buffer,
     /* Validate device count */
     if (record->type == 0 || record->type > 128)
     {
-        LOG_ERR("Invalid device count: %d", record->type);
+        LOG_WRN("Invalid device count: %d", record->type);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -996,7 +1001,7 @@ int juxta_framfs_decode_device_record(const uint8_t *buffer,
     size_t required_size = 4 + (2 * record->type);
     if (buffer_size < required_size)
     {
-        LOG_ERR("Buffer too small: %zu < %zu", buffer_size, required_size);
+        LOG_WRN("Buffer too small: %zu < %zu", buffer_size, required_size);
         return JUXTA_FRAMFS_ERROR_SIZE;
     }
 
@@ -1085,7 +1090,7 @@ int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
 
     if (device_count == 0 || device_count > 128)
     {
-        LOG_ERR("Invalid device count: %d", device_count);
+        LOG_WRN("Invalid device count: %d", device_count);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -1137,7 +1142,7 @@ int juxta_framfs_append_simple_record(struct juxta_framfs_context *ctx,
         type != JUXTA_FRAMFS_RECORD_TYPE_CONNECTED &&
         type != JUXTA_FRAMFS_RECORD_TYPE_ERROR)
     {
-        LOG_ERR("Invalid simple record type: 0x%02X", type);
+        LOG_WRN("Invalid simple record type: 0x%02X", type);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -1171,7 +1176,7 @@ int juxta_framfs_append_battery_record(struct juxta_framfs_context *ctx,
     /* Validate battery level */
     if (level > 100)
     {
-        LOG_ERR("Invalid battery level: %d", level);
+        LOG_WRN("Invalid battery level: %d", level);
         return JUXTA_FRAMFS_ERROR;
     }
 

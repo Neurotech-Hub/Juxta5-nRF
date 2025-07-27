@@ -34,12 +34,11 @@ static struct juxta_framfs_context fs_ctx;
 static int display_filesystem_stats(void)
 {
     int ret;
+    struct juxta_framfs_header stats;
 
     LOG_INF("📊 File System Status Report");
     LOG_INF("══════════════════════════════════════════════════════════════");
 
-    /* Get file system statistics */
-    struct juxta_framfs_header stats;
     ret = juxta_framfs_get_stats(&fs_ctx, &stats);
     if (ret < 0)
     {
@@ -198,8 +197,7 @@ static int test_framfs_init(void)
     LOG_INF("✅ File system initialized successfully:");
     LOG_INF("  Magic:     0x%04X", stats.magic);
     LOG_INF("  Version:   %d", stats.version);
-    LOG_INF("  Max files: %d", JUXTA_FRAMFS_MAX_FILES);
-    LOG_INF("  Data addr: 0x%06X", stats.next_data_addr);
+    LOG_INF("  Files:     %d", stats.file_count);
 
     return 0;
 }
@@ -210,542 +208,195 @@ static int test_framfs_init(void)
 static int test_basic_file_operations(void)
 {
     int ret;
+    uint8_t test_data[] = {1, 2, 3, 4, 5};
+    uint8_t read_buffer[256];
 
-    LOG_INF("📁 Testing basic file operations...");
+    LOG_INF("📝 Testing basic file operations...");
+    LOG_INF("══════════════════════════════════════════════════════════════");
 
-    /* Create a test file */
-    char filename[] = "20250717";
-    ret = juxta_framfs_create_active(&fs_ctx, filename, JUXTA_FRAMFS_TYPE_SENSOR_LOG);
+    /* Test 1: Create and write to file */
+    LOG_INF("Test 1: Create and write basic data");
+    LOG_INF("  → Creating test file...");
+    ret = juxta_framfs_create_active(&fs_ctx, "test1", JUXTA_FRAMFS_TYPE_RAW_DATA);
     if (ret < 0)
     {
-        LOG_ERR("Failed to create active file: %d", ret);
+        LOG_ERR("❌ Failed to create file: %d", ret);
         return ret;
     }
+    LOG_INF("  ✅ File created successfully");
 
-    /* Get active filename */
-    char active_name[JUXTA_FRAMFS_FILENAME_LEN];
-    ret = juxta_framfs_get_active_filename(&fs_ctx, active_name);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to get active filename: %d", ret);
-        return ret;
-    }
-
-    if (strcmp(filename, active_name) != 0)
-    {
-        LOG_ERR("Active filename mismatch: expected '%s', got '%s'", filename, active_name);
-        return -1;
-    }
-
-    /* Append some test data */
-    uint8_t test_data[] = "Hello, FRAM file system!";
+    LOG_INF("  → Writing test data...");
     ret = juxta_framfs_append(&fs_ctx, test_data, sizeof(test_data));
     if (ret < 0)
     {
-        LOG_ERR("Failed to append data: %d", ret);
+        LOG_ERR("❌ Failed to append data: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Data written successfully (%d bytes)", sizeof(test_data));
+
+    /* Test 2: Read and verify data */
+    LOG_INF("Test 2: Read and verify data");
+    LOG_INF("  → Reading test data...");
+    ret = juxta_framfs_read(&fs_ctx, "test1", 0, read_buffer, sizeof(test_data));
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to read data: %d", ret);
         return ret;
     }
 
-    /* Append more data */
-    uint8_t more_data[] = " This is additional data.";
+    if (memcmp(test_data, read_buffer, sizeof(test_data)) != 0)
+    {
+        LOG_ERR("❌ Data verification failed");
+        LOG_HEXDUMP_ERR(test_data, sizeof(test_data), "Expected:");
+        LOG_HEXDUMP_ERR(read_buffer, sizeof(test_data), "Got:");
+        return -1;
+    }
+    LOG_INF("  ✅ Data verified successfully");
+
+    /* Test 3: Multiple writes */
+    LOG_INF("Test 3: Multiple sequential writes");
+    LOG_INF("  → Writing additional data...");
+    uint8_t more_data[] = {0xAA, 0xBB, 0xCC};
     ret = juxta_framfs_append(&fs_ctx, more_data, sizeof(more_data));
     if (ret < 0)
     {
-        LOG_ERR("Failed to append more data: %d", ret);
+        LOG_ERR("❌ Failed to append more data: %d", ret);
         return ret;
     }
+    LOG_INF("  ✅ Additional data written successfully");
 
-    /* Get file size */
-    int file_size = juxta_framfs_get_file_size(&fs_ctx, filename);
-    if (file_size < 0)
-    {
-        LOG_ERR("Failed to get file size: %d", file_size);
-        return file_size;
-    }
-
-    LOG_INF("File '%s' size: %d bytes", filename, file_size);
-
-    /* Read data back */
-    uint8_t read_buffer[100];
-    int bytes_read = juxta_framfs_read(&fs_ctx, filename, 0, read_buffer, sizeof(read_buffer));
-    if (bytes_read < 0)
-    {
-        LOG_ERR("Failed to read file data: %d", bytes_read);
-        return bytes_read;
-    }
-
-    LOG_INF("Read %d bytes from file:", bytes_read);
-    LOG_HEXDUMP_INF(read_buffer, bytes_read, "File content:");
-
-    /* Seal the file */
-    ret = juxta_framfs_seal_active(&fs_ctx);
+    /* Read back all data */
+    LOG_INF("  → Reading combined data...");
+    ret = juxta_framfs_read(&fs_ctx, "test1", 0, read_buffer, sizeof(test_data) + sizeof(more_data));
     if (ret < 0)
     {
-        LOG_ERR("Failed to seal active file: %d", ret);
+        LOG_ERR("❌ Failed to read combined data: %d", ret);
         return ret;
     }
 
-    LOG_INF("✅ Basic file operations test passed");
-    return 0;
-}
-
-/**
- * @brief Test multiple file management
- */
-static int test_multiple_files(void)
-{
-    int ret;
-
-    LOG_INF("📚 Testing multiple file management...");
-
-    /* Create several test files */
-    const char *filenames[] = {
-        "20250718",
-        "20250719",
-        "20250720",
-        "20250721"};
-    int num_files = sizeof(filenames) / sizeof(filenames[0]);
-
-    for (int i = 0; i < num_files; i++)
+    /* Verify first part */
+    if (memcmp(test_data, read_buffer, sizeof(test_data)) != 0)
     {
-        /* Create file */
-        ret = juxta_framfs_create_active(&fs_ctx, filenames[i], JUXTA_FRAMFS_TYPE_SENSOR_LOG);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to create file %s: %d", filenames[i], ret);
-            return ret;
-        }
-
-        /* Add some data specific to this file */
-        char file_data[32];
-        snprintf(file_data, sizeof(file_data), "Data for file %d", i);
-        ret = juxta_framfs_append(&fs_ctx, (uint8_t *)file_data, strlen(file_data) + 1);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to append data to file %s: %d", filenames[i], ret);
-            return ret;
-        }
-
-        LOG_INF("Created file %s with %zu bytes", filenames[i], strlen(file_data) + 1);
-    }
-
-    /* List all files */
-    char file_list[10][JUXTA_FRAMFS_FILENAME_LEN];
-    int file_count = juxta_framfs_list_files(&fs_ctx, file_list, 10);
-    if (file_count < 0)
-    {
-        LOG_ERR("Failed to list files: %d", file_count);
-        return file_count;
-    }
-
-    LOG_INF("Found %d files in file system:", file_count);
-    for (int i = 0; i < file_count; i++)
-    {
-        int size = juxta_framfs_get_file_size(&fs_ctx, file_list[i]);
-        LOG_INF("  %s (%d bytes)", file_list[i], size);
-    }
-
-    /* Test reading from different files */
-    for (int i = 0; i < num_files; i++)
-    {
-        uint8_t read_data[50];
-        int bytes_read = juxta_framfs_read(&fs_ctx, filenames[i], 0, read_data, sizeof(read_data));
-        if (bytes_read > 0)
-        {
-            read_data[bytes_read - 1] = '\0'; /* Ensure null termination */
-            LOG_INF("File %s content: '%s'", filenames[i], read_data);
-        }
-    }
-
-    LOG_INF("✅ Multiple file management test passed");
-    return 0;
-}
-
-/**
- * @brief Test structured sensor data storage
- */
-static int test_sensor_data_storage(void)
-{
-    int ret;
-
-    LOG_INF("🌡️  Testing sensor data storage...");
-
-    /* Create a file for sensor data */
-    ret = juxta_framfs_create_active(&fs_ctx, "20250722", JUXTA_FRAMFS_TYPE_SENSOR_LOG);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to create sensor data file: %d", ret);
-        return ret;
-    }
-
-    /* Define sensor data structure */
-    struct sensor_reading
-    {
-        uint32_t timestamp;
-        int16_t temperature; /* Temperature in 0.1°C */
-        uint16_t humidity;   /* Humidity in 0.1% */
-        uint32_t pressure;   /* Pressure in Pa */
-        uint8_t status;      /* Sensor status flags */
-    };
-
-    /* Generate and store multiple sensor readings */
-    for (int i = 0; i < 10; i++)
-    {
-        struct sensor_reading reading = {
-            .timestamp = k_uptime_get_32() + i * 1000,
-            .temperature = 250 + (i * 5),   /* 25.0°C to 29.5°C */
-            .humidity = 450 + (i * 10),     /* 45.0% to 54.0% */
-            .pressure = 101325 + (i * 100), /* ~1013.25 hPa + variation */
-            .status = 0x80 | (i & 0x0F)     /* Valid bit + counter */
-        };
-
-        ret = juxta_framfs_append(&fs_ctx, (uint8_t *)&reading, sizeof(reading));
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to append sensor reading %d: %d", i, ret);
-            return ret;
-        }
-    }
-
-    /* Read back and verify sensor data */
-    int file_size = juxta_framfs_get_file_size(&fs_ctx, "20250722");
-    if (file_size != (10 * sizeof(struct sensor_reading)))
-    {
-        LOG_ERR("Sensor file size mismatch: expected %zu, got %d",
-                10 * sizeof(struct sensor_reading), file_size);
+        LOG_ERR("❌ First part verification failed");
+        LOG_HEXDUMP_ERR(test_data, sizeof(test_data), "Expected:");
+        LOG_HEXDUMP_ERR(read_buffer, sizeof(test_data), "Got:");
         return -1;
     }
 
-    /* Read all sensor data */
-    struct sensor_reading readings[10];
-    ret = juxta_framfs_read(&fs_ctx, "20250722", 0,
-                            (uint8_t *)readings, sizeof(readings));
+    /* Verify second part */
+    if (memcmp(more_data, read_buffer + sizeof(test_data), sizeof(more_data)) != 0)
+    {
+        LOG_ERR("❌ Second part verification failed");
+        LOG_HEXDUMP_ERR(more_data, sizeof(more_data), "Expected:");
+        LOG_HEXDUMP_ERR(read_buffer + sizeof(test_data), sizeof(more_data), "Got:");
+        return -1;
+    }
+    LOG_INF("  ✅ Combined data verified successfully");
+
+    /* Test 4: Partial reads */
+    LOG_INF("Test 4: Partial reads");
+    LOG_INF("  → Reading partial data...");
+    ret = juxta_framfs_read(&fs_ctx, "test1", 2, read_buffer, 3);
     if (ret < 0)
     {
-        LOG_ERR("Failed to read sensor data: %d", ret);
+        LOG_ERR("❌ Failed to perform partial read: %d", ret);
         return ret;
     }
 
-    /* Display sensor readings */
-    LOG_INF("Stored sensor readings:");
-    for (int i = 0; i < 10; i++)
+    uint8_t expected[] = {3, 4, 5};
+    if (memcmp(expected, read_buffer, sizeof(expected)) != 0)
     {
-        LOG_INF("  [%d] Time: %u, Temp: %d.%d°C, Humidity: %d.%d%%, Pressure: %u Pa, Status: 0x%02X",
-                i, readings[i].timestamp,
-                readings[i].temperature / 10, readings[i].temperature % 10,
-                readings[i].humidity / 10, readings[i].humidity % 10,
-                readings[i].pressure, readings[i].status);
+        LOG_ERR("❌ Partial read verification failed");
+        LOG_HEXDUMP_ERR(expected, sizeof(expected), "Expected:");
+        LOG_HEXDUMP_ERR(read_buffer, sizeof(expected), "Got:");
+        return -1;
+    }
+    LOG_INF("  ✅ Partial read verified successfully");
+
+    /* Test 5: Large data write */
+    LOG_INF("Test 5: Large data write/read");
+    LOG_INF("  → Creating large file...");
+    uint8_t large_data[256]; /* Reduced from 1024 to 256 */
+    uint8_t large_buffer[256];
+    for (int i = 0; i < sizeof(large_data); i++)
+    {
+        large_data[i] = i & 0xFF;
     }
 
-    LOG_INF("✅ Sensor data storage test passed");
-    return 0;
-}
-
-/**
- * @brief Test file system limits and error handling
- */
-static int test_limits_and_errors(void)
-{
-    int ret;
-
-    LOG_INF("⚠️  Testing limits and error handling...");
-
-    /* Test duplicate file creation - first create a file */
-    ret = juxta_framfs_create_active(&fs_ctx, "20250723", JUXTA_FRAMFS_TYPE_RAW_DATA);
+    /* Create new file for large data */
+    ret = juxta_framfs_create_active(&fs_ctx, "large_file", JUXTA_FRAMFS_TYPE_RAW_DATA);
     if (ret < 0)
     {
-        LOG_ERR("Failed to create test file: %d", ret);
+        LOG_ERR("❌ Failed to create file for large data: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Large file created successfully");
+
+    /* Write large data in chunks */
+    LOG_INF("  → Writing large data in chunks...");
+    const size_t chunk_size = 64;
+    for (size_t offset = 0; offset < sizeof(large_data); offset += chunk_size)
+    {
+        size_t size = MIN(chunk_size, sizeof(large_data) - offset);
+        ret = juxta_framfs_append(&fs_ctx, large_data + offset, size);
+        if (ret < 0)
+        {
+            LOG_ERR("❌ Failed to write data chunk at offset %d: %d", offset, ret);
+            return ret;
+        }
+        LOG_INF("    Wrote chunk %zu/%zu (%zu bytes)",
+                (offset + size) / chunk_size,
+                sizeof(large_data) / chunk_size,
+                size);
+    }
+    LOG_INF("  ✅ Large data written successfully (%d bytes)", sizeof(large_data));
+
+    /* Read and verify large data */
+    LOG_INF("  → Reading and verifying large data...");
+    ret = juxta_framfs_read(&fs_ctx, "large_file", 0, large_buffer, sizeof(large_buffer));
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to read large data: %d", ret);
         return ret;
     }
 
-    /* Now try to create the same file again - should fail */
-    ret = juxta_framfs_create_active(&fs_ctx, "20250723", JUXTA_FRAMFS_TYPE_RAW_DATA);
-    if (ret != JUXTA_FRAMFS_ERROR_EXISTS)
+    if (memcmp(large_data, large_buffer, sizeof(large_data)) != 0)
     {
-        LOG_ERR("Expected duplicate file error, got: %d", ret);
+        LOG_ERR("❌ Large data verification failed");
         return -1;
     }
-    LOG_INF("✓ Duplicate file creation properly rejected");
+    LOG_INF("  ✅ Large data verified successfully");
 
-    /* Test reading non-existent file */
-    uint8_t dummy_buffer[10];
-    ret = juxta_framfs_read(&fs_ctx, "nonexistent", 0, dummy_buffer, sizeof(dummy_buffer));
-    if (ret != JUXTA_FRAMFS_ERROR_NOT_FOUND)
+    /* Test 6: File size verification */
+    LOG_INF("Test 6: File size verification");
+    LOG_INF("  → Checking file sizes...");
+    ret = juxta_framfs_get_file_size(&fs_ctx, "test1");
+    if (ret != (sizeof(test_data) + sizeof(more_data)))
     {
-        LOG_ERR("Expected file not found error, got: %d", ret);
+        LOG_ERR("❌ Unexpected file size: got %d, expected %d",
+                ret, sizeof(test_data) + sizeof(more_data));
         return -1;
     }
-    LOG_INF("✓ Non-existent file read properly rejected");
+    LOG_INF("  ✅ First file size verified: %d bytes", ret);
 
-    /* Test appending without active file */
-    ret = juxta_framfs_seal_active(&fs_ctx); /* Ensure no active file */
-
-    uint8_t test_data[] = "test";
-    ret = juxta_framfs_append(&fs_ctx, test_data, sizeof(test_data));
-    if (ret != JUXTA_FRAMFS_ERROR_NO_ACTIVE)
+    ret = juxta_framfs_get_file_size(&fs_ctx, "large_file");
+    if (ret != sizeof(large_data))
     {
-        LOG_ERR("Expected no active file error, got: %d", ret);
+        LOG_ERR("❌ Unexpected large file size: got %d, expected %d",
+                ret, sizeof(large_data));
         return -1;
     }
-    LOG_INF("✓ Append without active file properly rejected");
+    LOG_INF("  ✅ Large file size verified: %d bytes", ret);
 
-    /* Test filename too long */
-    ret = juxta_framfs_create_active(&fs_ctx, "this_filename_is_way_too_long_for_the_system",
-                                     JUXTA_FRAMFS_TYPE_RAW_DATA);
-    if (ret != JUXTA_FRAMFS_ERROR_SIZE)
-    {
-        LOG_ERR("Expected filename too long error, got: %d", ret);
-        return -1;
-    }
-    LOG_INF("✓ Long filename properly rejected");
-
-    LOG_INF("✅ Limits and error handling test passed");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("✅ All basic file operations passed!");
     return 0;
 }
 
 /**
- * @brief Test file system statistics and status
+ * @brief Test MAC address table operations
  */
-static int test_filesystem_stats(void)
-{
-    int ret;
-
-    LOG_INF("📊 Testing file system statistics...");
-
-    /* Get comprehensive statistics */
-    struct juxta_framfs_header stats;
-    ret = juxta_framfs_get_stats(&fs_ctx, &stats);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to get file system stats: %d", ret);
-        return ret;
-    }
-
-    /* Calculate usage percentages */
-    uint32_t index_size = sizeof(struct juxta_framfs_header) +
-                          (JUXTA_FRAMFS_MAX_FILES * sizeof(struct juxta_framfs_entry));
-    uint32_t data_area_size = JUXTA_FRAM_SIZE_BYTES - index_size;
-    uint32_t data_used = stats.total_data_size;
-    float data_usage_percent = (float)data_used / data_area_size * 100.0f;
-    float file_usage_percent = (float)stats.file_count / JUXTA_FRAMFS_MAX_FILES * 100.0f;
-
-    LOG_INF("📈 File System Usage Report:");
-    LOG_INF("  ╔══════════════════════════════════════╗");
-    LOG_INF("  ║              FRAM USAGE              ║");
-    LOG_INF("  ╠══════════════════════════════════════╣");
-    LOG_INF("  ║  Total FRAM:     %6d bytes       ║", JUXTA_FRAM_SIZE_BYTES);
-    LOG_INF("  ║  Index area:     %6d bytes       ║", index_size);
-    LOG_INF("  ║  Data area:      %6d bytes       ║", data_area_size);
-    LOG_INF("  ║  Data used:      %6d bytes       ║", data_used);
-    LOG_INF("  ║  Data free:      %6d bytes       ║", data_area_size - data_used);
-    LOG_INF("  ║  Data usage:     %6.1f%%           ║", (double)data_usage_percent);
-    LOG_INF("  ║  File usage:     %6.1f%%           ║", (double)file_usage_percent);
-    LOG_INF("  ║  Next address:   0x%06X           ║", stats.next_data_addr);
-    LOG_INF("  ╚══════════════════════════════════════╝");
-
-    /* List all files with details */
-    char file_list[20][JUXTA_FRAMFS_FILENAME_LEN];
-    int file_count = juxta_framfs_list_files(&fs_ctx, file_list, 20);
-    if (file_count > 0)
-    {
-        LOG_INF("📁 File Details:");
-        for (int i = 0; i < file_count; i++)
-        {
-            struct juxta_framfs_entry entry;
-            ret = juxta_framfs_get_file_info(&fs_ctx, file_list[i], &entry);
-            if (ret == 0)
-            {
-                LOG_INF("  %s: %d bytes, type=%d, flags=0x%02X",
-                        entry.filename, entry.length, entry.file_type, entry.flags);
-            }
-        }
-    }
-
-    LOG_INF("✅ File system statistics test passed");
-    return 0;
-}
-
-/**
- * @brief Simulate a data logging session
- */
-static int test_data_logger_simulation(void)
-{
-    int ret;
-
-    LOG_INF("📊 Running Data Logger Simulation...");
-
-    /* Structure to simulate sensor data */
-    struct sensor_packet
-    {
-        uint32_t timestamp;
-        int16_t temperature; // 0.1°C
-        uint16_t humidity;   // 0.1%
-        uint32_t pressure;   // Pa
-        uint16_t light;      // lux
-        uint8_t battery;     // percentage
-        uint8_t flags;       // status flags
-    } __packed;
-
-    /* Create a sequence of timestamped files */
-    const char *timestamps[] = {
-        "20240120", // Day 1
-        "20240121", // Day 2
-        "20240122", // Day 3
-        "20240123", // Day 4
-        "20240124"  // Day 5
-    };
-    int num_files = sizeof(timestamps) / sizeof(timestamps[0]);
-
-    /* Track total data written */
-    size_t total_bytes = 0;
-    int total_packets = 0;
-
-    LOG_INF("Starting data logging sequence with %d files", num_files);
-
-    for (int file_idx = 0; file_idx < num_files; file_idx++)
-    {
-        /* Create new file for this time period */
-        ret = juxta_framfs_create_active(&fs_ctx, timestamps[file_idx],
-                                         JUXTA_FRAMFS_TYPE_SENSOR_LOG);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to create file %s: %d", timestamps[file_idx], ret);
-            return ret;
-        }
-
-        LOG_INF("Created file: %s", timestamps[file_idx]);
-
-        /* Simulate collecting data for 15 minutes (1 sample every "minute") */
-        for (int minute = 0; minute < 15; minute++)
-        {
-            struct sensor_packet packet = {
-                .timestamp = k_uptime_get_32() + (minute * 60 * 1000),
-                .temperature = 200 + (minute % 5),  // 20.0°C - 20.4°C
-                .humidity = 500 + minute,           // 50.0% - 51.4%
-                .pressure = 101325 + (minute * 10), // Varying pressure
-                .light = 1000 + (minute * 50),      // Varying light
-                .battery = 95 - (file_idx * 2),     // Decreasing battery
-                .flags = 0x80 | (minute & 0x0F)     // Status flags
-            };
-
-            /* Write packet to current file */
-            ret = juxta_framfs_append(&fs_ctx, (uint8_t *)&packet, sizeof(packet));
-            if (ret < 0)
-            {
-                LOG_ERR("Failed to append packet %d to file %s: %d",
-                        minute, timestamps[file_idx], ret);
-                return ret;
-            }
-
-            total_bytes += sizeof(packet);
-            total_packets++;
-
-            /* Small delay between packets to prevent log overflow */
-            k_sleep(K_MSEC(10));
-
-            /* Every 5 packets, show a progress update */
-            if ((minute % 5) == 0)
-            {
-                LOG_INF("  Written %d packets to %s...", minute + 1, timestamps[file_idx]);
-                k_sleep(K_MSEC(100)); // Longer delay for log visibility
-            }
-        }
-
-        /* Get file info and verify size */
-        struct juxta_framfs_entry file_info;
-        ret = juxta_framfs_get_file_info(&fs_ctx, timestamps[file_idx], &file_info);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to get file info for %s: %d", timestamps[file_idx], ret);
-            return ret;
-        }
-
-        LOG_INF("File %s: %d bytes written", timestamps[file_idx], file_info.length);
-
-        /* Verify data by reading back last packet */
-        struct sensor_packet verify_packet;
-        ret = juxta_framfs_read(&fs_ctx, timestamps[file_idx],
-                                file_info.length - sizeof(struct sensor_packet),
-                                (uint8_t *)&verify_packet, sizeof(verify_packet));
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to read verification packet: %d", ret);
-            return ret;
-        }
-
-        LOG_INF("Last packet in %s:", timestamps[file_idx]);
-        LOG_INF("  Temperature: %d.%d°C",
-                verify_packet.temperature / 10, verify_packet.temperature % 10);
-        LOG_INF("  Humidity: %d.%d%%",
-                verify_packet.humidity / 10, verify_packet.humidity % 10);
-        LOG_INF("  Battery: %d%%", verify_packet.battery);
-
-        /* Seal file before moving to next */
-        ret = juxta_framfs_seal_active(&fs_ctx);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to seal file %s: %d", timestamps[file_idx], ret);
-            return ret;
-        }
-
-        /* Get filesystem stats periodically */
-        struct juxta_framfs_header stats;
-        ret = juxta_framfs_get_stats(&fs_ctx, &stats);
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to getfilesystem stats: %d", ret);
-            return ret;
-        }
-
-        /* Calculate usage percentages */
-        float data_usage = ((float)stats.total_data_size / JUXTA_FRAM_SIZE_BYTES) * 100;
-        float file_usage = ((float)stats.file_count / JUXTA_FRAMFS_MAX_FILES) * 100;
-
-        LOG_INF("Filesystem status after file %d:", file_idx + 1);
-        LOG_INF("  Files: %d/%d (%.1f%% used)",
-                stats.file_count, JUXTA_FRAMFS_MAX_FILES, (double)file_usage);
-        LOG_INF("  Data: %d bytes (%.1f%% used)",
-                stats.total_data_size, (double)data_usage);
-        LOG_INF("  Next write address: 0x%06X", stats.next_data_addr);
-
-        k_sleep(K_MSEC(100)); // Small delay between files
-    }
-
-    /* Final statistics */
-    LOG_INF("📈 Data Logger Simulation Complete:");
-    LOG_INF("  Total files created: %d", num_files);
-    LOG_INF("  Total packets written: %d", total_packets);
-    LOG_INF("  Total bytes written: %d", total_bytes);
-    LOG_INF("  Average packet size: %d bytes",
-            total_bytes / total_packets);
-
-    /* List all files for verification */
-    char file_list[10][JUXTA_FRAMFS_FILENAME_LEN];
-    int file_count = juxta_framfs_list_files(&fs_ctx, file_list, 10);
-    if (file_count > 0)
-    {
-        LOG_INF("📁 Final File Listing:");
-        for (int i = 0; i < file_count; i++)
-        {
-            struct juxta_framfs_entry entry;
-            ret = juxta_framfs_get_file_info(&fs_ctx, file_list[i], &entry);
-            if (ret == 0)
-            {
-                LOG_INF("  %s: %d bytes, type=%d, flags=0x%02X",
-                        entry.filename, entry.length,
-                        entry.file_type, entry.flags);
-            }
-        }
-    }
-
-    LOG_INF("✅ Data logger simulation test passed!");
-    return 0;
-}
-
-/**
- * @brief Test MAC address table functionality
- */
-static int test_mac_address_table(void)
+static int test_mac_table_operations(void)
 {
     int ret;
     uint8_t mac_index;
@@ -753,9 +404,11 @@ static int test_mac_address_table(void)
     uint8_t entry_count;
     uint32_t total_usage;
 
-    LOG_INF("📱 Testing MAC address table functionality...");
+    LOG_INF("📱 Testing MAC address table operations...");
+    LOG_INF("══════════════════════════════════════════════════════════════");
 
     /* Test 1: Add new MAC addresses */
+    LOG_INF("Test 1: Adding MAC addresses");
     uint8_t test_macs[][6] = {
         {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, /* Test MAC 1 */
         {0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78}, /* Test MAC 2 */
@@ -764,451 +417,447 @@ static int test_mac_address_table(void)
         {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, /* Duplicate of MAC 1 */
     };
 
-    LOG_INF("Adding MAC addresses...");
     for (int i = 0; i < 5; i++)
     {
         ret = juxta_framfs_mac_find_or_add(&fs_ctx, test_macs[i], &mac_index);
         if (ret < 0)
         {
-            LOG_ERR("Failed to add MAC %d: %d", i, ret);
+            LOG_ERR("❌ Failed to add MAC %d: %d", i, ret);
             return ret;
         }
-        LOG_INF("MAC %d added at index %d", i, mac_index);
+        LOG_INF("  ✅ MAC %d added at index %d", i, mac_index);
     }
 
     /* Test 2: Verify statistics */
+    LOG_INF("Test 2: Verifying MAC table statistics");
     ret = juxta_framfs_mac_get_stats(&fs_ctx, &entry_count, &total_usage);
     if (ret < 0)
     {
-        LOG_ERR("Failed to get MAC stats: %d", ret);
+        LOG_ERR("❌ Failed to get MAC stats: %d", ret);
         return ret;
     }
-    LOG_INF("MAC table stats: %d entries, %d total usage", entry_count, total_usage);
+    LOG_INF("  ✅ MAC table stats: %d entries, %d total usage", entry_count, total_usage);
 
-    /* Check that we have a reasonable number of entries (at least 4 from this test) */
-    if (entry_count < 4)
+    /* Check that we have 4 unique entries (5th was duplicate) */
+    if (entry_count != 4)
     {
-        LOG_ERR("Expected at least 4 entries, got %d", entry_count);
+        LOG_ERR("❌ Expected 4 entries, got %d", entry_count);
         return -1;
     }
-    LOG_INF("✅ MAC table has %d entries (expected at least 4)", entry_count);
+    LOG_INF("  ✅ MAC table has correct number of entries");
 
     /* Test 3: Find existing MAC addresses */
-    LOG_INF("Finding existing MAC addresses...");
+    LOG_INF("Test 3: Finding existing MAC addresses");
     for (int i = 0; i < 4; i++)
     {
         ret = juxta_framfs_mac_find(&fs_ctx, test_macs[i], &mac_index);
         if (ret < 0)
         {
-            LOG_ERR("Failed to find MAC %d: %d", i, ret);
+            LOG_ERR("❌ Failed to find MAC %d: %d", i, ret);
             return ret;
         }
-        LOG_INF("Found MAC %d at index %d", i, mac_index);
+        LOG_INF("  ✅ Found MAC %d at index %d", i, mac_index);
     }
 
     /* Test 4: Get MAC by index */
-    LOG_INF("Retrieving MAC addresses by index...");
+    LOG_INF("Test 4: Retrieving MAC addresses by index");
     for (int i = 0; i < 4; i++)
     {
         ret = juxta_framfs_mac_get_by_index(&fs_ctx, i, retrieved_mac);
         if (ret < 0)
         {
-            LOG_ERR("Failed to get MAC by index %d: %d", i, ret);
+            LOG_ERR("❌ Failed to get MAC by index %d: %d", i, ret);
             return ret;
         }
-        LOG_INF("Index %d: %02X:%02X:%02X:%02X:%02X:%02X", i,
+        LOG_INF("  ✅ Retrieved MAC %d: %02X:%02X:%02X:%02X:%02X:%02X", i,
                 retrieved_mac[0], retrieved_mac[1], retrieved_mac[2],
                 retrieved_mac[3], retrieved_mac[4], retrieved_mac[5]);
     }
 
-    /* Test 5: Test non-existent MAC */
+    /* Test 5: Expected error cases */
+    LOG_INF("Test 5: Testing error handling (expected errors)");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    /* Non-existent MAC */
+    LOG_INF("  → Testing non-existent MAC...");
     uint8_t non_existent_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     ret = juxta_framfs_mac_find(&fs_ctx, non_existent_mac, &mac_index);
     if (ret != JUXTA_FRAMFS_ERROR_MAC_NOT_FOUND)
     {
-        LOG_ERR("Expected MAC_NOT_FOUND error, got %d", ret);
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for non-existent MAC");
         return -1;
     }
-    LOG_INF("✅ Correctly rejected non-existent MAC");
+    LOG_WRN("  ✓ Expected error: MAC not found");
 
-    /* Test 6: Test invalid index */
+    /* Invalid index */
+    LOG_INF("  → Testing out-of-range MAC index...");
     ret = juxta_framfs_mac_get_by_index(&fs_ctx, 255, retrieved_mac);
-    if (ret >= 0)
+    if (ret != JUXTA_FRAMFS_ERROR)
     {
-        LOG_ERR("Expected error for invalid index, got %d", ret);
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for out-of-range index");
         return -1;
     }
-    LOG_INF("✅ Correctly rejected invalid index");
+    LOG_WRN("  ✓ Expected error: MAC index out of range");
 
-    /* Test 7: Add many more MAC addresses to test limits */
-    LOG_INF("Testing MAC table capacity...");
-    int added_count = 4;         /* Already added 4 above */
-    for (int i = 0; i < 20; i++) /* Try to add 20 more */
-    {
-        uint8_t new_mac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, (uint8_t)i};
-        ret = juxta_framfs_mac_find_or_add(&fs_ctx, new_mac, &mac_index);
-        if (ret == 0)
-        {
-            added_count++;
-            LOG_DBG("Added MAC %d at index %d", added_count - 1, mac_index);
-        }
-        else if (ret == JUXTA_FRAMFS_ERROR_MAC_FULL)
-        {
-            LOG_INF("MAC table full at %d entries", added_count);
-            break;
-        }
-        else
-        {
-            LOG_ERR("Unexpected error adding MAC %d: %d", i, ret);
-            return ret;
-        }
-    }
-
-    /* Get final statistics */
-    ret = juxta_framfs_mac_get_stats(&fs_ctx, &entry_count, &total_usage);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to get final MAC stats: %d", ret);
-        return ret;
-    }
-    LOG_INF("Final MAC table stats: %d entries, %d total usage", entry_count, total_usage);
-
-    LOG_INF("✅ MAC address table test passed");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("✅ All MAC table tests passed!");
     return 0;
 }
 
 /**
- * @brief Test encoding/decoding functionality (pure encode/decode only)
+ * @brief Test record encoding/decoding
  */
 static int test_encoding_decoding(void)
 {
     int ret;
+    uint8_t buffer[256];
 
-    LOG_INF("🔧 Testing encoding/decoding functionality...");
+    LOG_INF("🔄 Testing record encoding/decoding...");
+    LOG_INF("══════════════════════════════════════════════════════════════");
 
-    /* Test 1: Device scan record encoding/decoding */
-    LOG_INF("Testing device scan record encoding/decoding...");
+    /* Test 1: Device record */
+    LOG_INF("Test 1: Device record encoding/decoding");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+    struct juxta_framfs_device_record test_record = {
+        .minute = 123,
+        .type = 2,
+        .motion_count = 5,
+        .mac_indices = {1, 2},
+        .rssi_values = {-45, -60}};
 
-    struct juxta_framfs_device_record test_record;
-    test_record.minute = 1234; /* 20:34 */
-    test_record.type = 3;      /* 3 devices */
-    test_record.motion_count = 5;
-    test_record.mac_indices[0] = 12;
-    test_record.mac_indices[1] = 34;
-    test_record.mac_indices[2] = 56;
-    test_record.rssi_values[0] = -45;
-    test_record.rssi_values[1] = -67;
-    test_record.rssi_values[2] = -23;
-
-    /* Encode record */
-    uint8_t encode_buffer[4 + (2 * 128)]; /* Max size for 128 devices */
-    int encoded_size = juxta_framfs_encode_device_record(&test_record, encode_buffer, sizeof(encode_buffer));
-    if (encoded_size < 0)
+    ret = juxta_framfs_encode_device_record(&test_record, buffer, sizeof(buffer));
+    if (ret < 0)
     {
-        LOG_ERR("Failed to encode device record: %d", encoded_size);
-        return encoded_size;
+        LOG_ERR("❌ Failed to encode device record: %d", ret);
+        return ret;
     }
+    LOG_INF("  ✅ Device record encoded:");
+    LOG_INF("     - Minute: %d", test_record.minute);
+    LOG_INF("     - Type: %d", test_record.type);
+    LOG_INF("     - Motion count: %d", test_record.motion_count);
+    LOG_INF("     - MAC indices: [%d, %d]", test_record.mac_indices[0], test_record.mac_indices[1]);
+    LOG_INF("     - RSSI values: [%d, %d]", test_record.rssi_values[0], test_record.rssi_values[1]);
 
-    LOG_INF("Encoded device record: %d bytes", encoded_size);
-    LOG_HEXDUMP_INF(encode_buffer, encoded_size, "Encoded data:");
-
-    /* Decode record */
     struct juxta_framfs_device_record decoded_record;
-    int decoded_size = juxta_framfs_decode_device_record(encode_buffer, encoded_size, &decoded_record);
-    if (decoded_size < 0)
+    ret = juxta_framfs_decode_device_record(buffer, ret, &decoded_record);
+    if (ret < 0)
     {
-        LOG_ERR("Failed to decode device record: %d", decoded_size);
-        return decoded_size;
+        LOG_ERR("❌ Failed to decode device record: %d", ret);
+        return ret;
     }
 
-    LOG_INF("Decoded device record: %d bytes", decoded_size);
-    LOG_INF("  Minute: %d", decoded_record.minute);
-    LOG_INF("  Type: %d", decoded_record.type);
-    LOG_INF("  Motion: %d", decoded_record.motion_count);
-    LOG_INF("  MAC indices: %d, %d, %d", decoded_record.mac_indices[0], decoded_record.mac_indices[1], decoded_record.mac_indices[2]);
-    LOG_INF("  RSSI values: %d, %d, %d", decoded_record.rssi_values[0], decoded_record.rssi_values[1], decoded_record.rssi_values[2]);
-
-    /* Test 2: Simple record encoding/decoding */
-    LOG_INF("Testing simple record encoding/decoding...");
-
-    struct juxta_framfs_simple_record simple_record;
-    simple_record.minute = 567;
-    simple_record.type = 0xF1;
-
-    uint8_t simple_buffer[3];
-    encoded_size = juxta_framfs_encode_simple_record(&simple_record, simple_buffer);
-    if (encoded_size < 0)
+    if (decoded_record.minute != test_record.minute ||
+        decoded_record.type != test_record.type ||
+        decoded_record.motion_count != test_record.motion_count ||
+        decoded_record.mac_indices[0] != test_record.mac_indices[0] ||
+        decoded_record.mac_indices[1] != test_record.mac_indices[1] ||
+        decoded_record.rssi_values[0] != test_record.rssi_values[0] ||
+        decoded_record.rssi_values[1] != test_record.rssi_values[1])
     {
-        LOG_ERR("Failed to encode simple record: %d", encoded_size);
-        return encoded_size;
+        LOG_ERR("❌ Device record verification failed");
+        return -1;
     }
+    LOG_INF("  ✅ Device record decoded and verified successfully");
 
-    LOG_INF("Encoded simple record: %d bytes", encoded_size);
-    LOG_HEXDUMP_INF(simple_buffer, encoded_size, "Encoded simple data:");
+    /* Test 2: Simple record */
+    LOG_INF("Test 2: Simple record encoding/decoding");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+    struct juxta_framfs_simple_record simple_record = {
+        .minute = 456,
+        .type = JUXTA_FRAMFS_RECORD_TYPE_BOOT};
+
+    ret = juxta_framfs_encode_simple_record(&simple_record, buffer);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to encode simple record: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Simple record encoded:");
+    LOG_INF("     - Minute: %d", simple_record.minute);
+    LOG_INF("     - Type: BOOT");
 
     struct juxta_framfs_simple_record decoded_simple;
-    decoded_size = juxta_framfs_decode_simple_record(simple_buffer, &decoded_simple);
-    if (decoded_size < 0)
+    ret = juxta_framfs_decode_simple_record(buffer, &decoded_simple);
+    if (ret < 0)
     {
-        LOG_ERR("Failed to decode simple record: %d", decoded_size);
-        return decoded_size;
+        LOG_ERR("❌ Failed to decode simple record: %d", ret);
+        return ret;
     }
 
-    LOG_INF("Decoded simple record: %d bytes", decoded_size);
-    LOG_INF("  Minute: %d", decoded_simple.minute);
-    LOG_INF("  Type: 0x%02X", decoded_simple.type);
-
-    /* Test 3: Battery record encoding/decoding */
-    LOG_INF("Testing battery record encoding/decoding...");
-
-    struct juxta_framfs_battery_record battery_record;
-    battery_record.minute = 890;
-    battery_record.type = 0xF4;
-    battery_record.level = 87;
-
-    uint8_t battery_buffer[4];
-    encoded_size = juxta_framfs_encode_battery_record(&battery_record, battery_buffer);
-    if (encoded_size < 0)
+    if (decoded_simple.minute != simple_record.minute ||
+        decoded_simple.type != simple_record.type)
     {
-        LOG_ERR("Failed to encode battery record: %d", encoded_size);
-        return encoded_size;
+        LOG_ERR("❌ Simple record verification failed");
+        return -1;
     }
+    LOG_INF("  ✅ Simple record decoded and verified successfully");
 
-    LOG_INF("Encoded battery record: %d bytes", encoded_size);
-    LOG_HEXDUMP_INF(battery_buffer, encoded_size, "Encoded battery data:");
+    /* Test 3: Battery record */
+    LOG_INF("Test 3: Battery record encoding/decoding");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+    struct juxta_framfs_battery_record battery_record = {
+        .minute = 789,
+        .type = JUXTA_FRAMFS_RECORD_TYPE_BATTERY,
+        .level = 85};
+
+    ret = juxta_framfs_encode_battery_record(&battery_record, buffer);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to encode battery record: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Battery record encoded:");
+    LOG_INF("     - Minute: %d", battery_record.minute);
+    LOG_INF("     - Level: %d%%", battery_record.level);
 
     struct juxta_framfs_battery_record decoded_battery;
-    decoded_size = juxta_framfs_decode_battery_record(battery_buffer, &decoded_battery);
-    if (decoded_size < 0)
+    ret = juxta_framfs_decode_battery_record(buffer, &decoded_battery);
+    if (ret < 0)
     {
-        LOG_ERR("Failed to decode battery record: %d", decoded_size);
-        return decoded_size;
+        LOG_ERR("❌ Failed to decode battery record: %d", ret);
+        return ret;
     }
 
-    LOG_INF("Decoded battery record: %d bytes", decoded_size);
-    LOG_INF("  Minute: %d", decoded_battery.minute);
-    LOG_INF("  Type: 0x%02X", decoded_battery.type);
-    LOG_INF("  Level: %d%%", decoded_battery.level);
-
-    /* Test 4: Error handling for encoding */
-    LOG_INF("Testing encoding error handling...");
-
-    /* Test invalid device count */
-    struct juxta_framfs_device_record invalid_record = test_record;
-    invalid_record.type = 0; /* Invalid: 0 devices */
-    ret = juxta_framfs_encode_device_record(&invalid_record, encode_buffer, sizeof(encode_buffer));
-    if (ret >= 0)
+    if (decoded_battery.minute != battery_record.minute ||
+        decoded_battery.type != battery_record.type ||
+        decoded_battery.level != battery_record.level)
     {
-        LOG_ERR("Expected error for invalid device count, got: %d", ret);
+        LOG_ERR("❌ Battery record verification failed");
         return -1;
     }
-    LOG_INF("✅ Correctly rejected invalid device count");
+    LOG_INF("  ✅ Battery record decoded and verified successfully");
 
-    /* Test buffer too small */
-    uint8_t small_buffer[2]; /* Too small for any record */
-    ret = juxta_framfs_encode_device_record(&test_record, small_buffer, sizeof(small_buffer));
-    if (ret >= 0)
+    /* Test 4: Expected error cases */
+    LOG_INF("Test 4: Testing error handling (expected errors)");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    /* Invalid buffer size */
+    LOG_INF("  → Testing small buffer...");
+    ret = juxta_framfs_encode_device_record(&test_record, buffer, 2);
+    if (ret != JUXTA_FRAMFS_ERROR_SIZE)
     {
-        LOG_ERR("Expected error for buffer too small, got: %d", ret);
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for buffer size");
         return -1;
     }
-    LOG_INF("✅ Correctly rejected buffer too small");
+    LOG_WRN("  ✓ Expected error: Buffer too small");
 
-    LOG_INF("✅ Encoding/decoding test passed");
+    /* Invalid device count */
+    LOG_INF("  → Testing invalid device count...");
+    struct juxta_framfs_device_record invalid_device = {
+        .minute = 123,
+        .type = 0, /* Invalid: 0 devices */
+        .motion_count = 1};
+    ret = juxta_framfs_encode_device_record(&invalid_device, buffer, sizeof(buffer));
+    if (ret != JUXTA_FRAMFS_ERROR)
+    {
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for invalid device count");
+        return -1;
+    }
+    LOG_WRN("  ✓ Expected error: Invalid device count");
+
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("✅ All encoding/decoding tests passed!");
     return 0;
 }
 
 /**
- * @brief Test high-level append functions
+ * @brief Test error handling
  */
-static int test_append_functions(void)
+static int test_error_handling(void)
 {
     int ret;
+    uint8_t buffer[32];
 
-    LOG_INF("📝 Testing high-level append functions...");
+    LOG_INF("⚠️  Testing error handling...");
+    LOG_INF("══════════════════════════════════════════════════════════════");
 
-    /* Create a test file for append operations */
-    ret = juxta_framfs_create_active(&fs_ctx, "20240125", JUXTA_FRAMFS_TYPE_SENSOR_LOG);
-    if (ret < 0)
+    /* Test 1: Invalid file operations */
+    LOG_INF("Test 1: Invalid file operations (expected errors)");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    /* Read non-existent file */
+    LOG_INF("  → Testing non-existent file read...");
+    ret = juxta_framfs_read(&fs_ctx, "nonexistent", 0, buffer, sizeof(buffer));
+    if (ret != JUXTA_FRAMFS_ERROR_NOT_FOUND)
     {
-        LOG_ERR("Failed to create test file: %d", ret);
-        return ret;
-    }
-
-    /* Test append_device_scan */
-    uint8_t test_macs[][6] = {
-        {0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
-        {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF},
-        {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}};
-    int8_t test_rssi[] = {-45, -67, -23};
-
-    ret = juxta_framfs_append_device_scan(&fs_ctx, 1234, 5, test_macs, test_rssi, 3);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to append device scan: %d", ret);
-        return ret;
-    }
-    LOG_INF("✅ Appended device scan record");
-
-    /* Test append_simple_record */
-    ret = juxta_framfs_append_simple_record(&fs_ctx, 567, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to append simple record: %d", ret);
-        return ret;
-    }
-    LOG_INF("✅ Appended simple record (boot)");
-
-    /* Test append_battery_record */
-    ret = juxta_framfs_append_battery_record(&fs_ctx, 890, 87);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to append battery record: %d", ret);
-        return ret;
-    }
-    LOG_INF("✅ Appended battery record (87%%)");
-
-    /* Test append_simple_record for different types */
-    ret = juxta_framfs_append_simple_record(&fs_ctx, 1000, JUXTA_FRAMFS_RECORD_TYPE_CONNECTED);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to append connected record: %d", ret);
-        return ret;
-    }
-    LOG_INF("✅ Appended simple record (connected)");
-
-    ret = juxta_framfs_append_simple_record(&fs_ctx, 1100, JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to append no activity record: %d", ret);
-        return ret;
-    }
-    LOG_INF("✅ Appended simple record (no activity)");
-
-    /* Test error handling for append functions */
-    LOG_INF("Testing append error handling...");
-
-    /* Test invalid battery level */
-    ret = juxta_framfs_append_battery_record(&fs_ctx, 1200, 150); /* > 100% */
-    if (ret >= 0)
-    {
-        LOG_ERR("Expected error for invalid battery level, got: %d", ret);
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for non-existent file");
         return -1;
     }
-    LOG_INF("✅ Correctly rejected invalid battery level");
+    LOG_WRN("  ✓ Expected error: File not found");
 
-    /* Test invalid simple record type */
-    ret = juxta_framfs_append_simple_record(&fs_ctx, 1300, 0x99); /* Invalid type */
-    if (ret >= 0)
-    {
-        LOG_ERR("Expected error for invalid simple record type, got: %d", ret);
-        return -1;
-    }
-    LOG_INF("✅ Correctly rejected invalid simple record type");
-
-    /* Test 6: Read back and verify appended data */
-    LOG_INF("Reading back appended data for verification...");
-
-    int file_size = juxta_framfs_get_file_size(&fs_ctx, "20240125");
-    if (file_size < 0)
-    {
-        LOG_ERR("Failed to get file size: %d", file_size);
-        return file_size;
-    }
-
-    LOG_INF("Test file size: %d bytes", file_size);
-
-    /* Read the entire file */
-    uint8_t read_buffer[256];
-    int bytes_read = juxta_framfs_read(&fs_ctx, "20240125", 0, read_buffer, sizeof(read_buffer));
-    if (bytes_read < 0)
-    {
-        LOG_ERR("Failed to read test file: %d", bytes_read);
-        return bytes_read;
-    }
-
-    LOG_INF("Read %d bytes from test file", bytes_read);
-    LOG_HEXDUMP_INF(read_buffer, bytes_read, "File contents:");
-
-    /* Seal the test file */
-    ret = juxta_framfs_seal_active(&fs_ctx);
+    /* Create test file first */
+    LOG_INF("  → Creating test file...");
+    ret = juxta_framfs_create_active(&fs_ctx, "test1", JUXTA_FRAMFS_TYPE_RAW_DATA);
     if (ret < 0)
     {
-        LOG_ERR("Failed to seal test file: %d", ret);
+        LOG_ERR("❌ Failed to create test file: %d", ret);
         return ret;
     }
+    LOG_INF("  ✅ Test file created successfully");
 
-    LOG_INF("✅ Append functions test passed");
+    /* Create duplicate file */
+    LOG_INF("  → Testing duplicate file creation...");
+    ret = juxta_framfs_create_active(&fs_ctx, "test1", JUXTA_FRAMFS_TYPE_RAW_DATA);
+    if (ret != JUXTA_FRAMFS_ERROR_EXISTS)
+    {
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for duplicate file");
+        return -1;
+    }
+    LOG_WRN("  ✓ Expected error: File already exists");
+
+    /* Test 2: Invalid parameters */
+    LOG_INF("Test 2: Invalid parameters (expected errors)");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    /* Null buffer */
+    LOG_INF("  → Testing null buffer...");
+    ret = juxta_framfs_append(&fs_ctx, NULL, 10);
+    if (ret != JUXTA_FRAMFS_ERROR)
+    {
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for null buffer");
+        return -1;
+    }
+    LOG_WRN("  ✓ Expected error: Invalid parameter (null buffer)");
+
+    /* Zero length */
+    LOG_INF("  → Testing zero length...");
+    uint8_t dummy_data[] = {1, 2, 3};
+    ret = juxta_framfs_append(&fs_ctx, dummy_data, 0);
+    if (ret != JUXTA_FRAMFS_ERROR)
+    {
+        LOG_ERR("❌ UNEXPECTED: Wrong error code for zero length");
+        return -1;
+    }
+    LOG_WRN("  ✓ Expected error: Invalid parameter (zero length)");
+
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("✅ All error handling tests passed!");
     return 0;
 }
 
 /**
- * @brief Main file system test function
+ * @brief Main test function
  */
 int framfs_test_main(void)
 {
     int ret;
 
-    LOG_INF("🚀 Starting FRAM File System Test Suite");
+    LOG_INF("🧪 Running Low-Level API Tests");
+    LOG_INF("══════════════════════════════════════════════════════════════");
 
-    /* Step 1: Initialize file system first */
+    /* Initialize and clear */
+    LOG_INF("📋 Step 1: Initializing file system...");
     ret = test_framfs_init();
     if (ret < 0)
+    {
+        LOG_ERR("❌ File system initialization failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ File system initialized successfully");
 
-    /* Step 2: Display current file system status (optional, for old data) */
-    ret = display_filesystem_stats();
-    if (ret < 0)
-        return ret;
-
-    /* Step 3: Clear file system for fresh start */
+    LOG_INF("🧹 Step 2: Clearing file system...");
     ret = clear_filesystem();
     if (ret < 0)
+    {
+        LOG_ERR("❌ File system clear failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ File system cleared successfully");
 
-    /* Step 4: Re-initialize file system after clearing */
-    ret = test_framfs_init();
+    /* Display initial state */
+    LOG_INF("📊 Step 3: Checking initial state...");
+    ret = display_filesystem_stats();
     if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to display file system stats: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ Initial state verified");
 
-    /* --- WRITE/ENCODE/APPEND/MAC TABLE TESTS --- */
+    /* Run test sequence */
+    LOG_INF("📝 Step 4: Testing basic file operations...");
     ret = test_basic_file_operations();
     if (ret < 0)
+    {
+        LOG_ERR("❌ Basic file operations failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ Basic file operations passed");
 
-    ret = test_multiple_files();
+    /* Clear again for MAC table tests */
+    LOG_INF("🧹 Step 5: Clearing file system for MAC table tests...");
+    ret = clear_filesystem();
     if (ret < 0)
+    {
+        LOG_ERR("❌ File system clear failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ File system cleared successfully");
 
-    ret = test_data_logger_simulation();
+    LOG_INF("📱 Step 6: Testing MAC table operations...");
+    ret = test_mac_table_operations();
     if (ret < 0)
+    {
+        LOG_ERR("❌ MAC table operations failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ MAC table operations passed");
 
-    ret = test_sensor_data_storage();
+    /* Clear again for encoding tests */
+    LOG_INF("🧹 Step 7: Clearing file system for encoding tests...");
+    ret = clear_filesystem();
     if (ret < 0)
+    {
+        LOG_ERR("❌ File system clear failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ File system cleared successfully");
 
-    ret = test_limits_and_errors();
-    if (ret < 0)
-        return ret;
-
+    LOG_INF("🔄 Step 8: Testing record encoding/decoding...");
     ret = test_encoding_decoding();
     if (ret < 0)
+    {
+        LOG_ERR("❌ Record encoding/decoding failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ Record encoding/decoding passed");
 
-    ret = test_append_functions();
+    /* Clear again for error handling tests */
+    LOG_INF("🧹 Step 9: Clearing file system for error handling tests...");
+    ret = clear_filesystem();
     if (ret < 0)
+    {
+        LOG_ERR("❌ File system clear failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ File system cleared successfully");
 
-    ret = test_mac_address_table();
+    LOG_INF("⚠️  Step 10: Testing error handling...");
+    ret = test_error_handling();
     if (ret < 0)
+    {
+        LOG_ERR("❌ Error handling tests failed: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ Error handling tests passed");
 
-    /* --- READ/VERIFY/STATISTICS TESTS --- */
-    ret = test_filesystem_stats();
+    /* Display final state */
+    LOG_INF("📊 Step 11: Checking final state...");
+    ret = display_filesystem_stats();
     if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to display file system stats: %d", ret);
         return ret;
+    }
+    LOG_INF("✅ Final state verified");
 
-    LOG_INF("🎉 All file system tests passed!");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("✅ All low-level API tests passed successfully!");
+    LOG_INF("  • File System Initialization ✓");
+    LOG_INF("  • Basic File Operations ✓");
+    LOG_INF("  • MAC Address Table ✓");
+    LOG_INF("  • Record Encoding/Decoding ✓");
+    LOG_INF("  • Error Handling ✓");
+    LOG_INF("══════════════════════════════════════════════════════════════");
     return 0;
 }

@@ -234,7 +234,7 @@ uint32_t juxta_vitals_get_date_yyyymmdd(struct juxta_vitals_ctx *ctx)
         if (days_since_epoch <= days_in_month[i])
         {
             month = i + 1;
-            day = days_since_epoch;
+            day = days_since_epoch + 1; /* Add 1 since days are 1-based */
             break;
         }
         days_since_epoch -= days_in_month[i];
