@@ -37,47 +37,105 @@ static void test_vitals_init(void)
 static void test_vitals_timestamp(void)
 {
     LOG_INF("🧪 Testing timestamp functions...");
+    LOG_INF("──────────────────────────────────────────────────────────────");
 
-    /* Set test timestamp */
+    /* Test 1: Set initial timestamp */
+    LOG_INF("Test 1: Setting initial timestamp");
+    LOG_INF("  → Setting to 2024-01-20 12:00:00 UTC...");
     int ret = juxta_vitals_set_timestamp(&test_vitals, test_timestamp);
     if (ret != 0)
     {
         LOG_ERR("❌ Failed to set timestamp: %d", ret);
         return;
     }
+    LOG_INF("  ✅ Initial timestamp set successfully");
 
-    /* Get timestamp back */
+    /* Test 2: Read back timestamp */
+    LOG_INF("Test 2: Reading back timestamp");
+    LOG_INF("  → Reading current RTC time...");
     uint32_t timestamp = juxta_vitals_get_timestamp(&test_vitals);
     if (timestamp == test_timestamp)
     {
-        LOG_INF("✅ Timestamp set/get successful: %u", timestamp);
+        LOG_INF("  ✅ Timestamp verified: %u", timestamp);
     }
     else
     {
-        LOG_ERR("❌ Timestamp mismatch: expected %u, got %u", test_timestamp, timestamp);
+        LOG_ERR("❌ Timestamp mismatch:");
+        LOG_ERR("   Expected: %u (2024-01-20 12:00:00 UTC)", test_timestamp);
+        LOG_ERR("   Got:      %u", timestamp);
+        return;
     }
 
-    /* Test date conversion */
+    /* Test 3: Date conversion */
+    LOG_INF("Test 3: Date/time conversions");
+    LOG_INF("  → Converting to YYYYMMDD format...");
     uint32_t date = juxta_vitals_get_date_yyyymmdd(&test_vitals);
     if (date == 20240120)
     {
-        LOG_INF("✅ Date conversion successful: %u", date);
+        LOG_INF("  ✅ Date conversion verified: %u", date);
     }
     else
     {
-        LOG_ERR("❌ Date conversion failed: expected 20240120, got %u", date);
+        LOG_ERR("❌ Date conversion failed:");
+        LOG_ERR("   Expected: 20240120");
+        LOG_ERR("   Got:      %u", date);
+        return;
     }
 
-    /* Test time conversion */
+    /* Test 4: Time conversion */
+    LOG_INF("  → Converting to HHMMSS format...");
     uint32_t time = juxta_vitals_get_time_hhmmss(&test_vitals);
     if (time == 120000)
     {
-        LOG_INF("✅ Time conversion successful: %06u", time);
+        LOG_INF("  ✅ Time conversion verified: %06u", time);
     }
     else
     {
-        LOG_ERR("❌ Time conversion failed: expected 120000, got %06u", time);
+        LOG_ERR("❌ Time conversion failed:");
+        LOG_ERR("   Expected: 120000");
+        LOG_ERR("   Got:      %06u", time);
+        return;
     }
+
+    /* Test 5: Set different timestamp */
+    LOG_INF("Test 5: Setting different timestamp");
+    LOG_INF("  → Setting to 2024-02-15 08:30:00 UTC...");
+    uint32_t new_timestamp = 1708070400; /* 2024-02-15 08:30:00 UTC */
+    ret = juxta_vitals_set_timestamp(&test_vitals, new_timestamp);
+    if (ret != 0)
+    {
+        LOG_ERR("❌ Failed to set new timestamp: %d", ret);
+        return;
+    }
+
+    /* Verify new timestamp */
+    timestamp = juxta_vitals_get_timestamp(&test_vitals);
+    if (timestamp == new_timestamp)
+    {
+        LOG_INF("  ✅ New timestamp verified: %u", timestamp);
+        date = juxta_vitals_get_date_yyyymmdd(&test_vitals);
+        time = juxta_vitals_get_time_hhmmss(&test_vitals);
+        LOG_INF("     Date: %u", date);
+        LOG_INF("     Time: %06u", time);
+    }
+    else
+    {
+        LOG_ERR("❌ New timestamp mismatch:");
+        LOG_ERR("   Expected: %u (2024-02-15 08:30:00 UTC)", new_timestamp);
+        LOG_ERR("   Got:      %u", timestamp);
+        return;
+    }
+
+    /* Reset to original timestamp for other tests */
+    ret = juxta_vitals_set_timestamp(&test_vitals, test_timestamp);
+    if (ret != 0)
+    {
+        LOG_ERR("❌ Failed to reset timestamp: %d", ret);
+        return;
+    }
+
+    LOG_INF("✅ All timestamp tests passed");
+    LOG_INF("──────────────────────────────────────────────────────────────");
 }
 
 static void test_vitals_battery(void)

@@ -4,28 +4,27 @@
  */
 
 / {
-	chosen {
-		/* No UART available on this board */
-		zephyr,console = &uart0; /* Will be ignored since no UART */
-	};
+    aliases {
+        rtc = &rtc0;
+    };
 
-	/* Use zephyr,user for direct VDD measurement */
-	zephyr,user {
-		io-channels = <&adc 0>;
-	};
+    /* Use zephyr,user for direct VDD measurement */
+    zephyr,user {
+        io-channels = <&adc 0>;
+    };
 };
 
 /* Configure GPIO */
 &gpio0 {
-	status = "okay";
+    status = "okay";
 };
 
 /* Configure SPI for FRAM */
 &spi0 {
-	status = "okay";
-	
-	/* FRAM device is already configured in board DTS */
-	/* Access via device tree alias: spi-fram */
+    status = "okay";
+    
+    /* FRAM device is already configured in board DTS */
+    /* Access via device tree alias: spi-fram */
 };
 
 /* Configure ADC for VDD measurement */
@@ -45,8 +44,13 @@
     };
 };
 
+/* Configure RTC for timestamp management */
+&rtc0 {
+    status = "okay";
+};
+
 /* Configure temperature sensor */
 &temp {
-	status = "okay";
-	label = "TEMP_0";
+    status = "okay";
+    label = "TEMP_0";
 }; 

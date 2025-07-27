@@ -1,3 +1,4 @@
+# Enable MPU and stack protection
 CONFIG_ARM_MPU=y
 CONFIG_HW_STACK_PROTECTION=y
 
@@ -11,6 +12,10 @@ CONFIG_SPI_NRFX=y
 # Enable ADC
 CONFIG_ADC=y
 CONFIG_ADC_NRFX_SAADC=y
+
+# Enable RTC
+CONFIG_RTC=y
+CONFIG_COUNTER=y
 
 # Enable FRAM support
 # EEPROM drivers not needed - using custom FRAM library

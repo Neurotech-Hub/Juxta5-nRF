@@ -23,6 +23,7 @@
 	aliases {
 		magnet-sensor = &magnet_sensor;
 		spi-fram = &fram0;
+		rtc = &rtc0;
 	};
 };
 
@@ -31,6 +32,10 @@
 };
 
 &gpiote {
+	status = "okay";
+};
+
+&rtc0 {
 	status = "okay";
 };
 
