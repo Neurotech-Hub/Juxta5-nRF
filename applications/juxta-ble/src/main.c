@@ -1,6 +1,6 @@
 /*
  * JUXTA BLE Application
- * BLE application with LED control characteristic and device scanning
+ * BLE application with LED control characteristic and device scanning using observer architecture
  *
  * Copyright (c) 2024 NeurotechHub
  * SPDX-License-Identifier: Apache-2.0
@@ -15,7 +15,6 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
-// Standard Zephyr BLE scanning API (no additional include needed)
 
 #include "ble_service.h"
 
@@ -48,15 +47,6 @@ static struct k_work state_work;
 /* Advertising and scanning parameters */
 #define ADVERTISING_DURATION_MS 5000 /* 5 seconds */
 #define SCANNING_DURATION_MS 10000   /* 10 seconds */
-#define SCAN_INTERVAL 0x0640         /* Scan interval of 1000ms (units of 0.625ms) */
-#define SCAN_WINDOW 0x0320           /* Scan window of 500ms (units of 0.625ms) */
-
-static const struct bt_le_scan_param scan_params = {
-    .type = BT_LE_SCAN_TYPE_PASSIVE,
-    .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
-    .interval = SCAN_INTERVAL,
-    .window = SCAN_WINDOW,
-};
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -164,7 +154,7 @@ static void print_discovered_devices(void)
 }
 
 /**
- * @brief BLE scan callback
+ * @brief Observer scan callback - using observer architecture
  */
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                     struct net_buf_simple *buf)
@@ -256,18 +246,24 @@ static void juxta_stop_advertising(void)
 }
 
 /**
- * @brief Start BLE scanning
+ * @brief Start BLE scanning using observer architecture
  */
 static int juxta_start_scanning(void)
 {
     int err;
+    struct bt_le_scan_param scan_param = {
+        .type = BT_LE_SCAN_TYPE_PASSIVE,
+        .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+        .interval = BT_GAP_SCAN_FAST_INTERVAL,
+        .window = BT_GAP_SCAN_FAST_WINDOW,
+    };
 
     LOG_INF("🔍 Starting BLE scanning...");
 
     /* Clear previous discoveries */
     clear_discovered_devices();
 
-    err = bt_le_scan_start(&scan_params, scan_cb);
+    err = bt_le_scan_start(&scan_param, scan_cb);
     if (err)
     {
         LOG_ERR("Failed to start scanning: %d", err);
@@ -448,12 +444,6 @@ static int init_bluetooth(void)
 
     LOG_INF("🔵 Bluetooth initialized");
 
-    /* Initialize scan callback */
-    static struct bt_le_scan_cb scan_callbacks = {
-        .recv = NULL /* We'll use the direct callback instead */
-    };
-    bt_le_scan_cb_register(&scan_callbacks);
-
     /* Initialize JUXTA BLE service */
     ret = juxta_ble_service_init();
     if (ret)
@@ -487,8 +477,8 @@ int main(void)
     int ret;
 
     LOG_INF("🚀 Starting JUXTA BLE Application");
-    LOG_INF("📋 Board: nRF52832 DK");
-    LOG_INF("📟 Device: nRF52832");
+    LOG_INF("📋 Board: Juxta5-1_AXY");
+    LOG_INF("📟 Device: nRF52805");
     LOG_INF("📱 Device will alternate between advertising and scanning");
     LOG_INF("📢 Advertising duration: %d seconds", ADVERTISING_DURATION_MS / 1000);
     LOG_INF("🔍 Scanning duration: %d seconds", SCANNING_DURATION_MS / 1000);
