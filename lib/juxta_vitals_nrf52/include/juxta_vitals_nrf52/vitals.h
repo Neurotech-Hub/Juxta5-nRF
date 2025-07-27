@@ -17,6 +17,26 @@ extern "C"
 {
 #endif
 
+/* ========================================================================
+ * Constants
+ * ======================================================================== */
+
+/* Voltage thresholds (millivolts) */
+#define JUXTA_VITALS_BATTERY_FULL_MV 3300     /* 3.3V - 100% */
+#define JUXTA_VITALS_BATTERY_LOW_MV 3000      /* 3.0V - 0% */
+#define JUXTA_VITALS_BATTERY_CRITICAL_MV 2700 /* 2.7V - critical */
+
+/* Temperature limits */
+#define JUXTA_VITALS_TEMP_MIN_C -40 /* Minimum temperature */
+#define JUXTA_VITALS_TEMP_MAX_C 85  /* Maximum temperature */
+
+/* Error codes */
+#define JUXTA_VITALS_OK 0
+#define JUXTA_VITALS_ERROR_INIT -1
+#define JUXTA_VITALS_ERROR_NOT_READY -2
+#define JUXTA_VITALS_ERROR_INVALID_PARAM -3
+#define JUXTA_VITALS_ERROR_HARDWARE -4
+
     /* ========================================================================
      * Vitals Context Structure
      * ======================================================================== */
@@ -50,12 +70,13 @@ extern "C"
      * ======================================================================== */
 
     /**
-     * @brief Initialize vitals monitoring
+     * Initialize the vitals context
      *
-     * @param ctx Vitals context to initialize
+     * @param ctx Context to initialize
+     * @param enable_battery_monitoring Whether to enable battery monitoring
      * @return 0 on success, negative error code on failure
      */
-    int juxta_vitals_init(struct juxta_vitals_ctx *ctx);
+    int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitoring);
 
     /**
      * @brief Update all vitals readings
@@ -185,26 +206,6 @@ extern "C"
      * @return 0 on success, negative error code on failure
      */
     int juxta_vitals_set_temperature_monitoring(struct juxta_vitals_ctx *ctx, bool enable);
-
-/* ========================================================================
- * Constants
- * ======================================================================== */
-
-/* Battery voltage thresholds (millivolts) */
-#define JUXTA_VITALS_BATTERY_FULL_MV 4200     /* 4.2V - 100% */
-#define JUXTA_VITALS_BATTERY_LOW_MV 3200      /* 3.2V - 0% */
-#define JUXTA_VITALS_BATTERY_CRITICAL_MV 3000 /* 3.0V - critical */
-
-/* Temperature limits */
-#define JUXTA_VITALS_TEMP_MIN_C -40 /* Minimum temperature */
-#define JUXTA_VITALS_TEMP_MAX_C 85  /* Maximum temperature */
-
-/* Error codes */
-#define JUXTA_VITALS_OK 0
-#define JUXTA_VITALS_ERROR_INIT -1
-#define JUXTA_VITALS_ERROR_NOT_READY -2
-#define JUXTA_VITALS_ERROR_INVALID_PARAM -3
-#define JUXTA_VITALS_ERROR_HARDWARE -4
 
 #ifdef __cplusplus
 }

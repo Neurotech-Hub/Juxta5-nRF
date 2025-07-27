@@ -8,19 +8,13 @@
 
 config JUXTA_VITALS_NRF52
 	bool "JUXTA Vitals Library for nRF52"
+	depends on ADC
 	help
-	  Enable the JUXTA Vitals library for nRF52 devices.
-	  
-	  This library provides:
-	  - RTC timestamp management
-	  - Battery voltage monitoring
-	  - Basic system health monitoring
+	  Enable JUXTA Vitals Library for nRF52.
+	  This library provides battery voltage, temperature,
+	  and system vitals monitoring.
 
 if JUXTA_VITALS_NRF52
-
-module = JUXTA_VITALS_NRF52
-module-str = juxta_vitals_nrf52
-source "subsys/logging/Kconfig.template.log_config"
 
 config JUXTA_VITALS_NRF52_BATTERY_UPDATE_INTERVAL
 	int "Battery update interval (seconds)"
@@ -29,10 +23,26 @@ config JUXTA_VITALS_NRF52_BATTERY_UPDATE_INTERVAL
 	help
 	  How often to update battery voltage reading.
 
-config JUXTA_VITALS_NRF52_ENABLE_TEMPERATURE
-	bool "Enable temperature monitoring"
+config JUXTA_VITALS_NRF52_VOLTAGE_DIVIDER
+	bool "Enable voltage divider scaling"
 	default y
 	help
-	  Enable internal temperature sensor monitoring.
+	  Enable voltage divider scaling for battery voltage.
+	  This should be enabled when using a voltage divider
+	  to measure battery voltage.
+
+config JUXTA_VITALS_NRF52_VOLTAGE_DIVIDER_RATIO
+	int "Voltage divider ratio (x1000)"
+	default 9333  # (1.5M + 180k) / 180k = 9.333
+	depends on JUXTA_VITALS_NRF52_VOLTAGE_DIVIDER
+	help
+	  Voltage divider ratio multiplied by 1000.
+	  For example, if using 1.5M + 180k voltage divider:
+	  ratio = (1.5M + 180k) / 180k = 9.333
+	  value = 9333
+
+module = JUXTA_VITALS_NRF52
+module-str = juxta_vitals_nrf52
+source "subsys/logging/Kconfig.template.log_config"
 
 endif # JUXTA_VITALS_NRF52 

@@ -8,6 +8,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/util.h>
 #include <math.h>
 #include <string.h>
@@ -20,64 +21,85 @@ LOG_MODULE_REGISTER(juxta_vitals_nrf52, CONFIG_JUXTA_VITALS_NRF52_LOG_LEVEL);
 static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx);
 static int juxta_vitals_read_temperature(struct juxta_vitals_ctx *ctx);
 
-/* ADC device for battery voltage reading */
-static const struct device *adc_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_adc_controller));
-
-/* ADC channel configuration for VDD reading */
-static const struct adc_channel_cfg adc_cfg = {
-    .gain = ADC_GAIN_1_4,
-    .reference = ADC_REF_INTERNAL,
-    .acquisition_time = ADC_ACQ_TIME_DEFAULT,
-    .channel_id = 0, /* VDD/4 channel */
-    .differential = 0,
-#ifdef SAADC_CH_PSELP_PSELP_VDD
-    .input_positive = SAADC_CH_PSELP_PSELP_VDD,
-#else
-    .input_positive = 7, /* VDD/4 input on nRF52 */
-#endif
+/* ADC configuration */
+static const struct device *adc_dev;
+static struct adc_channel_cfg adc_cfg;
+static struct adc_sequence adc_seq = {
+    .buffer = NULL,
+    .buffer_size = 0,
 };
+
+/* Temperature sensor device */
+static const struct device *temp_dev;
+
+/* ADC buffer */
+static int16_t adc_sample_buffer;
 
 /* ========================================================================
  * Core Functions
  * ======================================================================== */
 
-int juxta_vitals_init(struct juxta_vitals_ctx *ctx)
+int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitoring)
 {
     if (!ctx)
     {
-        return JUXTA_VITALS_ERROR_INVALID_PARAM;
+        return -EINVAL;
     }
 
     /* Initialize context */
-    memset(ctx, 0, sizeof(struct juxta_vitals_ctx));
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->initialized = true;
+    ctx->battery_monitoring = enable_battery_monitoring;
+    ctx->temperature_monitoring = true; // Always enable temperature monitoring
 
-    /* Set default monitoring states */
-    ctx->battery_monitoring = true;
-    ctx->temperature_monitoring = IS_ENABLED(CONFIG_JUXTA_VITALS_NRF52_ENABLE_TEMPERATURE);
+    /* Initialize temperature sensor */
+    temp_dev = DEVICE_DT_GET(DT_NODELABEL(temp));
+    if (!device_is_ready(temp_dev))
+    {
+        LOG_ERR("Temperature sensor not ready");
+        ctx->temperature_monitoring = false;
+        return JUXTA_VITALS_ERROR_HARDWARE;
+    }
+    LOG_INF("Temperature monitoring enabled");
 
     /* Initialize ADC for battery monitoring */
     if (ctx->battery_monitoring)
     {
+        adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc));
         if (!device_is_ready(adc_dev))
         {
-            LOG_WRN("ADC device not ready, battery monitoring disabled");
+            LOG_ERR("ADC device not ready");
             ctx->battery_monitoring = false;
+            return JUXTA_VITALS_ERROR_HARDWARE;
         }
-        else
+
+        /* Configure ADC channel for VDD measurement */
+        adc_cfg = (struct adc_channel_cfg){
+            .gain = ADC_GAIN_1_6,
+            .reference = ADC_REF_INTERNAL,
+            .acquisition_time = ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40),
+            .channel_id = 0,
+            .input_positive = SAADC_CH_PSELP_PSELP_VDD};
+
+        int ret = adc_channel_setup(adc_dev, &adc_cfg);
+        if (ret != 0)
         {
-            int ret = adc_channel_setup(adc_dev, &adc_cfg);
-            if (ret < 0)
-            {
-                LOG_WRN("Failed to setup ADC channel: %d, battery monitoring disabled", ret);
-                ctx->battery_monitoring = false;
-            }
+            LOG_ERR("Failed to setup ADC channel: %d", ret);
+            ctx->battery_monitoring = false;
+            return JUXTA_VITALS_ERROR_HARDWARE;
         }
+
+        /* Configure ADC sequence */
+        adc_seq.channels = BIT(0);
+        adc_seq.buffer = &adc_sample_buffer;
+        adc_seq.buffer_size = sizeof(adc_sample_buffer);
+        adc_seq.resolution = 14;
+        adc_seq.oversampling = 8;
+        adc_seq.calibrate = true;
+
+        LOG_INF("Battery monitoring enabled");
     }
 
-    ctx->initialized = true;
-    ctx->last_update_time = k_uptime_get_32();
-
-    LOG_INF("Vitals monitoring initialized");
     return JUXTA_VITALS_OK;
 }
 
@@ -244,41 +266,35 @@ uint32_t juxta_vitals_get_time_hhmmss(struct juxta_vitals_ctx *ctx)
 
 static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx)
 {
-    if (!ctx || !ctx->battery_monitoring)
+    if (!ctx || !ctx->battery_monitoring || !adc_dev)
     {
-        /* Return a reasonable default if battery monitoring is disabled */
-        ctx->battery_mv = 3800;    /* 3.8V default */
-        ctx->battery_percent = 75; /* 75% default */
-        ctx->low_battery = false;
-        return JUXTA_VITALS_OK;
+        LOG_WRN("Battery monitoring not ready");
+        return JUXTA_VITALS_ERROR_NOT_READY;
     }
 
-    int16_t adc_value;
-    struct adc_sequence sequence = {
-        .buffer = &adc_value,
-        .buffer_size = sizeof(adc_value),
-        .resolution = 12,
-        .oversampling = 4,
-    };
-
-    int ret = adc_read(adc_dev, &sequence);
-    if (ret < 0)
+    /* Read VDD using ADC */
+    int ret = adc_read(adc_dev, &adc_seq);
+    if (ret != 0)
     {
-        LOG_WRN("Failed to read ADC: %d, using default values", ret);
-        ctx->battery_mv = 3800;    /* 3.8V default */
-        ctx->battery_percent = 75; /* 75% default */
-        ctx->low_battery = false;
-        return JUXTA_VITALS_OK;
+        LOG_ERR("ADC read failed");
+        return ret;
     }
 
-    /* Convert ADC value to voltage (VDD/4) */
-    /* ADC reference is 0.6V, gain is 1/4, so full scale is 2.4V */
-    uint32_t voltage_mv = (adc_value * 2400) / 4096;
+    /* Convert to millivolts */
+    int32_t vdd_mv = adc_sample_buffer;
+    ret = adc_raw_to_millivolts(adc_ref_internal(adc_dev),
+                                ADC_GAIN_1_6,
+                                adc_seq.resolution,
+                                &vdd_mv);
+    if (ret != 0)
+    {
+        LOG_ERR("ADC conversion failed");
+        return ret;
+    }
 
-    /* Convert to actual VDD (multiply by 4) */
-    ctx->battery_mv = voltage_mv * 4;
+    ctx->battery_mv = vdd_mv;
 
-    /* Calculate battery percentage */
+    /* Calculate battery percentage based on VDD range */
     if (ctx->battery_mv >= JUXTA_VITALS_BATTERY_FULL_MV)
     {
         ctx->battery_percent = 100;
@@ -294,10 +310,9 @@ static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx)
         ctx->battery_percent = (current * 100) / range;
     }
 
-    /* Check for low battery */
+    /* Set low battery flag */
     ctx->low_battery = (ctx->battery_mv <= JUXTA_VITALS_BATTERY_CRITICAL_MV);
 
-    LOG_DBG("Battery: %dmV (%d%%)", ctx->battery_mv, ctx->battery_percent);
     return JUXTA_VITALS_OK;
 }
 
@@ -343,19 +358,32 @@ uint32_t juxta_vitals_get_uptime(struct juxta_vitals_ctx *ctx)
 
 static int juxta_vitals_read_temperature(struct juxta_vitals_ctx *ctx)
 {
-    if (!ctx || !ctx->temperature_monitoring)
+    if (!ctx || !ctx->temperature_monitoring || !temp_dev)
     {
+        LOG_WRN("Temperature monitoring not properly initialized");
         return JUXTA_VITALS_ERROR_NOT_READY;
     }
 
     /* Read internal temperature sensor */
-    /* This is a simplified implementation - actual temperature reading
-       would depend on the specific nRF52 variant and available sensors */
+    struct sensor_value temp;
+    int ret = sensor_sample_fetch(temp_dev);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to fetch temperature: %d", ret);
+        return ret;
+    }
 
-    /* For now, return a reasonable default temperature */
-    ctx->temperature = 25; /* 25°C default */
+    ret = sensor_channel_get(temp_dev, SENSOR_CHAN_DIE_TEMP, &temp);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to get temperature: %d", ret);
+        return ret;
+    }
 
-    LOG_DBG("Temperature: %d°C", ctx->temperature);
+    /* Convert to integer Celsius */
+    ctx->temperature = temp.val1;
+    LOG_DBG("Temperature read: %d°C", ctx->temperature);
+
     return JUXTA_VITALS_OK;
 }
 

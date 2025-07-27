@@ -22,15 +22,16 @@ static void test_vitals_init(void)
 {
     LOG_INF("🧪 Testing vitals initialization...");
 
-    int ret = juxta_vitals_init(&test_vitals);
-    if (ret == 0)
+    /* Initialize vitals monitoring */
+    LOG_INF("Initializing vitals monitoring...");
+    int ret = juxta_vitals_init(&test_vitals, true);
+    if (ret < 0)
     {
-        LOG_INF("✅ Vitals initialization successful");
+        LOG_ERR("Failed to initialize vitals: %d", ret);
+        return; /* Remove the ret value since this is a void function */
     }
-    else
-    {
-        LOG_ERR("❌ Vitals initialization failed: %d", ret);
-    }
+
+    LOG_INF("✅ Vitals initialization successful");
 }
 
 static void test_vitals_timestamp(void)

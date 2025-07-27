@@ -34,7 +34,11 @@ CONFIG_JUXTA_VITALS_NRF52_BATTERY_UPDATE_INTERVAL=60
 
 /* Initialize vitals monitoring */
 struct juxta_vitals_ctx vitals;
-juxta_vitals_init(&vitals);
+int ret = juxta_vitals_init(&vitals, true);
+if (ret < 0) {
+    printk("Failed to initialize vitals: %d\n", ret);
+    return ret;
+}
 
 /* Set current timestamp (from your RTC source) */
 juxta_vitals_set_timestamp(&vitals, 1704067200); // 2024-01-01 00:00:00
@@ -53,10 +57,18 @@ uint32_t uptime = juxta_vitals_get_uptime(&vitals);
 ### **Core Functions**
 
 #### `juxta_vitals_init()`
-Initialize vitals monitoring context.
+Initialize vitals monitoring with optional battery monitoring.
 ```c
-int juxta_vitals_init(struct juxta_vitals_ctx *ctx);
+int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitoring);
 ```
+
+Parameters:
+- `ctx`: Vitals context to initialize
+- `enable_battery_monitoring`: Whether to enable battery monitoring
+
+Returns:
+- 0 on success
+- Negative error code on failure
 
 #### `juxta_vitals_update()`
 Update all vitals readings (call periodically).

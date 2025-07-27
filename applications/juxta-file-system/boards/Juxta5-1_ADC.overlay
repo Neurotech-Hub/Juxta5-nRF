@@ -7,8 +7,11 @@
 	chosen {
 		/* No UART available on this board */
 		zephyr,console = &uart0; /* Will be ignored since no UART */
-		/* ADC controller for battery monitoring */
-		zephyr,adc-controller = &adc;
+	};
+
+	/* Use zephyr,user for direct VDD measurement */
+	zephyr,user {
+		io-channels = <&adc 0>;
 	};
 };
 
@@ -25,7 +28,24 @@
 	/* Access via device tree alias: spi-fram */
 };
 
-/* Configure ADC for battery monitoring */
+/* Configure ADC for VDD measurement */
 &adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
 	status = "okay";
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+		zephyr,resolution = <14>;
+		zephyr,oversampling = <8>;
+	};
+};
+
+/* Configure temperature sensor */
+&temp {
+	status = "okay";
+	label = "TEMP_0";
 }; 

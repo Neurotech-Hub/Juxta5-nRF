@@ -1239,11 +1239,18 @@ int juxta_framfs_ensure_current_file(struct juxta_framfs_ctx *ctx)
     /* Get current date from RTC */
     uint32_t current_date = ctx->get_rtc_time();
 
-    /* Check if we need to switch files */
-    if (current_date != ctx->current_file_date)
+    /* Check if we need to create or switch files */
+    if (current_date != ctx->current_file_date || ctx->fs_ctx->active_file_index < 0)
     {
-        LOG_INF("Date changed from %08X to %08X, switching files",
-                ctx->current_file_date, current_date);
+        if (current_date != ctx->current_file_date)
+        {
+            LOG_INF("Date changed from %08X to %08X, switching files",
+                    ctx->current_file_date, current_date);
+        }
+        else
+        {
+            LOG_INF("No active file, creating new file");
+        }
 
         /* Seal current file if it exists and is active */
         if (ctx->fs_ctx->active_file_index >= 0)

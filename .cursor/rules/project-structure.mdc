@@ -1,0 +1,28 @@
+# Project Structure
+
+The project is organized into distinct sections:
+
+1. Applications (`/applications/`):
+   - Contains main application code
+   - Each subfolder is a separate application
+   - Reference these explicitly when working
+
+2. Custom Boards (`/boards/`):
+   - Contains custom board definitions
+   - Located under NeurotechHub vendor
+
+3. Libraries (`/lib/`):
+   - `juxta_fram`: Hardware layer for MB85RS1M FRAM chip
+   - `juxta_framfs`: File system layer for FRAM
+   - `juxta_vitals_nrf52`: Core utilities for voltage/RTC
+   - `lisd2h12`: Accelerometer driver
+
+4. Samples (`/samples/`):
+   - Reference implementations
+   - Must be consulted before implementing new features
+   - Contains examples for BLE, sensors, and basic functionality
+   - Always cite the example you are using (if the example is relevant)
+description:
+globs:
+alwaysApply: true
+---
