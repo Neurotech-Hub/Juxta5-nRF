@@ -35,8 +35,11 @@ The library provides specialized functions for easy integration with file system
 ### Date and Time Functions
 
 ```c
-/* Get date for file naming (YYYYMMDD format) */
+/* Get date for file naming (YYMMDD format) */
 uint32_t file_date = juxta_vitals_get_file_date(&vitals);
+
+/* Get date in legacy YYYYMMDD format if needed */
+uint32_t full_date = juxta_vitals_get_date_yyyymmdd(&vitals);
 
 /* Get minute of day for time-series records (0-1439) */
 uint16_t minute = juxta_vitals_get_minute_of_day(&vitals);
@@ -103,7 +106,8 @@ if (juxta_vitals_get_validated_battery_level(&vitals, &battery_level) == 0) {
 - `juxta_vitals_get_timestamp()` - Get current Unix timestamp
 - `juxta_vitals_get_date_yyyymmdd()` - Get date in YYYYMMDD format
 - `juxta_vitals_get_time_hhmmss()` - Get time in HHMMSS format
-- `juxta_vitals_get_file_date()` - Get date for file system operations
+- `juxta_vitals_get_file_date()` - Get date in YYMMDD format for file system operations
+- `juxta_vitals_get_file_date_yymmdd()` - Get date in YYMMDD format (explicit)
 - `juxta_vitals_get_minute_of_day()` - Get minute of day (0-1439)
 
 ### System Functions

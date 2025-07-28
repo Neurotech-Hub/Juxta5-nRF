@@ -19,6 +19,18 @@
 
 LOG_MODULE_REGISTER(vitals_test, CONFIG_LOG_DEFAULT_LEVEL);
 
+/* Global test state */
+static bool vitals_test_failed = false;
+
+/* Test function prototypes */
+static void test_vitals_init(void);
+static void test_vitals_timestamp(void);
+static void test_vitals_battery(void);
+static void test_vitals_system(void);
+static void test_vitals_summary(void);
+static void test_vitals_config(void);
+static void test_vitals_integration(void);
+
 /* Device tree definitions for FRAM */
 #define FRAM_NODE DT_ALIAS(spi_fram)
 static const struct gpio_dt_spec cs_gpio = GPIO_DT_SPEC_GET_BY_IDX(DT_PARENT(FRAM_NODE), cs_gpios, 0);
@@ -36,18 +48,19 @@ static const uint32_t test_timestamp = 1705752000;
 
 static void test_vitals_init(void)
 {
-    LOG_INF("🧪 Testing vitals initialization...");
+    LOG_INF("🔧 Testing vitals initialization...");
+    LOG_INF("══════════════════════════════════════════════════════════════");
 
-    /* Initialize vitals monitoring */
-    LOG_INF("Initializing vitals monitoring...");
     int ret = juxta_vitals_init(&test_vitals, true);
-    if (ret < 0)
+    if (ret != 0)
     {
-        LOG_ERR("Failed to initialize vitals: %d", ret);
-        return; /* Remove the ret value since this is a void function */
+        LOG_ERR("❌ Failed to initialize vitals: %d", ret);
+        vitals_test_failed = true;
+        return;
     }
 
-    LOG_INF("✅ Vitals initialization successful");
+    LOG_INF("✅ Vitals library initialized successfully");
+    LOG_INF("══════════════════════════════════════════════════════════════");
 }
 
 static void test_vitals_timestamp(void)
@@ -62,6 +75,7 @@ static void test_vitals_timestamp(void)
     if (ret != 0)
     {
         LOG_ERR("❌ Failed to set timestamp: %d", ret);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ Initial timestamp set successfully");
@@ -70,15 +84,12 @@ static void test_vitals_timestamp(void)
     LOG_INF("Test 2: Reading back timestamp");
     LOG_INF("  → Reading current RTC time...");
     uint32_t timestamp = juxta_vitals_get_timestamp(&test_vitals);
-    if (timestamp == test_timestamp)
+    if (timestamp != test_timestamp)
     {
-        LOG_INF("  ✅ Timestamp verified: %u", timestamp);
-    }
-    else
-    {
-        LOG_ERR("❌ Timestamp mismatch:");
+        LOG_ERR("❌ Timestamp verification failed:");
         LOG_ERR("   Expected: %u (2024-01-20 12:00:00 UTC)", test_timestamp);
         LOG_ERR("   Got:      %u", timestamp);
+        vitals_test_failed = true;
         return;
     }
 
@@ -95,6 +106,7 @@ static void test_vitals_timestamp(void)
         LOG_ERR("❌ Date conversion failed:");
         LOG_ERR("   Expected: 20240120");
         LOG_ERR("   Got:      %u", date);
+        vitals_test_failed = true;
         return;
     }
 
@@ -110,6 +122,23 @@ static void test_vitals_timestamp(void)
         LOG_ERR("❌ Time conversion failed:");
         LOG_ERR("   Expected: 120000");
         LOG_ERR("   Got:      %06u", time);
+        vitals_test_failed = true;
+        return;
+    }
+
+    /* Test 4.5: File date in YYMMDD format */
+    LOG_INF("  → Testing YYMMDD file date format...");
+    uint32_t file_date = juxta_vitals_get_file_date(&test_vitals);
+    if (file_date == 240120)
+    {
+        LOG_INF("  ✅ File date (YYMMDD): %u", file_date);
+    }
+    else
+    {
+        LOG_ERR("❌ File date conversion failed:");
+        LOG_ERR("   Expected: 240120");
+        LOG_ERR("   Got:      %u", file_date);
+        vitals_test_failed = true;
         return;
     }
 
@@ -139,6 +168,7 @@ static void test_vitals_timestamp(void)
         LOG_ERR("❌ New timestamp mismatch:");
         LOG_ERR("   Expected: %u (2024-02-15 08:30:00 UTC)", new_timestamp);
         LOG_ERR("   Got:      %u", timestamp);
+        vitals_test_failed = true;
         return;
     }
 
@@ -147,6 +177,7 @@ static void test_vitals_timestamp(void)
     if (ret != 0)
     {
         LOG_ERR("❌ Failed to reset timestamp: %d", ret);
+        vitals_test_failed = true;
         return;
     }
 
@@ -164,6 +195,7 @@ static void test_vitals_battery(void)
     if (ret != 0)
     {
         LOG_ERR("❌ Failed to update vitals: %d", ret);
+        vitals_test_failed = true;
         return;
     }
 
@@ -179,6 +211,24 @@ static void test_vitals_battery(void)
     LOG_INF("");
 
     LOG_INF("Current battery status:");
+    LOG_INF("  Voltage:  %d mV", battery_mv);
+    LOG_INF("  Level:    %d%%", battery_percent);
+    LOG_INF("  State:    %s", low_battery ? "CRITICAL" : (battery_percent < 20 ? "LOW" : "NORMAL"));
+
+    /* Force a battery update to get fresh readings */
+    LOG_INF("Forcing battery update...");
+    int update_ret = juxta_vitals_update(&test_vitals);
+    if (update_ret < 0)
+    {
+        LOG_WRN("Battery update failed: %d", update_ret);
+    }
+
+    /* Get updated readings */
+    battery_mv = juxta_vitals_get_battery_mv(&test_vitals);
+    battery_percent = juxta_vitals_get_battery_percent(&test_vitals);
+    low_battery = juxta_vitals_is_low_battery(&test_vitals);
+
+    LOG_INF("Updated battery status:");
     LOG_INF("  Voltage:  %d mV", battery_mv);
     LOG_INF("  Level:    %d%%", battery_percent);
     LOG_INF("  State:    %s", low_battery ? "CRITICAL" : (battery_percent < 20 ? "LOW" : "NORMAL"));
@@ -322,8 +372,8 @@ static void test_vitals_config(void)
  */
 static uint32_t get_integration_rtc_date(void)
 {
-    /* Use vitals library function for file system integration */
-    return juxta_vitals_get_file_date(&test_vitals);
+    /* Return YYMMDD format for 2024-01-20 */
+    return 240120; /* 24 = year, 01 = month, 20 = day */
 }
 
 /**
@@ -344,6 +394,7 @@ static void test_vitals_integration(void)
     if (!device_is_ready(spi_dev))
     {
         LOG_ERR("❌ SPI device not ready");
+        vitals_test_failed = true;
         return;
     }
 
@@ -351,6 +402,7 @@ static void test_vitals_integration(void)
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to initialize FRAM: %d", ret);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ FRAM initialized");
@@ -359,6 +411,7 @@ static void test_vitals_integration(void)
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to initialize file system: %d", ret);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ File system initialized");
@@ -370,6 +423,7 @@ static void test_vitals_integration(void)
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to initialize time-aware context: %d", ret);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ Time-aware context initialized");
@@ -377,14 +431,30 @@ static void test_vitals_integration(void)
     /* Step 3: Get validated battery level using vitals library */
     LOG_INF("Step 3: Reading validated battery level...");
 
+    /* Force a battery update to ensure fresh readings */
+    LOG_INF("  🔄 Forcing battery update...");
+    ret = juxta_vitals_update(&test_vitals);
+    if (ret < 0)
+    {
+        LOG_WRN("  ⚠️  Battery update failed: %d", ret);
+    }
+
     uint8_t battery_level;
     ret = juxta_vitals_get_validated_battery_level(&test_vitals, &battery_level);
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to get validated battery level: %d", ret);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ Battery level: %d%%", battery_level);
+
+    /* Add detailed battery debugging */
+    uint16_t battery_mv = juxta_vitals_get_battery_mv(&test_vitals);
+    LOG_INF("  📊 Battery details:");
+    LOG_INF("     - Voltage: %d mV", battery_mv);
+    LOG_INF("     - Level: %d%%", battery_level);
+    LOG_INF("     - Low battery: %s", juxta_vitals_is_low_battery(&test_vitals) ? "YES" : "NO");
 
     /* Step 4: Get current minute using vitals library */
     LOG_INF("Step 4: Getting current minute...");
@@ -408,6 +478,7 @@ static void test_vitals_integration(void)
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to write battery record: %d", ret);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ Battery record written to file");
@@ -420,26 +491,61 @@ static void test_vitals_integration(void)
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to get current filename: %d", ret);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ File created: %s", current_file);
+
+    /* Verify the filename is in YYMMDD format */
+    if (strcmp(current_file, "240120") != 0)
+    {
+        LOG_ERR("❌ Expected filename '240120', got '%s'", current_file);
+        vitals_test_failed = true;
+        return;
+    }
+    LOG_INF("  ✅ Filename format verified (YYMMDD)");
 
     /* Get file size */
     int file_size = juxta_framfs_get_file_size(&fs_ctx, current_file);
     if (file_size < 0)
     {
         LOG_ERR("❌ Failed to get file size: %d", file_size);
+        vitals_test_failed = true;
         return;
     }
     LOG_INF("  ✅ File size: %d bytes", file_size);
 
     /* Read and verify the battery record */
     uint8_t read_buffer[256];
-    ret = juxta_framfs_read(&fs_ctx, current_file, 0, read_buffer, file_size);
+
+    /* Read from the end of the file where the new record should be */
+    int read_offset = file_size - 4; /* Battery record is 4 bytes */
+    if (read_offset < 0)
+    {
+        LOG_ERR("❌ File too small for battery record");
+        vitals_test_failed = true;
+        return;
+    }
+
+    LOG_INF("  📍 Reading from offset %d (file size: %d)", read_offset, file_size);
+
+    ret = juxta_framfs_read(&fs_ctx, current_file, read_offset, read_buffer, 4);
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to read file: %d", ret);
+        vitals_test_failed = true;
         return;
+    }
+
+    /* Debug: Show raw bytes */
+    LOG_INF("  🔍 Raw file bytes (%d bytes):", file_size);
+    for (int i = 0; i < file_size && i < 32; i++)
+    {
+        LOG_INF("    [%02d]: 0x%02X", i, read_buffer[i]);
+    }
+    if (file_size > 32)
+    {
+        LOG_INF("    ... (showing first 32 bytes)");
     }
 
     /* Decode the battery record */
@@ -448,8 +554,16 @@ static void test_vitals_integration(void)
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to decode battery record: %d", ret);
+        vitals_test_failed = true;
         return;
     }
+
+    /* Add debugging for battery record details */
+    LOG_INF("  📊 Battery record details:");
+    LOG_INF("     - Minute: %d", battery_record.minute);
+    LOG_INF("     - Level: %d%%", battery_record.level);
+    LOG_INF("     - Type: 0x%02X", battery_record.type);
+    LOG_INF("     - Expected level: %d%%", battery_level);
 
     /* Verify the data */
     if (battery_record.level != battery_level)
@@ -457,6 +571,7 @@ static void test_vitals_integration(void)
         LOG_ERR("❌ Battery level mismatch:");
         LOG_ERR("   Expected: %d%%", battery_level);
         LOG_ERR("   Got:      %d%%", battery_record.level);
+        vitals_test_failed = true;
         return;
     }
 
@@ -465,6 +580,7 @@ static void test_vitals_integration(void)
         LOG_ERR("❌ Minute mismatch:");
         LOG_ERR("   Expected: %d", current_minute);
         LOG_ERR("   Got:      %d", battery_record.minute);
+        vitals_test_failed = true;
         return;
     }
 
@@ -500,6 +616,9 @@ int vitals_test_main(void)
     LOG_INF("🚀 Starting JUXTA Vitals Library Test");
     LOG_INF("=====================================");
 
+    /* Reset test state */
+    vitals_test_failed = false;
+
     /* Run all tests */
     test_vitals_init();
     k_sleep(K_MSEC(100));
@@ -523,8 +642,17 @@ int vitals_test_main(void)
     test_vitals_integration();
     k_sleep(K_MSEC(100));
 
-    LOG_INF("✅ All vitals tests completed successfully!");
-    LOG_INF("=====================================");
-
-    return 0;
+    /* Report final results */
+    if (vitals_test_failed)
+    {
+        LOG_ERR("❌ Vitals library test FAILED!");
+        LOG_ERR("=====================================");
+        return -1;
+    }
+    else
+    {
+        LOG_INF("✅ All vitals tests completed successfully!");
+        LOG_INF("=====================================");
+        return 0;
+    }
 }

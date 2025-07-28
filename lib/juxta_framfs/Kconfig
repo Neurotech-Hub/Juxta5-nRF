@@ -17,10 +17,11 @@ config JUXTA_FRAMFS_LOG_LEVEL
 
 config JUXTA_FRAMFS_FILENAME_LEN
 	int "Maximum filename length"
-	default 12
-	range 8 16
+	default 8
+	range 6 12
 	help
 	  Maximum length of filenames including null terminator.
+	  Default 8 supports YYMMDD format (6 chars + null).
 	  Must be a multiple of 4 for alignment.
 
 endif # JUXTA_FRAMFS 

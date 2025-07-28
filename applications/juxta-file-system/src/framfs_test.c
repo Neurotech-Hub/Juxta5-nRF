@@ -214,16 +214,17 @@ static int test_basic_file_operations(void)
     LOG_INF("📝 Testing basic file operations...");
     LOG_INF("══════════════════════════════════════════════════════════════");
 
-    /* Test 1: Create and write to file */
-    LOG_INF("Test 1: Create and write basic data");
-    LOG_INF("  → Creating test file...");
-    ret = juxta_framfs_create_active(&fs_ctx, "test1", JUXTA_FRAMFS_TYPE_RAW_DATA);
+    /* Test 1: Create and write to a file */
+    LOG_INF("Test 1: Create and write to file");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_create_active(&fs_ctx, "240120", JUXTA_FRAMFS_TYPE_SENSOR_LOG);
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to create file: %d", ret);
         return ret;
     }
-    LOG_INF("  ✅ File created successfully");
+    LOG_INF("  ✅ File '240120' created successfully");
 
     LOG_INF("  → Writing test data...");
     ret = juxta_framfs_append(&fs_ctx, test_data, sizeof(test_data));
@@ -234,15 +235,17 @@ static int test_basic_file_operations(void)
     }
     LOG_INF("  ✅ Data written successfully (%d bytes)", sizeof(test_data));
 
-    /* Test 2: Read and verify data */
-    LOG_INF("Test 2: Read and verify data");
-    LOG_INF("  → Reading test data...");
-    ret = juxta_framfs_read(&fs_ctx, "test1", 0, read_buffer, sizeof(test_data));
+    /* Test 2: Read from the file */
+    LOG_INF("Test 2: Read from file");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_read(&fs_ctx, "240120", 0, read_buffer, sizeof(test_data));
     if (ret < 0)
     {
-        LOG_ERR("❌ Failed to read data: %d", ret);
+        LOG_ERR("❌ Failed to read file: %d", ret);
         return ret;
     }
+    LOG_INF("  ✅ File '240120' read successfully (%d bytes)", ret);
 
     if (memcmp(test_data, read_buffer, sizeof(test_data)) != 0)
     {
@@ -267,7 +270,7 @@ static int test_basic_file_operations(void)
 
     /* Read back all data */
     LOG_INF("  → Reading combined data...");
-    ret = juxta_framfs_read(&fs_ctx, "test1", 0, read_buffer, sizeof(test_data) + sizeof(more_data));
+    ret = juxta_framfs_read(&fs_ctx, "240120", 0, read_buffer, sizeof(test_data) + sizeof(more_data));
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to read combined data: %d", ret);
@@ -296,7 +299,7 @@ static int test_basic_file_operations(void)
     /* Test 4: Partial reads */
     LOG_INF("Test 4: Partial reads");
     LOG_INF("  → Reading partial data...");
-    ret = juxta_framfs_read(&fs_ctx, "test1", 2, read_buffer, 3);
+    ret = juxta_framfs_read(&fs_ctx, "240120", 2, read_buffer, 3);
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to perform partial read: %d", ret);
@@ -324,7 +327,7 @@ static int test_basic_file_operations(void)
     }
 
     /* Create new file for large data */
-    ret = juxta_framfs_create_active(&fs_ctx, "large_file", JUXTA_FRAMFS_TYPE_RAW_DATA);
+    ret = juxta_framfs_create_active(&fs_ctx, "large", JUXTA_FRAMFS_TYPE_RAW_DATA);
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to create file for large data: %d", ret);
@@ -353,7 +356,7 @@ static int test_basic_file_operations(void)
 
     /* Read and verify large data */
     LOG_INF("  → Reading and verifying large data...");
-    ret = juxta_framfs_read(&fs_ctx, "large_file", 0, large_buffer, sizeof(large_buffer));
+    ret = juxta_framfs_read(&fs_ctx, "large", 0, large_buffer, sizeof(large_buffer));
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to read large data: %d", ret);
@@ -370,7 +373,7 @@ static int test_basic_file_operations(void)
     /* Test 6: File size verification */
     LOG_INF("Test 6: File size verification");
     LOG_INF("  → Checking file sizes...");
-    ret = juxta_framfs_get_file_size(&fs_ctx, "test1");
+    ret = juxta_framfs_get_file_size(&fs_ctx, "240120");
     if (ret != (sizeof(test_data) + sizeof(more_data)))
     {
         LOG_ERR("❌ Unexpected file size: got %d, expected %d",
@@ -379,7 +382,7 @@ static int test_basic_file_operations(void)
     }
     LOG_INF("  ✅ First file size verified: %d bytes", ret);
 
-    ret = juxta_framfs_get_file_size(&fs_ctx, "large_file");
+    ret = juxta_framfs_get_file_size(&fs_ctx, "large");
     if (ret != sizeof(large_data))
     {
         LOG_ERR("❌ Unexpected large file size: got %d, expected %d",
@@ -387,6 +390,18 @@ static int test_basic_file_operations(void)
         return -1;
     }
     LOG_INF("  ✅ Large file size verified: %d bytes", ret);
+
+    /* Test 3: Get file size */
+    LOG_INF("Test 3: Get file size");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    int file_size = juxta_framfs_get_file_size(&fs_ctx, "240120");
+    if (file_size < 0)
+    {
+        LOG_ERR("❌ Failed to get file size: %d", file_size);
+        return file_size;
+    }
+    LOG_INF("  ✅ File '240120' size: %d bytes", file_size);
 
     LOG_INF("══════════════════════════════════════════════════════════════");
     LOG_INF("✅ All basic file operations passed!");
@@ -687,7 +702,7 @@ static int test_error_handling(void)
 
     /* Create test file first */
     LOG_INF("  → Creating test file...");
-    ret = juxta_framfs_create_active(&fs_ctx, "test1", JUXTA_FRAMFS_TYPE_RAW_DATA);
+    ret = juxta_framfs_create_active(&fs_ctx, "240120", JUXTA_FRAMFS_TYPE_RAW_DATA);
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to create test file: %d", ret);
@@ -697,7 +712,7 @@ static int test_error_handling(void)
 
     /* Create duplicate file */
     LOG_INF("  → Testing duplicate file creation...");
-    ret = juxta_framfs_create_active(&fs_ctx, "test1", JUXTA_FRAMFS_TYPE_RAW_DATA);
+    ret = juxta_framfs_create_active(&fs_ctx, "240120", JUXTA_FRAMFS_TYPE_RAW_DATA);
     if (ret != JUXTA_FRAMFS_ERROR_EXISTS)
     {
         LOG_ERR("❌ UNEXPECTED: Wrong error code for duplicate file");

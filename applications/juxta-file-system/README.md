@@ -108,9 +108,7 @@ uint8_t mac_ids[][3] = {{0x55, 0x66, 0x77}}; // Last 3 bytes of MAC
 int8_t rssi[] = {-45};
 juxta_framfs_append_device_scan(&fs_ctx, 1234, 5, mac_ids, rssi, 1);
 
-// Log system events
-juxta_framfs_append_simple_record(&fs_ctx, 567, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
-juxta_framfs_append_battery_record(&fs_ctx, 890, 87);
+// Files are automatically named YYMMDD (e.g., "240120" for 2024-01-20)
 ```
 
 ### File System Statistics
@@ -163,6 +161,7 @@ Modify `CURRENT_TEST_MODE` in `main.c`:
 - **File Limit**: 64 files maximum
 - **MAC ID Index**: 128 unique devices (3-byte format)
 - **Daily Logging**: ~14.9 days of minute-based data
+- **Filename Format**: YYMMDD (6 characters, e.g., "240120")
 
 ## Troubleshooting
 

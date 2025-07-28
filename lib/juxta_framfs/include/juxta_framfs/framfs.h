@@ -24,7 +24,7 @@ extern "C"
 #endif
 
 #ifndef CONFIG_JUXTA_FRAMFS_FILENAME_LEN
-#define CONFIG_JUXTA_FRAMFS_FILENAME_LEN 12
+#define CONFIG_JUXTA_FRAMFS_FILENAME_LEN 8 /* YYMMDD format (6 chars + null) */
 #endif
 
 /* File system constants */

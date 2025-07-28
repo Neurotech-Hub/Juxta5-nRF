@@ -330,6 +330,8 @@ static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx)
     LOG_INF("  Raw Value: %d", adc_sample_buffer);
     LOG_INF("  Reference (mV): %d", adc_ref_internal(adc_dev));
     LOG_INF("  Converted (mV): %d", vdd_mv);
+    LOG_INF("  Expected VDD (3V): ~3000 mV");
+    LOG_INF("  Expected ADC reading (1/6 gain): ~500 mV");
 
     ctx->battery_mv = vdd_mv;
 
@@ -474,8 +476,33 @@ uint32_t juxta_vitals_get_file_date(struct juxta_vitals_ctx *ctx)
         return 0;
     }
 
-    /* Use the existing date function - it's already in YYYYMMDD format */
-    return juxta_vitals_get_date_yyyymmdd(ctx);
+    /* Use the new YYMMDD format by default */
+    return juxta_vitals_get_file_date_yymmdd(ctx);
+}
+
+uint32_t juxta_vitals_get_file_date_yymmdd(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !ctx->initialized || ctx->current_timestamp == 0)
+    {
+        return 0;
+    }
+
+    /* Get the full date first */
+    uint32_t full_date = juxta_vitals_get_date_yyyymmdd(ctx);
+    if (full_date == 0)
+    {
+        return 0;
+    }
+
+    /* Extract year, month, day */
+    uint32_t year = full_date / 10000;
+    uint32_t month = (full_date % 10000) / 100;
+    uint32_t day = full_date % 100;
+
+    /* Convert to YYMMDD format (assume 20XX) */
+    uint32_t short_year = year % 100; /* Extract last 2 digits */
+
+    return short_year * 10000 + month * 100 + day;
 }
 
 uint16_t juxta_vitals_get_minute_of_day(struct juxta_vitals_ctx *ctx)

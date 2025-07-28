@@ -32,8 +32,8 @@ static struct juxta_framfs_ctx time_ctx;
 /* Mock RTC function for testing */
 static uint32_t get_test_rtc_date(void)
 {
-    /* Return fixed date for testing: 2024-01-20 */
-    return 0x07E80114; /* 0x07E8 = 2024, 0x01 = 01, 0x14 = 20 */
+    /* Return YYMMDD format for 2024-01-20 */
+    return 240120; /* 24 = year, 01 = month, 20 = day */
 }
 
 /**
@@ -138,18 +138,18 @@ static int test_time_file_management(void)
     }
     LOG_INF("  ✅ Initial file created");
 
-    /* Test 2: Basic data operations */
-    LOG_INF("Test 2: Basic data operations");
+    /* Test basic file operations with time-aware API */
+    LOG_INF("  → Testing basic file operations...");
 
-    /* Write test data */
-    uint8_t test_data[] = {0x11, 0x22, 0x33, 0x44, 0x55};
+    /* Write some test data - should create file "240120" */
+    uint8_t test_data[] = {0x01, 0x02, 0x03, 0x04};
     ret = juxta_framfs_append_data(&time_ctx, test_data, sizeof(test_data));
     if (ret < 0)
     {
-        LOG_ERR("❌ Failed to append data: %d", ret);
+        LOG_ERR("❌ Failed to append test data: %d", ret);
         return ret;
     }
-    LOG_INF("  ✅ Data written successfully (%d bytes)", sizeof(test_data));
+    LOG_INF("  ✅ Test data written to file 240120");
 
     /* Read and verify data */
     uint8_t read_buffer[32];
@@ -160,6 +160,7 @@ static int test_time_file_management(void)
         LOG_ERR("❌ Failed to get current filename: %d", ret);
         return ret;
     }
+    LOG_INF("  ✅ Current filename: %s", current_file);
 
     ret = juxta_framfs_read(&fs_ctx, current_file, 0, read_buffer, sizeof(test_data));
     if (ret < 0)

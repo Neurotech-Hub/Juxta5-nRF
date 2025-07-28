@@ -99,12 +99,7 @@ static void print_test_results(void)
     LOG_INF("  • RTC integration");
     LOG_INF("  • Error handling");
     LOG_INF("");
-    LOG_INF("🔗 Integration Validation:");
-    LOG_INF("  • Battery level written to file ✓");
-    LOG_INF("  • Time-aware file management ✓");
-    LOG_INF("  • All components working together ✓");
-    LOG_INF("");
-    LOG_INF("🎯 Ready for application development!");
+    LOG_INF("🎯 All tests completed successfully!");
     LOG_INF("══════════════════════════════════════════════════════════════");
 }
 

@@ -224,6 +224,17 @@ extern "C"
     uint32_t juxta_vitals_get_file_date(struct juxta_vitals_ctx *ctx);
 
     /**
+     * @brief Get current date in YYMMDD format for file system operations
+     *
+     * This function returns the current date in YYMMDD format (6 digits)
+     * for use with the updated file system that uses shorter filenames.
+     *
+     * @param ctx Vitals context
+     * @return Date in YYMMDD format, or 0 if timestamp not set
+     */
+    uint32_t juxta_vitals_get_file_date_yymmdd(struct juxta_vitals_ctx *ctx);
+
+    /**
      * @brief Get current minute of day (0-1439) for time-series data
      *
      * This function converts the current timestamp to minutes since midnight,

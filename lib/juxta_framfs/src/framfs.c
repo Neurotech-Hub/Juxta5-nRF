@@ -1228,7 +1228,7 @@ int juxta_framfs_init_with_time(struct juxta_framfs_ctx *ctx,
     /* Get current date and initialize filename */
     ctx->current_file_date = get_rtc_time();
     snprintf(ctx->current_filename, sizeof(ctx->current_filename),
-             "%08X", ctx->current_file_date);
+             "%06u", ctx->current_file_date);
 
     LOG_INF("File system initialized with time management for date: %s", ctx->current_filename);
     return JUXTA_FRAMFS_OK;
@@ -1249,7 +1249,7 @@ int juxta_framfs_ensure_current_file(struct juxta_framfs_ctx *ctx)
     {
         if (current_date != ctx->current_file_date)
         {
-            LOG_INF("Date changed from %08X to %08X, switching files",
+            LOG_INF("Date changed from %06u to %06u, switching files",
                     ctx->current_file_date, current_date);
         }
         else
@@ -1271,15 +1271,46 @@ int juxta_framfs_ensure_current_file(struct juxta_framfs_ctx *ctx)
         /* Update context with new date */
         ctx->current_file_date = current_date;
         snprintf(ctx->current_filename, sizeof(ctx->current_filename),
-                 "%08X", current_date);
+                 "%06u", current_date);
 
-        /* Create new active file */
+        /* Try to create new active file */
         int ret = juxta_framfs_create_active(ctx->fs_ctx,
                                              ctx->current_filename,
                                              JUXTA_FRAMFS_TYPE_SENSOR_LOG);
+        if (ret == JUXTA_FRAMFS_ERROR_EXISTS)
+        {
+            /* File already exists, try to use it if it's not active */
+            int existing_index = framfs_find_file(ctx->fs_ctx, ctx->current_filename);
+            if (existing_index >= 0)
+            {
+                /* Check if the existing file is active */
+                struct juxta_framfs_entry entry;
+                ret = framfs_read_entry(ctx->fs_ctx, existing_index, &entry);
+                if (ret >= 0 && (entry.flags & JUXTA_FRAMFS_FLAG_ACTIVE))
+                {
+                    /* File is already active, use it */
+                    ctx->fs_ctx->active_file_index = existing_index;
+                    LOG_INF("Using existing active file: %s", ctx->current_filename);
+                    return JUXTA_FRAMFS_OK;
+                }
+                else
+                {
+                    /* File exists but is not active, make it active */
+                    entry.flags |= JUXTA_FRAMFS_FLAG_ACTIVE;
+                    ret = framfs_write_entry(ctx->fs_ctx, existing_index, &entry);
+                    if (ret >= 0)
+                    {
+                        ctx->fs_ctx->active_file_index = existing_index;
+                        LOG_INF("Reactivated existing file: %s", ctx->current_filename);
+                        return JUXTA_FRAMFS_OK;
+                    }
+                }
+            }
+        }
+
         if (ret < 0)
         {
-            LOG_ERR("Failed to create new active file: %d", ret);
+            LOG_ERR("Failed to create or use file: %d", ret);
             return ret;
         }
 
