@@ -16,7 +16,7 @@
 #include <string.h>
 #include <stdio.h>
 
-LOG_MODULE_REGISTER(framfs_time_test, CONFIG_LOG_DEFAULT_LEVEL);
+LOG_MODULE_REGISTER(framfs_time_test, LOG_LEVEL_DBG);
 
 /* Device tree definitions */
 #define FRAM_NODE DT_ALIAS(spi_fram)

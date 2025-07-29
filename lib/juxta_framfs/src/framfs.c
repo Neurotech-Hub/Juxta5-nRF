@@ -72,6 +72,24 @@ int juxta_framfs_init(struct juxta_framfs_context *ctx,
             return ret;
         }
     }
+    else
+    {
+        /* Header read successfully, check magic number */
+        if (ctx->header.magic != JUXTA_FRAMFS_MAGIC)
+        {
+            LOG_WRN("Invalid file system magic: 0x%04X (expected 0x%04X), formatting new filesystem",
+                    ctx->header.magic, JUXTA_FRAMFS_MAGIC);
+            LOG_INF("Initializing new file system");
+
+            /* Format new file system */
+            ret = juxta_framfs_format(ctx);
+            if (ret < 0)
+            {
+                LOG_ERR("Failed to format file system: %d", ret);
+                return ret;
+            }
+        }
+    }
 
     /* Try to read existing MAC header */
     ret = framfs_read_mac_header(ctx);
@@ -87,14 +105,6 @@ int juxta_framfs_init(struct juxta_framfs_context *ctx,
             LOG_ERR("Failed to initialize MAC table: %d", ret);
             return ret;
         }
-    }
-
-    /* Validate header */
-    if (ctx->header.magic != JUXTA_FRAMFS_MAGIC)
-    {
-        LOG_ERR("Invalid file system magic: 0x%04X (expected 0x%04X)",
-                ctx->header.magic, JUXTA_FRAMFS_MAGIC);
-        return JUXTA_FRAMFS_ERROR_INVALID;
     }
 
     if (ctx->header.version != JUXTA_FRAMFS_VERSION)

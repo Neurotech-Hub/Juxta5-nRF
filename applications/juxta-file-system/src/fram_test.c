@@ -13,7 +13,7 @@
 #include <juxta_fram/fram.h>
 #include <string.h>
 
-LOG_MODULE_REGISTER(fram_test, CONFIG_LOG_DEFAULT_LEVEL);
+LOG_MODULE_REGISTER(fram_test, LOG_LEVEL_DBG);
 
 /* Device tree definitions */
 #define FRAM_NODE DT_ALIAS(spi_fram)

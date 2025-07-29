@@ -17,7 +17,7 @@
 #include <time.h>
 #include "juxta_vitals_nrf52/vitals.h"
 
-LOG_MODULE_REGISTER(vitals_test, CONFIG_LOG_DEFAULT_LEVEL);
+LOG_MODULE_REGISTER(vitals_test, LOG_LEVEL_DBG);
 
 /* Global test state */
 static bool vitals_test_failed = false;

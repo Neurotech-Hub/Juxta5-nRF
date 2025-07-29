@@ -9,7 +9,7 @@
 #include <zephyr/logging/log.h>
 #include <app_version.h>
 
-LOG_MODULE_REGISTER(main, CONFIG_LOG_DEFAULT_LEVEL);
+LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 /* Forward declarations */
 extern int fram_test_main(void);
@@ -107,6 +107,12 @@ int main(void)
 {
     int ret;
 
+    /* Test logging immediately */
+    LOG_INF("=== JUXTA File System Test Application Starting ===");
+    LOG_INF("Log level: %d", CONFIG_LOG_DEFAULT_LEVEL);
+    LOG_INF("Board: Juxta5-4_nRF52840");
+    LOG_INF("FRAM: MB85RS1M (1Mbit)");
+
     print_banner();
 
     switch (CURRENT_TEST_MODE)
@@ -138,6 +144,7 @@ int main(void)
         /* Phase 1: Hardware Layer */
         LOG_INF("📋 Phase 1: Hardware Layer Tests");
         LOG_INF("──────────────────────────────────────────────────────────────");
+        LOG_INF("About to call fram_test_main()...");
         ret = fram_test_main();
         if (ret < 0)
         {

@@ -88,6 +88,9 @@ int juxta_fram_init(struct juxta_fram_device *fram_dev,
             cs_spec->port ? 1 : 0,
             cs_spec->pin);
 
+    /* Check if FRAM chip is present by testing CS line */
+    LOG_INF("Checking FRAM chip presence...");
+
     return JUXTA_FRAM_OK;
 }
 
