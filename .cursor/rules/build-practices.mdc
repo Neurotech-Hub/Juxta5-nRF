@@ -9,3 +9,7 @@
    - Present technical strategies first
    - Ask clarifying questions before coding
    - Break down into smaller testable units
+description:
+globs:
+alwaysApply: true
+---

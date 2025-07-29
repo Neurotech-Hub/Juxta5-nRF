@@ -22,9 +22,7 @@ The project is organized into distinct sections:
    - Must be consulted before implementing new features
    - Contains examples for BLE, sensors, and basic functionality
    - Always cite the example you are using (if the example is relevant)
-description:
-globs:
-alwaysApply: true
+
 ---
 
 # Configuration File Standards
@@ -75,12 +73,63 @@ CONFIG_LOG_DEFAULT_LEVEL=3
 CONFIG_MAIN_STACK_SIZE=4096
 ```
 
+## README Standards (`README.md`)
+README files should focus on high-level usage and implementation guidance:
+- **Purpose**: What the library/application does
+- **Board Overview**: Concise description of the board's capabilities
+- **Pin Assignments**: Complete pin mapping table
+- **Device Tree Configuration**: Working device tree examples
+
+**AVOID**:
+- ❌ Function-by-function documentation (belongs in .h files)
+- ❌ Feature lists or bullet points
+- ❌ Emojis or decorative elements
+- ❌ Verbose explanations of obvious concepts
+- ❌ Implementation details that don't help usage
+- ❌ Building and programming instructions
+- ❌ Troubleshooting sections
+- ❌ Hardware verification procedures
+- ❌ Usage notes and key concepts
+- ❌ Support sections
+
+**INCLUDE**:
+- ✅ Concise purpose statement
+- ✅ Board overview and capabilities
+- ✅ Complete pin assignment table
+- ✅ Device tree configuration examples
+
+Example structure:
+```markdown
+# Board Name
+
+Brief description of what this board does and when to use it.
+
+## Board Overview
+
+Concise description of the board's capabilities and target applications.
+
+## Pin Assignments
+
+| Pin | Function | Direction | Notes |
+|-----|----------|-----------|-------|
+| ... | ... | ... | ... |
+
+## Device Tree Configuration
+
+### Peripheral Configuration
+```dts
+/* Working device tree examples */
+```
+```
+
 ## Key Principles
 1. Board defconfigs define hardware capabilities
 2. Project configs define software behavior
-3. No duplication between files
-4. Hardware settings belong in defconfig
-5. Application settings belong in prj.conf
+3. READMEs guide implementation and usage
+4. No duplication between files
+5. Hardware settings belong in defconfig
+6. Application settings belong in prj.conf
+7. Function documentation belongs in .h files
 
 ## Migration Guidelines
 When moving settings between files:
@@ -88,3 +137,8 @@ When moving settings between files:
 2. Software/application configs → prj.conf
 3. Remove duplicates, keeping in defconfig
 4. Document hardware limitations in defconfig
+5. Move detailed function docs to header files
+description:
+globs:
+alwaysApply: true
+---
