@@ -67,12 +67,12 @@ struct discovered_device
 {
     bt_addr_le_t addr;
     int8_t rssi;
-    char name[16]; // Reduced from 32 to 16 bytes
+    char name[32]; // Increased for nRF52840 memory capacity
     bool name_found;
     uint32_t timestamp;
 };
 
-#define MAX_DISCOVERED_DEVICES 3 // Ultra-minimal for nRF52805 memory constraints
+#define MAX_DISCOVERED_DEVICES 10 // Increased for nRF52840 memory capacity
 static struct discovered_device discovered_devices[MAX_DISCOVERED_DEVICES];
 static uint8_t device_count = 0;
 
@@ -160,7 +160,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                     struct net_buf_simple *buf)
 {
     char addr_str[BT_ADDR_LE_STR_LEN];
-    char name[16] = {0}; // Reduced from 32 to 16 bytes
+    char name[32] = {0}; // Increased for nRF52840 memory capacity
     bool name_found = false;
 
     /* Parse advertising data for device name */
@@ -477,8 +477,8 @@ int main(void)
     int ret;
 
     LOG_INF("🚀 Starting JUXTA BLE Application");
-    LOG_INF("📋 Board: Juxta5-1_AXY");
-    LOG_INF("📟 Device: nRF52805");
+    LOG_INF("📋 Board: Juxta5-4_nRF52840");
+    LOG_INF("📟 Device: nRF52840");
     LOG_INF("📱 Device will alternate between advertising and scanning");
     LOG_INF("📢 Advertising duration: %d seconds", ADVERTISING_DURATION_MS / 1000);
     LOG_INF("🔍 Scanning duration: %d seconds", SCANNING_DURATION_MS / 1000);

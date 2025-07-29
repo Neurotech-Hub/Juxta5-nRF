@@ -1,6 +1,6 @@
 # JUXTA File System Test Application
 
-A comprehensive test suite for the JUXTA FRAM file system, designed to validate the `juxta_fram` and `juxta_framfs` libraries on the Juxta5-1_ADC board.
+A comprehensive test suite for the JUXTA FRAM file system, designed to validate the `juxta_fram` and `juxta_framfs` libraries.
 
 ## Overview
 
@@ -12,73 +12,8 @@ This application provides a complete testing framework for:
 
 ### Prerequisites
 - Nordic nRF Connect SDK v3.0.2+
-- Juxta5-1_ADC board with MB85RS1MT FRAM
+- Juxta5-4_nRF52840 board with MB85RS1MT FRAM
 - Zephyr development environment
-
-### Building and Running
-
-```bash
-# Build the application
-west build -b Juxta5-1_ADC applications/juxta-file-system
-
-# Flash to device
-west flash
-
-# Monitor output
-west espressif monitor
-```
-
-### Expected Output
-
-```
-╔══════════════════════════════════════════════════════════════╗
-║              JUXTA File System Test Application              ║
-║                        Version 1.0.0                         ║
-╠══════════════════════════════════════════════════════════════╣
-║  Tests:                                                      ║
-║  • FRAM Library (juxta_fram)                                ║
-║  • File System (juxta_framfs)                               ║
-║                                                              ║
-║  Board: Juxta5-1_ADC                                        ║
-║  FRAM:  MB85RS1MTPW-G-APEWE1 (1Mbit)                        ║
-╚══════════════════════════════════════════════════════════════╝
-
-[00:00:08.679] <inf> main: 🚀 Running Full Test Suite
-[00:00:08.679] <inf> main: 📋 Step 1: FRAM Library Test
-[00:00:08.679] <inf> fram_test: 🚀 Starting FRAM Library Test Suite
-...
-[00:00:13.738] <inf> main: 🎉 All tests completed successfully!
-
-╔══════════════════════════════════════════════════════════════╗
-║                        TEST RESULTS                         ║
-║                                                              ║
-║  ✅ FRAM Library:    PASSED                                 ║
-║  ✅ File System:     PASSED                                 ║
-║  ✅ MAC Address Table: PASSED                               ║
-║  ✅ Encoding/Decoding: PASSED                               ║
-║                                                              ║
-║  🎯 Ready for application development!                      ║
-╚══════════════════════════════════════════════════════════════╝
-```
-
-## Test Coverage
-
-### FRAM Library Tests
-- **Initialization** - Device setup and ID verification
-- **Basic Operations** - Read/write functionality validation
-- **Structured Data** - Complex data structure handling
-- **Performance** - Speed and throughput measurement
-
-### File System Tests
-- **Basic File Operations** - Create, write, read, seal files
-- **Multiple File Management** - Handle multiple files simultaneously
-- **Data Logger Simulation** - Real-world logging scenarios
-- **Sensor Data Storage** - Time-series data handling
-- **Limits and Error Handling** - Edge cases and error conditions
-- **MAC Address Table** - Global MAC indexing system
-- **Encoding/Decoding** - Binary data format handling
-- **High-level Append Functions** - Specialized record types
-- **File System Statistics** - Usage reporting and monitoring
 
 ## Practical Usage Examples
 
@@ -91,7 +26,7 @@ struct juxta_framfs_context fs_ctx;
 juxta_framfs_init(&fs_ctx, &fram_dev);
 
 // Create a daily log file
-juxta_framfs_create_active(&fs_ctx, "20240120", JUXTA_FRAMFS_TYPE_SENSOR_LOG);
+juxta_framfs_create_active(&fs_ctx, "240120", JUXTA_FRAMFS_TYPE_SENSOR_LOG);
 
 // Append sensor data
 uint8_t sensor_data[] = {0x12, 0x34, 0x56, 0x78};
@@ -140,9 +75,9 @@ juxta_framfs_append_battery_record_data(&ctx, minute, 87);
 ## Configuration
 
 ### Board Configuration
-The application uses the Juxta5-1_ADC board configuration:
-- **SPI Frequency**: 1MHz
-- **CS Pin**: P0.20 (dedicated to FRAM)
+The application uses the Juxta5-4_nRF52840 board configuration:
+- **SPI Frequency**: 8MHz
+- **CS Pin**: P1.13 (dedicated to FRAM)
 - **FRAM Size**: 1Mbit (131,072 bytes)
 
 ### Test Modes

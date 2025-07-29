@@ -170,7 +170,7 @@ static int test_framfs_init(void)
         return JUXTA_FRAMFS_ERROR_INIT;
     }
 
-    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &cs_gpio);
+    ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &cs_gpio);
     if (ret < 0)
     {
         LOG_ERR("Failed to initialize FRAM: %d", ret);

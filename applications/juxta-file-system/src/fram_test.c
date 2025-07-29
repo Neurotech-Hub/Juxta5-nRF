@@ -49,7 +49,7 @@ static int test_fram_init(void)
     }
 
     /* Initialize FRAM using direct initialization */
-    ret = juxta_fram_init(&fram_dev, spi_dev, 1000000, &cs_gpio); /* 1MHz SPI */
+    ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &cs_gpio); /* 8MHz SPI */
     if (ret < 0)
     {
         LOG_ERR("Failed to initialize FRAM: %d", ret);
