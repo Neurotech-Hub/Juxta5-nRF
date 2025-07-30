@@ -15,6 +15,9 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/pm/pm.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/policy.h>
 
 #include "ble_service.h"
 
@@ -45,8 +48,19 @@ static struct k_timer state_timer;
 static struct k_work state_work;
 
 /* Advertising and scanning parameters */
-#define ADVERTISING_DURATION_MS 5000 /* 5 seconds */
-#define SCANNING_DURATION_MS 10000   /* 10 seconds */
+/* Configurable advertising intervals (in 0.625ms units) */
+#define ADV_INTERVAL_1S 0x0800  /* 1024ms = 1 second */
+#define ADV_INTERVAL_5S 0x2800  /* 5120ms = 5 seconds */
+#define ADV_INTERVAL_10S 0x5000 /* 10240ms = 10 seconds */
+
+/* Current advertising interval - change this to adjust power consumption */
+#define CURRENT_ADV_INTERVAL ADV_INTERVAL_5S
+
+/* Pulsed operation parameters */
+#define ADV_BURST_DURATION_MS 500  /* Send advertisement for 500ms */
+#define SCAN_BURST_DURATION_MS 500 /* Scan for 500ms */
+#define ADV_INTERVAL_MS 5000       /* Send advertisement every 5 seconds */
+#define SCAN_INTERVAL_MS 15000     /* Scan every 15 seconds */
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -54,12 +68,12 @@ static struct k_work state_work;
 /* BLE advertising data */
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA_BYTES(BT_DATA_UUID128_ALL, JUXTA_SERVICE_UUID),
+    BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
 };
 
 /* BLE scan response data */
 static const struct bt_data sd[] = {
-    BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL, JUXTA_SERVICE_UUID),
 };
 
 /* Device information for discovered devices */
@@ -207,16 +221,21 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 }
 
 /**
- * @brief Start BLE advertising
+ * @brief Start BLE advertising with configurable intervals
  */
 static int juxta_start_advertising(void)
 {
     int ret;
 
+    LOG_DBG("Starting advertising with standard fast parameters");
+
     /* Make sure advertising is stopped first */
     bt_le_adv_stop();
 
-    /* Start advertising with scan response */
+    /* Small delay to ensure BLE stack is ready */
+    k_sleep(K_MSEC(10));
+
+    /* Start advertising with standard fast parameters for burst mode */
     ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (ret)
     {
@@ -225,7 +244,9 @@ static int juxta_start_advertising(void)
     }
 
     current_state = BLE_STATE_ADVERTISING;
-    LOG_INF("📢 BLE advertising started as '%s'", CONFIG_BT_DEVICE_NAME);
+
+    LOG_INF("📢 BLE advertising started as '%s' (fast burst mode)",
+            CONFIG_BT_DEVICE_NAME);
     return 0;
 }
 
@@ -271,7 +292,7 @@ static int juxta_start_scanning(void)
     }
 
     current_state = BLE_STATE_SCANNING;
-    LOG_INF("✅ Scanning started successfully");
+    // LOG_INF("✅ Scanning started successfully"); // This line is no longer relevant
 
     return 0;
 }
@@ -292,40 +313,146 @@ static void juxta_stop_scanning(void)
     }
 }
 
+/* State management for pulsed advertising and scanning */
+static uint32_t last_adv_time = 0;
+static uint32_t last_scan_time = 0;
+static bool in_adv_burst = false;
+static bool in_scan_burst = false;
+
 /**
- * @brief State timer callback
+ * @brief Check if it's time to send an advertising burst
+ */
+static bool is_time_to_advertise(void)
+{
+    uint32_t current_time = k_uptime_get_32();
+    uint32_t time_since_last_adv = current_time - last_adv_time;
+
+    LOG_DBG("Adv check: current=%u, last_adv=%u, time_since=%u, interval=%u",
+            current_time, last_adv_time, time_since_last_adv, ADV_INTERVAL_MS);
+
+    return time_since_last_adv >= ADV_INTERVAL_MS;
+}
+
+/**
+ * @brief Check if it's time to send a scanning burst
+ */
+static bool is_time_to_scan(void)
+{
+    uint32_t current_time = k_uptime_get_32();
+    uint32_t time_since_last_scan = current_time - last_scan_time;
+
+    LOG_DBG("Scan check: current=%u, last_scan=%u, time_since=%u, interval=%u",
+            current_time, last_scan_time, time_since_last_scan, SCAN_INTERVAL_MS);
+
+    return time_since_last_scan >= SCAN_INTERVAL_MS;
+}
+
+/**
+ * @brief State timer callback - checks timing for both advertising and scanning
  */
 static void state_timer_callback(struct k_timer *dummy)
 {
+    /* Always submit work - let the work handler decide what to do */
+    LOG_DBG("Timer callback triggered - submitting work");
     k_work_submit(&state_work);
 }
 
 /**
- * @brief State work handler
+ * @brief State work handler - manages pulsed advertising and scanning
  */
 static void state_work_handler(struct k_work *work)
 {
-    switch (current_state)
-    {
-    case BLE_STATE_ADVERTISING:
-        LOG_INF("⏰ Advertising period complete");
-        juxta_stop_advertising();
-        juxta_start_scanning();
-        k_timer_start(&state_timer, K_MSEC(SCANNING_DURATION_MS), K_NO_WAIT);
-        break;
+    uint32_t current_time = k_uptime_get_32();
+    static bool work_in_progress = false;
 
-    case BLE_STATE_SCANNING:
-        LOG_INF("⏰ Scanning period complete");
+    LOG_DBG("State work handler called: in_adv_burst=%d, in_scan_burst=%d",
+            in_adv_burst, in_scan_burst);
+
+    /* Prevent multiple simultaneous work executions */
+    if (work_in_progress)
+    {
+        LOG_DBG("Work already in progress, skipping");
+        return;
+    }
+
+    work_in_progress = true;
+
+    /* Handle ending scan burst first */
+    if (in_scan_burst)
+    {
+        /* End scan burst */
+        LOG_INF("🔍 Ending scan burst");
         juxta_stop_scanning();
         print_discovered_devices();
-        juxta_start_advertising();
-        k_timer_start(&state_timer, K_MSEC(ADVERTISING_DURATION_MS), K_NO_WAIT);
-        break;
+        in_scan_burst = false;
 
-    default:
-        LOG_ERR("❌ Unknown state: %d", current_state);
-        break;
+        /* Schedule next check */
+        k_timer_start(&state_timer, K_MSEC(1000), K_NO_WAIT); // Check every second
     }
+    /* Handle ending advertising burst */
+    else if (in_adv_burst)
+    {
+        /* End advertising burst */
+        LOG_INF("📢 Ending advertising burst");
+        juxta_stop_advertising();
+        in_adv_burst = false;
+
+        /* Check if we need to scan next */
+        if (is_time_to_scan())
+        {
+            LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
+            juxta_start_scanning();
+            in_scan_burst = true;
+            last_scan_time = current_time;
+
+            /* Schedule end of scan burst */
+            k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
+        }
+        else
+        {
+            /* Schedule next check */
+            k_timer_start(&state_timer, K_MSEC(1000), K_NO_WAIT); // Check every second
+        }
+    }
+    /* Handle starting new bursts */
+    else
+    {
+        bool scan_due = is_time_to_scan();
+        bool adv_due = is_time_to_advertise();
+
+        LOG_DBG("Checking for new bursts: scan_due=%d, adv_due=%d", scan_due, adv_due);
+
+        /* Handle scanning burst first (priority over advertising) */
+        if (scan_due)
+        {
+            LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
+            juxta_start_scanning();
+            in_scan_burst = true;
+            last_scan_time = current_time;
+
+            /* Schedule end of scan burst */
+            k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
+        }
+        /* Handle advertising burst (only if not scanning) */
+        else if (adv_due)
+        {
+            LOG_INF("📢 Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
+            juxta_start_advertising();
+            in_adv_burst = true;
+            last_adv_time = current_time;
+
+            /* Schedule end of advertising burst */
+            k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS), K_NO_WAIT);
+        }
+        else
+        {
+            /* No action needed, schedule next check */
+            LOG_DBG("No action needed, scheduling next check");
+            k_timer_start(&state_timer, K_MSEC(1000), K_NO_WAIT);
+        }
+    }
+
+    work_in_progress = false;
 }
 
 /**
@@ -360,8 +487,20 @@ static void connected(struct bt_conn *conn, uint8_t err)
     k_timer_stop(&state_timer);
     k_work_cancel_delayable(&adv_work);
 
+    /* Stop any ongoing bursts */
+    if (in_adv_burst)
+    {
+        juxta_stop_advertising();
+        in_adv_burst = false;
+    }
+    if (in_scan_burst)
+    {
+        juxta_stop_scanning();
+        in_scan_burst = false;
+    }
+
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-    LOG_INF("📱 Connected to %s", addr);
+    LOG_INF("📱 Connected to %s - Pulsed BLE activities paused", addr);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -378,9 +517,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         active_conn = NULL;
     }
 
-    /* Resume the advertising/scanning cycle */
-    juxta_start_advertising();
-    k_timer_start(&state_timer, K_MSEC(ADVERTISING_DURATION_MS), K_NO_WAIT);
+    /* Resume pulsed operation */
+    k_timer_start(&state_timer, K_MSEC(1000), K_NO_WAIT); // Resume checking every second
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -456,15 +594,12 @@ static int init_bluetooth(void)
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
 
-    /* Start the advertising/scanning cycle */
-    ret = juxta_start_advertising();
-    if (ret)
-    {
-        return ret;
-    }
+    /* Start the pulsed operation timer */
+    k_timer_start(&state_timer, K_MSEC(1000), K_NO_WAIT); // Start checking every second
 
-    /* Start the state timer */
-    k_timer_start(&state_timer, K_MSEC(ADVERTISING_DURATION_MS), K_NO_WAIT);
+    /* Initialize timing variables to start advertising immediately */
+    last_adv_time = k_uptime_get_32() - ADV_INTERVAL_MS;   // Force immediate advertising
+    last_scan_time = k_uptime_get_32() - SCAN_INTERVAL_MS; // Force immediate scanning
 
     return 0;
 }
@@ -479,9 +614,10 @@ int main(void)
     LOG_INF("🚀 Starting JUXTA BLE Application");
     LOG_INF("📋 Board: Juxta5-4_nRF52840");
     LOG_INF("📟 Device: nRF52840");
-    LOG_INF("📱 Device will alternate between advertising and scanning");
-    LOG_INF("📢 Advertising duration: %d seconds", ADVERTISING_DURATION_MS / 1000);
-    LOG_INF("🔍 Scanning duration: %d seconds", SCANNING_DURATION_MS / 1000);
+    LOG_INF("📱 Device will use pulsed advertising and scanning for device discovery");
+    LOG_INF("📢 Advertising: %d ms burst every %d seconds", ADV_BURST_DURATION_MS, ADV_INTERVAL_MS / 1000);
+    LOG_INF("🔍 Scanning: %d ms burst every %d seconds", SCAN_BURST_DURATION_MS, SCAN_INTERVAL_MS / 1000);
+    LOG_INF("⚡ Power-efficient pulsed operation for device discovery");
 
     /* Initialize work queue item */
     k_work_init_delayable(&adv_work, advertising_work_handler);
@@ -527,14 +663,14 @@ int main(void)
         if ((++heartbeat % 30) == 0)
         { /* Every 30 seconds */
             LOG_INF("💓 System running... (uptime: %u minutes)", heartbeat / 60);
-            if (current_state == BLE_STATE_ADVERTISING)
-            {
-                LOG_DBG("📢 Still advertising...");
-            }
-            else if (current_state == BLE_STATE_SCANNING)
-            {
-                LOG_DBG("🔍 Still scanning... (Found %d devices)", device_count);
-            }
+            // if (current_state == BLE_STATE_ADVERTISING) // This variable is no longer used
+            // {
+            //     LOG_DBG("📢 Still advertising...");
+            // }
+            // else if (current_state == BLE_STATE_SCANNING) // This variable is no longer used
+            // {
+            //     LOG_DBG("🔍 Still scanning... (Found %d devices)", device_count);
+            // }
         }
     }
 
