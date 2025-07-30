@@ -137,6 +137,53 @@ extern "C"
      */
     uint32_t juxta_vitals_get_time_hhmmss(struct juxta_vitals_ctx *ctx);
 
+    /**
+     * @brief Set RTC alarm for power-efficient wake-up
+     *
+     * This function sets an RTC alarm to wake the system at a specific time.
+     * Used for power-efficient scheduling of BLE activities.
+     *
+     * @param ctx Vitals context
+     * @param seconds_from_now Seconds from current time to set alarm
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_vitals_set_rtc_alarm(struct juxta_vitals_ctx *ctx, uint32_t seconds_from_now);
+
+    /**
+     * @brief Cancel RTC alarm
+     *
+     * @param ctx Vitals context
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_vitals_cancel_rtc_alarm(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Check if RTC alarm has fired
+     *
+     * @param ctx Vitals context
+     * @return true if alarm has fired, false otherwise
+     */
+    bool juxta_vitals_rtc_alarm_fired(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Get time until next scheduled action
+     *
+     * Calculates the time until the next advertising or scanning burst
+     * should occur based on the current timestamp.
+     *
+     * @param ctx Vitals context
+     * @param adv_interval_seconds Advertising interval in seconds
+     * @param scan_interval_seconds Scanning interval in seconds
+     * @param last_adv_time Last advertising time (Unix timestamp)
+     * @param last_scan_time Last scanning time (Unix timestamp)
+     * @return Seconds until next action, or 0 if action is due now
+     */
+    uint32_t juxta_vitals_get_time_until_next_action(struct juxta_vitals_ctx *ctx,
+                                                     uint32_t adv_interval_seconds,
+                                                     uint32_t scan_interval_seconds,
+                                                     uint32_t last_adv_time,
+                                                     uint32_t last_scan_time);
+
     /* ========================================================================
      * Battery Functions
      * ======================================================================== */

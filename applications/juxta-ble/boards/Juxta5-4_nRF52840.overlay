@@ -1,0 +1,16 @@
+/*
+ * Board overlay for Juxta5-4_nRF52840 for BLE application
+ * This file configures the board for BLE and RTC functionality
+ */
+
+/ {
+    aliases {
+        rtc = &rtc0;
+    };
+};
+
+/* Configure RTC for timestamp management */
+&rtc0 {
+    status = "okay";
+    clock-frequency = <32768>;
+}; 

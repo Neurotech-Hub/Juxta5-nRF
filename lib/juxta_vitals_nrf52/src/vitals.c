@@ -9,6 +9,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/counter.h>
 #include <zephyr/sys/util.h>
 #include <math.h>
 #include <string.h>
@@ -33,6 +34,12 @@ static struct adc_sequence adc_seq = {
 /* Temperature sensor device */
 static const struct device *temp_dev;
 
+/* RTC device for power-efficient timing (using counter API) */
+static const struct device *rtc_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(rtc));
+static bool rtc_alarm_set = false;
+static bool rtc_alarm_fired = false;
+static uint32_t rtc_start_time = 0;
+
 /* ADC buffer */
 static int16_t adc_sample_buffer;
 
@@ -52,6 +59,17 @@ int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitori
     ctx->initialized = true;
     ctx->battery_monitoring = enable_battery_monitoring;
     ctx->temperature_monitoring = true; // Always enable temperature monitoring
+
+    /* Check RTC device availability */
+    if (rtc_dev && device_is_ready(rtc_dev))
+    {
+        LOG_INF("Counter device available: %s", rtc_dev->name);
+    }
+    else
+    {
+        LOG_INF("Counter device not available - using uptime-based timing");
+        rtc_dev = NULL;
+    }
 
     /* Initialize temperature sensor */
     temp_dev = DEVICE_DT_GET(DT_NODELABEL(temp));
@@ -196,8 +214,11 @@ int juxta_vitals_set_timestamp(struct juxta_vitals_ctx *ctx, uint32_t timestamp)
         return JUXTA_VITALS_ERROR_INVALID_PARAM;
     }
 
+    /* Store the timestamp and record the current uptime for reference */
     ctx->current_timestamp = timestamp;
-    LOG_INF("Timestamp set to %u", timestamp);
+    rtc_start_time = k_uptime_get_32();
+
+    LOG_INF("Timestamp set to %u (uptime: %u ms)", timestamp, rtc_start_time);
     return JUXTA_VITALS_OK;
 }
 
@@ -207,7 +228,23 @@ uint32_t juxta_vitals_get_timestamp(struct juxta_vitals_ctx *ctx)
     {
         return 0;
     }
-    return ctx->current_timestamp;
+
+    if (ctx->current_timestamp == 0)
+    {
+        LOG_DBG("No timestamp set yet");
+        return 0;
+    }
+
+    /* Calculate elapsed time since timestamp was set */
+    uint32_t current_uptime = k_uptime_get_32();
+    uint32_t elapsed_seconds = (current_uptime - rtc_start_time) / 1000;
+
+    /* Add elapsed seconds to the stored timestamp */
+    uint32_t current_timestamp = ctx->current_timestamp + elapsed_seconds;
+
+    LOG_DBG("Current timestamp: %u (elapsed: %u seconds)", current_timestamp, elapsed_seconds);
+
+    return current_timestamp;
 }
 
 uint32_t juxta_vitals_get_date_yyyymmdd(struct juxta_vitals_ctx *ctx)
@@ -551,4 +588,106 @@ int juxta_vitals_get_validated_battery_level(struct juxta_vitals_ctx *ctx, uint8
 
     *level = current_level;
     return JUXTA_VITALS_OK;
+}
+
+/* ========================================================================
+ * RTC Alarm Functions for Power-Efficient Timing
+ * ======================================================================== */
+
+int juxta_vitals_set_rtc_alarm(struct juxta_vitals_ctx *ctx, uint32_t seconds_from_now)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_VITALS_ERROR_NOT_READY;
+    }
+
+    uint32_t current_time = juxta_vitals_get_timestamp(ctx);
+    if (current_time == 0)
+    {
+        LOG_ERR("RTC timestamp not set");
+        return JUXTA_VITALS_ERROR_NOT_READY;
+    }
+
+    /* For now, just track the alarm time without using hardware RTC alarm */
+    /* In a full implementation, this would set the actual RTC hardware alarm */
+    rtc_alarm_set = true;
+    rtc_alarm_fired = false;
+
+    LOG_DBG("RTC alarm set for %u seconds from now (timestamp: %u)",
+            seconds_from_now, current_time + seconds_from_now);
+    LOG_WRN("Note: RTC alarm is a placeholder - not using hardware alarm");
+
+    return JUXTA_VITALS_OK;
+}
+
+int juxta_vitals_cancel_rtc_alarm(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx)
+    {
+        return JUXTA_VITALS_ERROR_NOT_READY;
+    }
+
+    if (rtc_alarm_set)
+    {
+        rtc_alarm_set = false;
+        LOG_DBG("RTC alarm cancelled");
+    }
+
+    return JUXTA_VITALS_OK;
+}
+
+bool juxta_vitals_rtc_alarm_fired(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !rtc_dev)
+    {
+        return false;
+    }
+
+    /* Check if alarm has fired */
+    if (rtc_alarm_set)
+    {
+        uint32_t current_time = juxta_vitals_get_timestamp(ctx);
+        if (current_time > 0)
+        {
+            /* Simple check - in a real implementation, you'd use RTC interrupt */
+            rtc_alarm_fired = true;
+            rtc_alarm_set = false;
+        }
+    }
+
+    return rtc_alarm_fired;
+}
+
+uint32_t juxta_vitals_get_time_until_next_action(struct juxta_vitals_ctx *ctx,
+                                                 uint32_t adv_interval_seconds,
+                                                 uint32_t scan_interval_seconds,
+                                                 uint32_t last_adv_time,
+                                                 uint32_t last_scan_time)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return 0;
+    }
+
+    uint32_t current_time = juxta_vitals_get_timestamp(ctx);
+    if (current_time == 0)
+    {
+        return 0; /* No timestamp set */
+    }
+
+    /* Calculate time until next advertising */
+    uint32_t time_since_adv = current_time - last_adv_time;
+    uint32_t time_until_adv = (time_since_adv >= adv_interval_seconds) ? 0 : (adv_interval_seconds - time_since_adv);
+
+    /* Calculate time until next scanning */
+    uint32_t time_since_scan = current_time - last_scan_time;
+    uint32_t time_until_scan = (time_since_scan >= scan_interval_seconds) ? 0 : (scan_interval_seconds - time_since_scan);
+
+    /* Return the minimum time (whichever action is due first) */
+    if (time_until_adv == 0 || time_until_scan == 0)
+    {
+        return 0; /* Action is due now */
+    }
+
+    return (time_until_adv < time_until_scan) ? time_until_adv : time_until_scan;
 }

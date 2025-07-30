@@ -12,4 +12,14 @@ project(juxta_ble LANGUAGES C)
 target_sources(app PRIVATE
     src/main.c
     src/ble_service.c
+)
+
+# Add include directories for our libraries
+target_include_directories(app PRIVATE 
+    ../../lib/juxta_vitals_nrf52/include
+)
+
+# Add library source files directly
+target_sources(app PRIVATE 
+    ../../lib/juxta_vitals_nrf52/src/vitals.c
 ) 

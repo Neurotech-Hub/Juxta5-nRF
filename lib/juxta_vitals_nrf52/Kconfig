@@ -9,10 +9,11 @@
 config JUXTA_VITALS_NRF52
 	bool "JUXTA Vitals Library for nRF52"
 	depends on ADC
+	select RTC
 	help
 	  Enable JUXTA Vitals Library for nRF52.
 	  This library provides battery voltage, temperature,
-	  and system vitals monitoring.
+	  system vitals monitoring, and RTC-based power-efficient timing.
 
 if JUXTA_VITALS_NRF52
 
