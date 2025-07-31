@@ -13,4 +13,6 @@
 &rtc0 {
     status = "okay";
     clock-frequency = <32768>;
+    interrupt-parent = <&nvic>;
+    interrupts = <11 NRF_DEFAULT_IRQ_PRIORITY>;
 }; 

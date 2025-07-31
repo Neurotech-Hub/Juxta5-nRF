@@ -34,8 +34,8 @@ static struct adc_sequence adc_seq = {
 /* Temperature sensor device */
 static const struct device *temp_dev;
 
-/* RTC device for power-efficient timing (using counter API) */
-static const struct device *rtc_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(rtc));
+/* RTC device for power-efficient timing (using counter API) - DISABLED for BLE app */
+static const struct device *rtc_dev = NULL; /* Disabled to avoid conflicts with BLE RTC */
 static bool rtc_alarm_set = false;
 static bool rtc_alarm_fired = false;
 static uint32_t rtc_start_time = 0;
@@ -60,16 +60,8 @@ int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitori
     ctx->battery_monitoring = enable_battery_monitoring;
     ctx->temperature_monitoring = true; // Always enable temperature monitoring
 
-    /* Check RTC device availability */
-    if (rtc_dev && device_is_ready(rtc_dev))
-    {
-        LOG_INF("Counter device available: %s", rtc_dev->name);
-    }
-    else
-    {
-        LOG_INF("Counter device not available - using uptime-based timing");
-        rtc_dev = NULL;
-    }
+    /* RTC device disabled for BLE application to avoid conflicts */
+    LOG_INF("RTC device disabled - using uptime-based timing for BLE compatibility");
 
     /* Initialize temperature sensor */
     temp_dev = DEVICE_DT_GET(DT_NODELABEL(temp));
