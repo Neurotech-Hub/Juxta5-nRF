@@ -54,16 +54,73 @@ static int juxta_stop_advertising(void);
 static int juxta_start_scanning(void);
 static int juxta_stop_scanning(void);
 
-/* Scan callback for BLE scanning - minimal to avoid interrupt context issues */
+/* Scan callback for BLE scanning */
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad)
 {
-    ARG_UNUSED(addr);
-    ARG_UNUSED(rssi);
     ARG_UNUSED(adv_type);
-    ARG_UNUSED(ad);
 
-    /* Just count the scan result - no logging to avoid interrupt context issues */
-    /* TODO: Add device filtering for JX_* devices when needed */
+    /* Defensive check for NULL address */
+    if (addr == NULL)
+    {
+        return;
+    }
+
+    /* Convert address to string for logging */
+    char addr_str[BT_ADDR_LE_STR_LEN];
+    int ret = bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+    if (ret < 0)
+    {
+        return;
+    }
+
+    /* Parse advertising data to find device name - with defensive bounds checking */
+    const char *name = NULL;
+    static char dev_name[32]; /* Static to avoid stack issues in interrupt context */
+
+    if (ad != NULL)
+    {
+        struct net_buf_simple_state state;
+        net_buf_simple_save(ad, &state);
+
+        while (ad->len > 1)
+        {
+            uint8_t len = net_buf_simple_pull_u8(ad);
+            if (len == 0 || len > ad->len)
+            {
+                break;
+            }
+
+            uint8_t type = net_buf_simple_pull_u8(ad);
+            len -= 1;
+
+            if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len > 0)
+            {
+                size_t copy_len = MIN(len, sizeof(dev_name) - 1);
+                memcpy(dev_name, ad->data, copy_len);
+                dev_name[copy_len] = '\0';
+                name = dev_name;
+                break;
+            }
+
+            net_buf_simple_pull(ad, len);
+        }
+
+        net_buf_simple_restore(ad, &state);
+    }
+
+    /* Filter for JX_* devices (6 characters after JX_) */
+    if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) >= 9)
+    {
+        LOG_INF("🔍 Found JUXTA device: %s (%s), RSSI: %d", name, addr_str, rssi);
+    }
+    else if (name)
+    {
+        LOG_DBG("🔍 Found device: %s (%s), RSSI: %d", name, addr_str, rssi);
+    }
+    else
+    {
+        LOG_DBG("🔍 Found device: %s (no name), RSSI: %d", addr_str, rssi);
+    }
 }
 
 static bool motion_active(void)
