@@ -7,28 +7,34 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/device.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gap.h>
 #include <zephyr/bluetooth/uuid.h>
-#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/counter.h>
 #include <zephyr/sys/util.h>
-#include <app_version.h>
-#include "ble_service.h"
+#include <zephyr/random/random.h>
 #include "juxta_vitals_nrf52/vitals.h"
+#include "ble_service.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
-/* Device tree definitions */
+/* LED device */
 #define LED_NODE DT_ALIAS(led0)
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 
-/* Vitals context for RTC and battery monitoring */
+/* Vitals context */
 static struct juxta_vitals_ctx vitals_ctx;
 
-/* BLE State Management */
+/* RTC Counter for precise wake-ups */
+static const struct device *rtc_counter = DEVICE_DT_GET(DT_ALIAS(rtc));
+static struct counter_alarm_cfg rtc_alarm_cfg;
+static bool rtc_alarm_set = false;
+
+/* BLE state tracking */
 enum ble_state
 {
     BLE_STATE_IDLE,
@@ -38,20 +44,12 @@ enum ble_state
 };
 
 static enum ble_state current_state = BLE_STATE_IDLE;
-static bool advertising_active = false;
-static bool scanning_active = false;
 
-/* RTC-based timing variables */
-static uint32_t last_adv_timestamp = 0;
-static uint32_t last_scan_timestamp = 0;
+/* BLE burst state tracking */
 static bool in_adv_burst = false;
 static bool in_scan_burst = false;
-
-/* Configuration */
-#define ADV_BURST_DURATION_MS 500
-#define SCAN_BURST_DURATION_MS 500
-#define ADV_INTERVAL_SECONDS 5
-#define SCAN_INTERVAL_SECONDS 15
+static uint32_t last_adv_timestamp = 0;
+static uint32_t last_scan_timestamp = 0;
 
 /* Work queue for state management */
 static struct k_work state_work;
@@ -67,6 +65,119 @@ static int juxta_stop_scanning(void);
 static bool is_time_to_advertise(void);
 static bool is_time_to_scan(void);
 static uint32_t get_rtc_timestamp(void);
+
+/* Configuration */
+#define ADV_BURST_DURATION_MS 250                                /* 250ms advertising bursts per spec */
+#define SCAN_BURST_DURATION_MS CONFIG_JUXTA_BLE_SCAN_DURATION_MS /* Configurable via Kconfig */
+#define ADV_INTERVAL_SECONDS 5                                   /* Every 5 seconds */
+#define SCAN_INTERVAL_SECONDS 15                                 /* Every 10-15 seconds, configurable */
+
+/* Randomization */
+static uint32_t boot_delay_ms = 0; /* Random boot delay to avoid collisions */
+
+/* Motion gating placeholders */
+static bool motion_active(void)
+{
+#if CONFIG_JUXTA_BLE_MOTION_GATING
+    /* TODO: Implement motion detection logic */
+    return true; /* Always active for now */
+#else
+    return true; /* Motion gating disabled */
+#endif
+}
+
+/* Get motion-adjusted intervals */
+static uint32_t get_adv_interval(void)
+{
+    return motion_active() ? ADV_INTERVAL_SECONDS : (ADV_INTERVAL_SECONDS * 3);
+}
+
+static uint32_t get_scan_interval(void)
+{
+    return motion_active() ? SCAN_INTERVAL_SECONDS : (SCAN_INTERVAL_SECONDS * 2);
+}
+
+/* Initialize randomization */
+static void init_randomization(void)
+{
+#if CONFIG_JUXTA_BLE_RANDOMIZATION
+    /* Generate random boot delay (0-1000ms) to avoid lock-step collisions */
+    boot_delay_ms = sys_rand32_get() % 1000;
+    LOG_INF("🎲 Random boot delay: %u ms", boot_delay_ms);
+#else
+    boot_delay_ms = 0;
+    LOG_INF("🎲 Randomization disabled");
+#endif
+}
+
+/* RTC Counter alarm callback */
+static void rtc_alarm_callback(const struct device *dev, uint8_t chan_id, uint32_t ticks, void *user_data)
+{
+    LOG_DBG("⏰ RTC alarm fired - waking up for next BLE action");
+    rtc_alarm_set = false;
+
+    /* Submit work to handle next BLE action */
+    k_work_submit(&state_work);
+}
+
+/* Initialize RTC counter for precise wake-ups */
+static int init_rtc_counter(void)
+{
+    int ret;
+
+    if (!device_is_ready(rtc_counter))
+    {
+        LOG_WRN("RTC counter not ready - using k_sleep() fallback");
+        return -ENODEV;
+    }
+
+    /* Start the counter */
+    ret = counter_start(rtc_counter);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to start RTC counter: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("⏰ RTC counter initialized for precise wake-ups");
+    return 0;
+}
+
+/* Set RTC alarm for next wake-up (for intervals > 1s) */
+static int set_rtc_alarm(uint32_t delay_ms)
+{
+    int ret;
+
+    if (!device_is_ready(rtc_counter) || delay_ms < 1000)
+    {
+        /* Use k_sleep() for short delays or if RTC not available */
+        return -ENODEV;
+    }
+
+    /* Cancel any existing alarm */
+    if (rtc_alarm_set)
+    {
+        counter_cancel_channel_alarm(rtc_counter, 0);
+        rtc_alarm_set = false;
+    }
+
+    /* Configure alarm using the correct API for NCS v3.0.2 */
+    rtc_alarm_cfg.flags = 0;                                                 /* 0 = relative alarm in older Zephyr */
+    rtc_alarm_cfg.ticks = counter_us_to_ticks(rtc_counter, delay_ms * 1000); /* Convert ms to us */
+    rtc_alarm_cfg.callback = rtc_alarm_callback;
+    rtc_alarm_cfg.user_data = NULL;
+
+    ret = counter_set_channel_alarm(rtc_counter, 0, &rtc_alarm_cfg);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set RTC alarm: %d", ret);
+        return ret;
+    }
+
+    rtc_alarm_set = true;
+    LOG_DBG("⏰ RTC alarm set for %u ms", delay_ms);
+    return 0;
+}
 
 /**
  * @brief Get current RTC timestamp in seconds using vitals library
@@ -97,10 +208,10 @@ static bool is_time_to_advertise(void)
     }
 
     uint32_t time_since_adv = current_time - last_adv_timestamp;
-    bool should_adv = (time_since_adv >= ADV_INTERVAL_SECONDS);
+    bool should_adv = (time_since_adv >= get_adv_interval());
 
     LOG_DBG("is_time_to_advertise: current=%u, last_adv=%u, time_since=%u, interval=%u, should_adv=%d",
-            current_time, last_adv_timestamp, time_since_adv, ADV_INTERVAL_SECONDS, should_adv);
+            current_time, last_adv_timestamp, time_since_adv, get_adv_interval(), should_adv);
 
     return should_adv;
 }
@@ -124,10 +235,10 @@ static bool is_time_to_scan(void)
     }
 
     uint32_t time_since_scan = current_time - last_scan_timestamp;
-    bool should_scan = (time_since_scan >= SCAN_INTERVAL_SECONDS);
+    bool should_scan = (time_since_scan >= get_scan_interval());
 
     LOG_DBG("is_time_to_scan: current=%u, last_scan=%u, time_since=%u, interval=%u, should_scan=%d",
-            current_time, last_scan_timestamp, time_since_scan, SCAN_INTERVAL_SECONDS, should_scan);
+            current_time, last_scan_timestamp, time_since_scan, get_scan_interval(), should_scan);
 
     return should_scan;
 }
@@ -221,38 +332,88 @@ static void state_work_handler(struct k_work *work)
     }
     else
     {
-        /* No action needed - calculate time until next action */
+        /* Calculate time until next action */
         uint32_t time_until_adv = 0;
         uint32_t time_until_scan = 0;
 
-        if (current_time > 0)
+        if (!in_adv_burst && !in_scan_burst)
         {
             uint32_t time_since_adv = current_time - last_adv_timestamp;
             uint32_t time_since_scan = current_time - last_scan_timestamp;
 
-            time_until_adv = (time_since_adv >= ADV_INTERVAL_SECONDS) ? 0 : (ADV_INTERVAL_SECONDS - time_since_adv);
-            time_until_scan = (time_since_scan >= SCAN_INTERVAL_SECONDS) ? 0 : (SCAN_INTERVAL_SECONDS - time_since_scan);
+            time_until_adv = (time_since_adv >= get_adv_interval()) ? 0 : (get_adv_interval() - time_since_adv);
+            time_until_scan = (time_since_scan >= get_scan_interval()) ? 0 : (get_scan_interval() - time_since_scan);
         }
 
-        /* Use the minimum time, but at least 1 second */
-        uint32_t sleep_time = 1;
-        if (time_until_adv > 0 && time_until_scan > 0)
+        /* Determine next action and timing */
+        uint32_t next_delay_ms = 0;
+        if (time_until_adv == 0 && time_until_scan == 0)
         {
-            sleep_time = (time_until_adv < time_until_scan) ? time_until_adv : time_until_scan;
+            /* Both due - prioritize scanning */
+            LOG_INF("Starting scan burst (both actions due)");
+            int ret = juxta_start_scanning();
+            if (ret == 0)
+            {
+                in_scan_burst = true;
+                last_scan_timestamp = current_time;
+                k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
+            }
         }
-        else if (time_until_adv > 0)
+        else if (time_until_scan == 0)
         {
-            sleep_time = time_until_adv;
+            /* Scan due - start scanning */
+            LOG_INF("Starting scan burst (scan due)");
+            int ret = juxta_start_scanning();
+            if (ret == 0)
+            {
+                in_scan_burst = true;
+                last_scan_timestamp = current_time;
+                k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
+            }
         }
-        else if (time_until_scan > 0)
+        else if (time_until_adv == 0)
         {
-            sleep_time = time_until_scan;
+            /* Advertising due - start advertising */
+            LOG_INF("Starting advertising burst (advertising due)");
+            int ret = juxta_start_advertising();
+            if (ret == 0)
+            {
+                in_adv_burst = true;
+                last_adv_timestamp = current_time;
+                k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS), K_NO_WAIT);
+            }
         }
+        else
+        {
+            /* Neither due - calculate next wake-up time */
+            next_delay_ms = MIN(time_until_adv, time_until_scan) * 1000; /* Convert to milliseconds */
 
-        LOG_INF("No action needed. Sleeping for %u seconds until next action (adv: %u, scan: %u)",
-                sleep_time, time_until_adv, time_until_scan);
-        LOG_INF("Scheduling next check in %u seconds", sleep_time);
-        k_timer_start(&state_timer, K_SECONDS(sleep_time), K_NO_WAIT);
+            LOG_INF("Sleeping for %u ms until next action", next_delay_ms);
+
+            /* Use RTC alarm for longer intervals, k_sleep() for short intervals */
+            if (next_delay_ms >= 1000 && !rtc_alarm_set)
+            {
+                int ret = set_rtc_alarm(next_delay_ms);
+                if (ret == 0)
+                {
+                    LOG_DBG("Using RTC alarm for %u ms sleep", next_delay_ms);
+                }
+                else
+                {
+                    /* Fallback to k_sleep() */
+                    LOG_DBG("RTC alarm failed, using k_sleep() for %u ms", next_delay_ms);
+                    k_sleep(K_MSEC(next_delay_ms));
+                    k_work_submit(&state_work);
+                }
+            }
+            else
+            {
+                /* Use k_sleep() for short intervals */
+                LOG_DBG("Using k_sleep() for %u ms", next_delay_ms);
+                k_sleep(K_MSEC(next_delay_ms));
+                k_work_submit(&state_work);
+            }
+        }
     }
 }
 
@@ -269,24 +430,37 @@ static void state_timer_callback(struct k_timer *timer)
  */
 static int juxta_start_advertising(void)
 {
-    if (advertising_active)
+    int ret;
+
+    LOG_INF("📢 Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
+
+    /* Use Zephyr's fast interval macros for randomization */
+    struct bt_le_adv_param adv_param = {
+        .id = BT_ID_DEFAULT,
+        .sid = 0,
+        .secondary_max_skip = 0,
+        .options = BT_LE_ADV_OPT_USE_NAME,
+        .interval_min = BT_GAP_ADV_FAST_INT_MIN_2, /* 30ms */
+        .interval_max = BT_GAP_ADV_FAST_INT_MAX_2, /* 50ms */
+        .peer = NULL,
+    };
+
+    /* Add small random delay to avoid collisions */
+    if (boot_delay_ms > 0)
     {
-        return 0; /* Already advertising */
+        k_sleep(K_MSEC(boot_delay_ms));
+        boot_delay_ms = 0; /* Only apply once */
     }
 
-    LOG_INF("📡 Starting BLE advertising...");
-
-    int ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, NULL, 0, NULL, 0);
+    /* Start advertising with connectable mode */
+    ret = bt_le_adv_start(&adv_param, NULL, 0, NULL, 0);
     if (ret < 0)
     {
         LOG_ERR("Advertising failed to start (err %d)", ret);
         return ret;
     }
 
-    advertising_active = true;
-    current_state = BLE_STATE_ADVERTISING;
-    LOG_INF("✅ Advertising started successfully");
-
+    LOG_INF("📢 BLE advertising started as 'JUXTA-BLE' (connectable mode)");
     return 0;
 }
 
@@ -295,7 +469,7 @@ static int juxta_start_advertising(void)
  */
 static int juxta_stop_advertising(void)
 {
-    if (!advertising_active)
+    if (!in_adv_burst)
     {
         return 0; /* Not advertising */
     }
@@ -309,7 +483,7 @@ static int juxta_stop_advertising(void)
         return ret;
     }
 
-    advertising_active = false;
+    in_adv_burst = false;
     current_state = BLE_STATE_IDLE;
     LOG_INF("✅ Advertising stopped successfully");
 
@@ -321,31 +495,27 @@ static int juxta_stop_advertising(void)
  */
 static int juxta_start_scanning(void)
 {
-    if (scanning_active)
-    {
-        return 0; /* Already scanning */
-    }
+    int ret;
 
-    LOG_INF("🔍 Starting BLE scanning...");
+    LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
 
+    /* Use passive scanning mode as specified */
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_PASSIVE,
         .options = BT_LE_SCAN_OPT_NONE,
-        .interval = BT_GAP_SCAN_FAST_INTERVAL,
-        .window = BT_GAP_SCAN_FAST_WINDOW,
+        .interval = 0x0060, /* 60 * 0.625ms = 37.5ms */
+        .window = 0x0060,   /* 60 * 0.625ms = 37.5ms */
+        .timeout = 0,       /* No timeout - we control duration */
     };
 
-    int ret = bt_le_scan_start(&scan_param, NULL);
+    ret = bt_le_scan_start(&scan_param, NULL);
     if (ret < 0)
     {
         LOG_ERR("Scanning failed to start (err %d)", ret);
         return ret;
     }
 
-    scanning_active = true;
-    current_state = BLE_STATE_SCANNING;
-    LOG_INF("✅ Scanning started successfully");
-
+    LOG_INF("🔍 BLE scanning started (passive mode)");
     return 0;
 }
 
@@ -354,7 +524,7 @@ static int juxta_start_scanning(void)
  */
 static int juxta_stop_scanning(void)
 {
-    if (!scanning_active)
+    if (!in_scan_burst)
     {
         return 0; /* Not scanning */
     }
@@ -368,7 +538,7 @@ static int juxta_stop_scanning(void)
         return ret;
     }
 
-    scanning_active = false;
+    in_scan_burst = false;
     current_state = BLE_STATE_IDLE;
     LOG_INF("✅ Scanning stopped successfully");
 
@@ -446,6 +616,7 @@ static int test_rtc_functionality(void)
 
 /**
  * @brief Bluetooth connection callback
+ * TODO: Implement data exchange logic for peer detection
  */
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -455,7 +626,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
         return;
     }
 
-    LOG_INF("🔗 Connected");
+    LOG_INF("🔗 Connected to peer device");
     current_state = BLE_STATE_CONNECTED;
 
     /* Stop advertising and scanning when connected */
@@ -466,22 +637,30 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     /* Turn on LED to indicate connection */
     juxta_ble_led_set(true);
+
+    /* TODO: Implement data exchange:
+     * - Exchange device ID and timestamps
+     * - Sync Unix time if needed
+     * - Disconnect after completion or timeout
+     */
+    LOG_INF("📤 TODO: Implement data exchange with peer");
 }
 
 /**
  * @brief Bluetooth disconnection callback
+ * TODO: Implement reconnection logic if needed
  */
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-    LOG_INF("🔌 Disconnected (reason %u)", reason);
+    LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
     current_state = BLE_STATE_IDLE;
 
     /* Turn off LED */
     juxta_ble_led_set(false);
 
     /* Resume pulsed operation */
-    last_adv_timestamp = get_rtc_timestamp() - ADV_INTERVAL_SECONDS;   /* Force immediate advertising */
-    last_scan_timestamp = get_rtc_timestamp() - SCAN_INTERVAL_SECONDS; /* Force immediate scanning */
+    last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();   /* Force immediate advertising */
+    last_scan_timestamp = get_rtc_timestamp() - get_scan_interval(); /* Force immediate scanning */
 
     /* Start state management */
     k_work_submit(&state_work);
@@ -504,6 +683,8 @@ int main(void)
     LOG_INF("📢 Advertising: %d ms burst every %d seconds", ADV_BURST_DURATION_MS, ADV_INTERVAL_SECONDS);
     LOG_INF("🔍 Scanning: %d ms burst every %d seconds", SCAN_BURST_DURATION_MS, SCAN_INTERVAL_SECONDS);
     LOG_INF("⏰ Power-efficient RTC-based timing for device discovery");
+    LOG_INF("🎲 Randomization: %s", CONFIG_JUXTA_BLE_RANDOMIZATION ? "enabled" : "disabled");
+    LOG_INF("🏃 Motion gating: %s", CONFIG_JUXTA_BLE_MOTION_GATING ? "enabled" : "disabled");
 
     /* Initialize LED */
     if (!device_is_ready(led.port))
@@ -547,14 +728,25 @@ int main(void)
         return ret;
     }
 
+    /* Initialize randomization */
+    init_randomization();
+
+    /* Initialize RTC counter for precise wake-ups */
+    ret = init_rtc_counter();
+    if (ret < 0)
+    {
+        LOG_WRN("RTC counter initialization failed: %d - using k_sleep() fallback", ret);
+        /* Continue with k_sleep() fallback */
+    }
+
     /* Initialize state management */
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
 
     /* Initialize timing variables */
     uint32_t current_time = get_rtc_timestamp();
-    last_adv_timestamp = current_time - ADV_INTERVAL_SECONDS;   /* Force immediate advertising */
-    last_scan_timestamp = current_time - SCAN_INTERVAL_SECONDS; /* Force immediate scanning */
+    last_adv_timestamp = current_time - get_adv_interval();   /* Force immediate advertising */
+    last_scan_timestamp = current_time - get_scan_interval(); /* Force immediate scanning */
 
     /* Start state management */
     k_work_submit(&state_work);

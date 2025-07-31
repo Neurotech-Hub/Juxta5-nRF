@@ -13,6 +13,32 @@ endmenu
 # Source library configurations
 rsource "../../lib/juxta_vitals_nrf52/Kconfig"
 
+# JUXTA BLE Application Configuration
+menu "JUXTA BLE Configuration"
+
+config JUXTA_BLE_SCAN_DURATION_MS
+    int "BLE Scan Duration (milliseconds)"
+    default 1000
+    range 500 2000
+    help
+      Duration of each BLE scanning burst in milliseconds.
+      Range: 500-2000ms, default: 1000ms
+
+config JUXTA_BLE_MOTION_GATING
+    bool "Enable Motion-Based Interval Adjustment"
+    default y
+    help
+      Enable motion gating to adjust BLE intervals based on activity.
+      When disabled, uses fixed intervals regardless of motion.
+
+config JUXTA_BLE_RANDOMIZATION
+    bool "Enable Advertising Randomization"
+    default y
+    help
+      Enable random boot delay to avoid lock-step collisions between devices.
+
+endmenu
+
 module = APP
 module-str = APP
 source "subsys/logging/Kconfig.template.log_config" 
