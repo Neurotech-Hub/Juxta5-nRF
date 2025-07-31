@@ -18,6 +18,7 @@
 #include <zephyr/random/random.h>
 #include "juxta_vitals_nrf52/vitals.h"
 #include "ble_service.h"
+#include <stdio.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -37,6 +38,11 @@ static bool in_scan_burst = false;
 static uint32_t last_adv_timestamp = 0;
 static uint32_t last_scan_timestamp = 0;
 
+/* Simple JUXTA device tracking for single scan burst */
+#define MAX_JUXTA_DEVICES 10
+static char juxta_devices_found[MAX_JUXTA_DEVICES][32];
+static uint8_t juxta_device_count = 0;
+
 static struct k_work state_work;
 static struct k_timer state_timer;
 static struct k_work scan_work;
@@ -48,11 +54,22 @@ static struct k_work scan_work;
 
 static uint32_t boot_delay_ms = 0;
 
+/* Dynamic advertising name based on MAC address */
+static char adv_name[12] = "JX_000000"; /* Initialized placeholder */
+
 /* Forward declarations */
 static int juxta_start_advertising(void);
 static int juxta_stop_advertising(void);
 static int juxta_start_scanning(void);
 static int juxta_stop_scanning(void);
+
+/* Simple JUXTA device tracking functions */
+static void juxta_device_reset(void);
+static bool juxta_device_add_if_new(const char *name);
+static void juxta_device_report_results(void);
+
+/* Dynamic advertising name setup */
+static void setup_dynamic_adv_name(void);
 
 /* Scan callback for BLE scanning */
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad)
@@ -108,10 +125,17 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
         net_buf_simple_restore(ad, &state);
     }
 
-    /* Filter for JX_* devices (6 characters after JX_) */
+    /* Track unique JUXTA devices (6 characters after JX_) */
     if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) >= 9)
     {
-        LOG_INF("🔍 Found JUXTA device: %s (%s), RSSI: %d", name, addr_str, rssi);
+        if (juxta_device_add_if_new(name))
+        {
+            LOG_INF("🔍 Found new JUXTA device: %s (%s), RSSI: %d", name, addr_str, rssi);
+        }
+        else
+        {
+            LOG_DBG("🔍 Duplicate JUXTA device: %s (%s), RSSI: %d", name, addr_str, rssi);
+        }
     }
     else if (name)
     {
@@ -160,6 +184,71 @@ static uint32_t get_rtc_timestamp(void)
     return timestamp;
 }
 
+/* Simple JUXTA device tracking functions */
+static void juxta_device_reset(void)
+{
+    juxta_device_count = 0;
+    memset(juxta_devices_found, 0, sizeof(juxta_devices_found));
+    LOG_DBG("Reset JUXTA device tracking");
+}
+
+static bool juxta_device_add_if_new(const char *name)
+{
+    /* Check if device already in list */
+    for (int i = 0; i < juxta_device_count; i++)
+    {
+        if (strcmp(juxta_devices_found[i], name) == 0)
+        {
+            return false; /* Already found */
+        }
+    }
+
+    /* Add new device if space available */
+    if (juxta_device_count < MAX_JUXTA_DEVICES)
+    {
+        strncpy(juxta_devices_found[juxta_device_count], name, 31);
+        juxta_devices_found[juxta_device_count][31] = '\0';
+        juxta_device_count++;
+        return true; /* New device added */
+    }
+
+    return false; /* List full */
+}
+
+static void juxta_device_report_results(void)
+{
+    if (juxta_device_count == 0)
+    {
+        LOG_INF("🔍 No JUXTA devices found in this scan burst");
+        return;
+    }
+
+    LOG_INF("🔍 Scan burst completed - Found %d unique JUXTA device(s):", juxta_device_count);
+    for (int i = 0; i < juxta_device_count; i++)
+    {
+        LOG_INF("  📱 %s", juxta_devices_found[i]);
+    }
+}
+
+static void setup_dynamic_adv_name(void)
+{
+    bt_addr_le_t addr;
+    size_t count = 1;
+
+    bt_id_get(&addr, &count); // NCS v3.0.2: returns void
+    if (count > 0)
+    {
+        snprintf(adv_name, sizeof(adv_name), "JX_%02X%02X%02X",
+                 addr.a.val[3], addr.a.val[2], addr.a.val[1]);
+        LOG_INF("📛 Set advertising name: %s", adv_name);
+    }
+    else
+    {
+        LOG_ERR("Failed to get BLE MAC address");
+        strcpy(adv_name, "JX_ERROR");
+    }
+}
+
 static bool is_time_to_advertise(void)
 {
     if (in_adv_burst)
@@ -199,6 +288,7 @@ static void state_work_handler(struct k_work *work)
         in_scan_burst = false;
         last_scan_timestamp = current_time;
         LOG_INF("🔍 Scan burst completed at timestamp %u", last_scan_timestamp);
+        juxta_device_report_results(); /* Report unique devices found */
         k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
         return;
     }
@@ -221,6 +311,7 @@ static void state_work_handler(struct k_work *work)
     if (scan_due)
     {
         LOG_INF("Starting scan burst...");
+        juxta_device_reset(); /* Reset tracking for new scan burst */
         if (juxta_start_scanning() == 0)
         {
             in_scan_burst = true;
@@ -282,20 +373,24 @@ static int juxta_start_advertising(void)
         .id = BT_ID_DEFAULT,
         .sid = 0,
         .secondary_max_skip = 0,
-        .options = BT_LE_ADV_OPT_USE_NAME,
+        .options = 0, /* No BT_LE_ADV_OPT_USE_NAME since we're manually setting name */
         .interval_min = BT_GAP_ADV_FAST_INT_MIN_2,
         .interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
         .peer = NULL,
     };
 
-    int ret = bt_le_adv_start(&adv_param, NULL, 0, NULL, 0);
+    /* Set advertising data with dynamic name */
+    struct bt_data adv_data[] = {
+        BT_DATA(BT_DATA_NAME_COMPLETE, adv_name, strlen(adv_name))};
+
+    int ret = bt_le_adv_start(&adv_param, adv_data, ARRAY_SIZE(adv_data), NULL, 0);
     if (ret < 0)
     {
         LOG_ERR("Advertising failed to start (err %d)", ret);
         return ret;
     }
 
-    LOG_INF("📢 BLE advertising started as 'JUXTA-BLE' (connectable mode)");
+    LOG_INF("📢 BLE advertising started as '%s' (connectable mode)", adv_name);
     return 0;
 }
 
@@ -503,6 +598,9 @@ int main(void)
     }
 
     LOG_INF("🔵 Bluetooth initialized");
+
+    /* Set up dynamic advertising name */
+    setup_dynamic_adv_name();
 
     ret = juxta_ble_service_init();
     if (ret < 0)
