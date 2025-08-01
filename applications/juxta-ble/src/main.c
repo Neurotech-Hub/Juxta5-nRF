@@ -130,10 +130,14 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
 
     /* Parse advertising data to find device name - with defensive bounds checking */
     const char *name = NULL;
-    static char dev_name[32]; /* Static to avoid stack issues in interrupt context */
+    char dev_name[32]; /* Non-static to prevent corruption from multiple callbacks */
 
-    if (ad != NULL)
+    /* Zero dev_name before use to ensure clean state */
+    memset(dev_name, 0, sizeof(dev_name));
+
+    if (ad != NULL && ad->len > 0)
     {
+        LOG_DBG("🔍 raw ad->data ptr = %p, len = %u", ad->data, ad->len);
         struct net_buf_simple_state state;
         net_buf_simple_save(ad, &state);
 
@@ -142,18 +146,36 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
             uint8_t len = net_buf_simple_pull_u8(ad);
             if (len == 0 || len > ad->len)
             {
+                LOG_DBG("🔍 Malformed packet: len=%u, ad->len=%u", len, ad->len);
                 break;
             }
 
             uint8_t type = net_buf_simple_pull_u8(ad);
             len -= 1;
 
+            /* Defensive check before net_buf_simple_pull */
+            if (len > ad->len)
+            {
+                LOG_ERR("Pull length exceeds buffer: len=%u, ad->len=%u", len, ad->len);
+                break;
+            }
+
             if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len > 0)
             {
-                size_t copy_len = MIN(len, sizeof(dev_name) - 1);
-                memcpy(dev_name, ad->data, copy_len);
-                dev_name[copy_len] = '\0';
-                name = dev_name;
+                /* Defensive bounds checking before memcpy */
+                if (len < sizeof(dev_name) && ad->len >= len)
+                {
+                    size_t copy_len = MIN(len, sizeof(dev_name) - 1);
+                    memcpy(dev_name, ad->data, copy_len);
+                    dev_name[copy_len] = '\0';
+                    name = dev_name;
+                    LOG_DBG("🔍 Found name: %s (type=%u, len=%u)", dev_name, type, len);
+                }
+                else
+                {
+                    LOG_WRN("⚠️ Invalid dev_name copy: len=%u, ad->len=%u", len, ad->len);
+                    name = NULL; // ensure safe fallback
+                }
                 break;
             }
 
@@ -164,7 +186,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
     }
 
     /* Track unique JUXTA devices (6 characters after JX_) */
-    if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
+    if (name != NULL && strlen(name) >= 3 && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
     {
         // Convert XXXXXX to uint32_t
         uint32_t mac_id = 0;
@@ -176,8 +198,12 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
             }
             else
             {
-                LOG_DBG("�� Duplicate or table full: %s (MAC: %06X)", name, mac_id);
+                LOG_DBG("🔍 Duplicate or table full: %s (MAC: %06X)", name, mac_id);
             }
+        }
+        else
+        {
+            LOG_DBG("🔍 Failed to parse MAC from name: %s", name);
         }
     }
     else if (name)
@@ -365,6 +391,8 @@ static void state_work_handler(struct k_work *work)
         }
 
         uint32_t next_delay_ms = MIN(time_until_adv, time_until_scan) * 1000;
+        /* Add minimum delay to prevent rapid start/stop cycles */
+        next_delay_ms = MAX(next_delay_ms, 100);
         LOG_INF("Sleeping for %u ms until next action", next_delay_ms);
         k_timer_start(&state_timer, K_MSEC(next_delay_ms), K_NO_WAIT);
     }
@@ -446,6 +474,13 @@ static int juxta_start_scanning(void)
     {
         LOG_WRN("Scan already in progress, skipping");
         return 0;
+    }
+
+    /* Additional check to ensure scan is not already active in BLE stack */
+    if (bt_le_scan_stop() == 0)
+    {
+        LOG_DBG("🔍 Stopped existing scan before starting new one");
+        k_sleep(K_MSEC(50)); /* Brief delay to ensure stop completes */
     }
 
     LOG_INF("🔍 About to call bt_le_scan_start with interval=0x%04x, window=0x%04x...",
