@@ -21,18 +21,23 @@
 #include <stdio.h>
 #include <time.h>
 
+typedef enum
+{
+    BLE_STATE_IDLE = 0,
+    BLE_STATE_ADVERTISING,
+    BLE_STATE_SCANNING,
+    BLE_STATE_WAITING
+} ble_state_t;
+
+static ble_state_t ble_state = BLE_STATE_IDLE;
+
+#define BLE_MIN_INTER_BURST_DELAY_MS 100
+
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 #define LED_NODE DT_ALIAS(led0)
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 static struct juxta_vitals_ctx vitals_ctx;
-
-static enum ble_state {
-    BLE_STATE_IDLE,
-    BLE_STATE_ADVERTISING,
-    BLE_STATE_SCANNING,
-    BLE_STATE_CONNECTED
-} current_state = BLE_STATE_IDLE;
 
 static bool in_adv_burst = false;
 static bool in_scan_burst = false;
@@ -56,56 +61,20 @@ static void juxta_scan_table_reset(void)
     memset(juxta_scan_table, 0, sizeof(juxta_scan_table));
 }
 
-static bool juxta_scan_table_add(uint32_t mac_id, int8_t rssi)
-{
-    /* Validate inputs */
-    if (mac_id == 0)
-    {
-        LOG_WRN("⚠️ Cannot add MAC ID 0 to scan table");
-        return false;
-    }
-
-    /* Check bounds before accessing array */
-    if (juxta_scan_count >= MAX_JUXTA_DEVICES)
-    {
-        LOG_ERR("⚠️ Scan table full (%u/%u), cannot add MAC %06X",
-                juxta_scan_count, MAX_JUXTA_DEVICES, mac_id);
-        return false;
-    }
-
-    /* Check for duplicates */
-    for (uint8_t i = 0; i < juxta_scan_count; i++)
-    {
-        if (juxta_scan_table[i].mac_id == mac_id)
-        {
-            LOG_DBG("🔄 Duplicate MAC %06X found at index %u", mac_id, i);
-            return false; // Already present
-        }
-    }
-
-    /* Safe to add new entry */
-    juxta_scan_table[juxta_scan_count].mac_id = mac_id;
-    juxta_scan_table[juxta_scan_count].rssi = rssi;
-    juxta_scan_count++;
-
-    LOG_DBG("✅ Added MAC %06X (RSSI: %d) at index %u", mac_id, rssi, juxta_scan_count - 1);
-    return true;
-}
-
 static void juxta_scan_table_print_and_clear(void)
 {
     LOG_INF("==== JUXTA SCAN TABLE (simulated write) ====");
-    for (uint8_t i = 0; i < juxta_scan_count; i++)
+    for (uint8_t i = 0; i < juxta_scan_count && i < MAX_JUXTA_DEVICES; i++)
     {
         LOG_INF("  MAC: %06X, RSSI: %d", juxta_scan_table[i].mac_id, juxta_scan_table[i].rssi);
     }
     LOG_INF("==== END OF TABLE ====");
-    juxta_scan_table_reset();
+    juxta_scan_count = 0;
+    memset(juxta_scan_table, 0, sizeof(juxta_scan_table));
 }
 
 static struct k_work state_work;
 static struct k_timer state_timer;
-static struct k_work minute_work; /* Separate work item for minute-of-day processing */
 
 #define ADV_BURST_DURATION_MS 250
 #define SCAN_BURST_DURATION_MS 500 /* Reduced from 1000ms to 500ms for testing */
@@ -126,114 +95,55 @@ static int juxta_stop_scanning(void);
 /* Dynamic advertising name setup */
 static void setup_dynamic_adv_name(void);
 
+#define SCAN_EVENT_QUEUE_SIZE 16
+
+typedef struct
+{
+    uint32_t mac_id;
+    int8_t rssi;
+} scan_event_t;
+
+K_MSGQ_DEFINE(scan_event_q, sizeof(scan_event_t), SCAN_EVENT_QUEUE_SIZE, 4);
+
 /* Scan callback for BLE scanning */
 __no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad)
 {
     ARG_UNUSED(adv_type);
-
     if (!addr || !ad || ad->len == 0)
     {
-        LOG_DBG("⚠️ Invalid scan callback input");
         return;
     }
-
-    char addr_str[BT_ADDR_LE_STR_LEN];
-    if (bt_addr_le_to_str(addr, addr_str, sizeof(addr_str)) < 0)
-    {
-        LOG_DBG("⚠️ Failed to format address");
-        return;
-    }
-
     const char *name = NULL;
     char dev_name[32] = {0};
     struct net_buf_simple_state state;
     net_buf_simple_save(ad, &state);
-
     while (ad->len > 1)
     {
         uint8_t len = net_buf_simple_pull_u8(ad);
         if (len == 0 || len > ad->len)
-        {
-            LOG_WRN("⚠️ Bad AD field len=%u (ad->len=%u)", len, ad->len);
             break;
-        }
-
         uint8_t type = net_buf_simple_pull_u8(ad);
         len--;
-
         if (len > ad->len)
-        {
-            LOG_WRN("⚠️ Buffer overflow risk (len=%u > ad->len=%u)", len, ad->len);
             break;
-        }
-
         if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len < sizeof(dev_name))
         {
             memset(dev_name, 0, sizeof(dev_name));
             memcpy(dev_name, ad->data, len);
             dev_name[len] = '\0';
             name = dev_name;
-            LOG_DBG("🔍 Parsed device name: %s (len=%u, type=0x%02x)", dev_name, len, type);
         }
-
         net_buf_simple_pull(ad, len);
     }
-
     net_buf_simple_restore(ad, &state);
-
     if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
     {
         uint32_t mac_id = 0;
-        if (sscanf(name + 3, "%06X", &mac_id) == 1)
+        if (sscanf(name + 3, "%06X", &mac_id) == 1 && mac_id != 0)
         {
-            /* Check scan table bounds before adding */
-            if (juxta_scan_count >= MAX_JUXTA_DEVICES)
-            {
-                LOG_ERR("⚠️ Scan table full (%u/%u), cannot add MAC %06X",
-                        juxta_scan_count, MAX_JUXTA_DEVICES, mac_id);
-                return;
-            }
-
-            /* Validate mac_id before using */
-            if (mac_id == 0)
-            {
-                LOG_WRN("⚠️ Invalid MAC ID (0) from name: %s", name);
-                return;
-            }
-
-            if (juxta_scan_table_add(mac_id, rssi))
-            {
-                /* Sanity check name and mac_id before logging */
-                if (name && mac_id != 0)
-                {
-                    /* Use static buffer for logging to prevent null pointer issues */
-                    char name_buf[10] = {0};
-                    strncpy(name_buf, name, sizeof(name_buf) - 1);
-                    LOG_INF("🔍 Added to scan table: %s (MAC: %06X, RSSI: %d, count: %u)",
-                            name_buf, mac_id, rssi, juxta_scan_count);
-                }
-                else
-                {
-                    LOG_ERR("❌ Invalid data for logging: name=%p, mac_id=%06X", name, mac_id);
-                }
-            }
-            else
-            {
-                LOG_DBG("🛑 Duplicate MAC %06X or table full (count: %u)", mac_id, juxta_scan_count);
-            }
+            scan_event_t evt = {.mac_id = mac_id, .rssi = rssi};
+            (void)k_msgq_put(&scan_event_q, &evt, K_NO_WAIT);
         }
-        else
-        {
-            LOG_WRN("⚠️ Failed to parse MAC from name: %s", name);
-        }
-    }
-    else if (name)
-    {
-        LOG_DBG("🔍 Ignored device name: %s", name);
-    }
-    else
-    {
-        LOG_DBG("🔍 No name in advertising from %s, RSSI: %d", addr_str, rssi);
     }
 }
 
@@ -313,20 +223,55 @@ static bool is_time_to_scan(void)
     return (current_time - last_scan_timestamp) >= get_scan_interval();
 }
 
+// Harden timer/event scheduling
+// Only post events to the workqueue from timer callbacks
+static enum {
+    EVENT_NONE = 0,
+    EVENT_TIMER_EXPIRED,
+} state_event;
+
 static void state_timer_callback(struct k_timer *timer)
 {
+    // Only post an event, do not call BLE APIs or change state here
+    state_event = EVENT_TIMER_EXPIRED;
     k_work_submit(&state_work);
 }
 
-static void minute_work_handler(struct k_work *work)
+static void process_scan_events(void)
 {
-    /* This runs in thread context, safe to call gmtime_r-dependent functions */
-    uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
-    if (current_minute != last_logged_minute)
+    scan_event_t evt;
+    while (k_msgq_get(&scan_event_q, &evt, K_NO_WAIT) == 0)
     {
-        juxta_scan_table_print_and_clear();
-        last_logged_minute = current_minute;
-        LOG_INF("🕐 Minute of day changed to: %u", current_minute);
+        if (evt.mac_id == 0)
+        {
+            LOG_WRN("⚠️ Ignoring scan event with MAC ID 0");
+            continue;
+        }
+        if (juxta_scan_count >= MAX_JUXTA_DEVICES)
+        {
+            LOG_ERR("⚠️ Scan table full (%u/%u), cannot add MAC %06X", juxta_scan_count, MAX_JUXTA_DEVICES, evt.mac_id);
+            continue;
+        }
+        bool found = false;
+        for (uint8_t i = 0; i < juxta_scan_count; i++)
+        {
+            if (juxta_scan_table[i].mac_id == evt.mac_id)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            juxta_scan_table[juxta_scan_count].mac_id = evt.mac_id;
+            juxta_scan_table[juxta_scan_count].rssi = evt.rssi;
+            LOG_INF("🔍 Added to scan table: MAC: %06X, RSSI: %d, count: %u", evt.mac_id, evt.rssi, juxta_scan_count + 1);
+            juxta_scan_count++;
+        }
+        else
+        {
+            LOG_DBG("🛑 Duplicate MAC %06X (ignored)", evt.mac_id);
+        }
     }
 }
 
@@ -334,116 +279,113 @@ static void state_work_handler(struct k_work *work)
 {
     uint32_t current_time = get_rtc_timestamp();
 
-    // Defer minute-of-day processing to thread context
-    k_work_submit(&minute_work);
+    // Process all scan events from the queue
+    process_scan_events();
 
-    LOG_INF("State work handler: current_time=%u, in_adv_burst=%d, in_scan_burst=%d",
-            current_time, in_adv_burst, in_scan_burst);
-
-    if (in_scan_burst)
+    // Minute-of-day logging and scan table clearing
+    uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
+    if (current_minute != last_logged_minute)
     {
-        LOG_INF("Ending scan burst...");
-        int err = juxta_stop_scanning();
-        if (err == 0)
-        {
-            in_scan_burst = false;
-            last_scan_timestamp = current_time;
-            LOG_INF("🔍 Scan burst completed at timestamp %u", last_scan_timestamp);
-            /* Add delay after scanning to prevent MPSL ASSERT */
-            k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
-        }
-        else
-        {
-            LOG_ERR("Failed to stop scan burst, skipping transition");
-        }
-        return;
-    }
-    if (in_adv_burst)
-    {
-        LOG_INF("Ending advertising burst...");
-        int err = juxta_stop_advertising();
-        if (err == 0)
-        {
-            in_adv_burst = false;
-            last_adv_timestamp = current_time;
-            LOG_INF("📡 Advertising burst completed at timestamp %u", last_adv_timestamp);
-            /* Add delay after advertising to prevent MPSL ASSERT */
-            k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
-        }
-        else
-        {
-            LOG_ERR("Failed to stop advertising burst, skipping transition");
-        }
-        return;
+        juxta_scan_table_print_and_clear();
+        last_logged_minute = current_minute;
+        LOG_INF("🕐 Minute of day changed to: %u", current_minute);
     }
 
-    bool scan_due = is_time_to_scan();
-    bool adv_due = is_time_to_advertise();
-
-    LOG_INF("Checking for new bursts: scan_due=%d, adv_due=%d", scan_due, adv_due);
-
-    if (scan_due)
+    // Only handle BLE state transitions if triggered by timer event
+    if (state_event == EVENT_TIMER_EXPIRED)
     {
-        /* Additional guard to prevent duplicate scan operations */
-        if (in_scan_burst)
+        state_event = EVENT_NONE;
+
+        LOG_INF("State work handler: current_time=%u, ble_state=%d",
+                current_time, ble_state);
+
+        if (ble_state == BLE_STATE_SCANNING)
         {
-            LOG_WRN("⚠️ Scan already in progress, skipping scan burst");
+            LOG_INF("Ending scan burst...");
+            int err = juxta_stop_scanning();
+            if (err == 0)
+            {
+                ble_state = BLE_STATE_WAITING;
+                last_scan_timestamp = current_time;
+                LOG_INF("🔍 Scan burst completed at timestamp %u", last_scan_timestamp);
+                k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
+            }
+            else
+            {
+                LOG_ERR("Failed to stop scan burst, skipping transition");
+            }
+            return;
+        }
+        if (ble_state == BLE_STATE_ADVERTISING)
+        {
+            LOG_INF("Ending advertising burst...");
+            int err = juxta_stop_advertising();
+            if (err == 0)
+            {
+                ble_state = BLE_STATE_WAITING;
+                last_adv_timestamp = current_time;
+                LOG_INF("📡 Advertising burst completed at timestamp %u", last_adv_timestamp);
+                k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
+            }
+            else
+            {
+                LOG_ERR("Failed to stop advertising burst, skipping transition");
+            }
             return;
         }
 
-        LOG_INF("Starting scan burst...");
-        juxta_scan_table_reset(); /* Reset tracking for new scan burst */
+        bool scan_due = is_time_to_scan();
+        bool adv_due = is_time_to_advertise();
 
-        /* Set flag before calling BLE API to prevent race conditions */
-        in_scan_burst = true;
+        LOG_INF("Checking for new bursts: scan_due=%d, adv_due=%d", scan_due, adv_due);
 
-        if (juxta_start_scanning() == 0)
+        if (scan_due && ble_state == BLE_STATE_IDLE)
         {
-            LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
-            k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
-        }
-        else
-        {
-            /* Reset flag if scan failed */
-            in_scan_burst = false;
-            LOG_ERR("Scan failed, retrying in 1 second");
-            k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
-        }
-    }
-    else if (adv_due)
-    {
-        /* Additional guard to prevent duplicate advertising operations */
-        if (in_adv_burst)
-        {
-            LOG_WRN("⚠️ Advertising already in progress, skipping advertising burst");
+            LOG_INF("Starting scan burst...");
+            juxta_scan_table_reset();
+            ble_state = BLE_STATE_SCANNING;
+            int err = juxta_start_scanning();
+            if (err == 0)
+            {
+                LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
+                k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
+            }
+            else
+            {
+                ble_state = BLE_STATE_IDLE;
+                LOG_ERR("Scan failed, retrying in 1 second");
+                k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
+            }
             return;
         }
-
-        LOG_INF("Starting advertising burst...");
-
-        /* Set flag before calling BLE API to prevent race conditions */
-        in_adv_burst = true;
-
-        if (juxta_start_advertising() == 0)
+        if (adv_due && ble_state == BLE_STATE_IDLE)
         {
-            LOG_INF("📡 Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
-            /* Add delay after advertising to prevent MPSL ASSERT */
-            k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS + 100), K_NO_WAIT);
+            LOG_INF("Starting advertising burst...");
+            ble_state = BLE_STATE_ADVERTISING;
+            int err = juxta_start_advertising();
+            if (err == 0)
+            {
+                LOG_INF("📡 Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
+                k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS), K_NO_WAIT);
+            }
+            else
+            {
+                ble_state = BLE_STATE_IDLE;
+                LOG_ERR("Advertising failed, retrying in 1 second");
+                k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
+            }
+            return;
         }
-        else
+        if (ble_state == BLE_STATE_WAITING)
         {
-            /* Reset flag if advertising failed */
-            in_adv_burst = false;
-            LOG_ERR("Advertising failed, retrying in 1 second");
-            k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
+            LOG_INF("Transitioning from WAITING to IDLE");
+            ble_state = BLE_STATE_IDLE;
         }
-    }
-    else
-    {
+
         uint32_t time_until_adv = 0;
         uint32_t time_until_scan = 0;
 
-        if (!in_adv_burst && !in_scan_burst)
+        if (ble_state == BLE_STATE_IDLE)
         {
             uint32_t time_since_adv = current_time - last_adv_timestamp;
             uint32_t time_since_scan = current_time - last_scan_timestamp;
@@ -457,11 +399,11 @@ static void state_work_handler(struct k_work *work)
         next_delay_ms = MAX(next_delay_ms, 100);
         LOG_INF("Sleeping for %u ms until next action", next_delay_ms);
         k_timer_start(&state_timer, K_MSEC(next_delay_ms), K_NO_WAIT);
-    }
 
-    uint32_t ts = juxta_vitals_get_timestamp(&vitals_ctx);
-    uint32_t uptime = k_uptime_get_32();
-    LOG_INF("Timestamp: %u, Uptime(ms): %u", ts, uptime);
+        uint32_t ts = juxta_vitals_get_timestamp(&vitals_ctx);
+        uint32_t uptime = k_uptime_get_32();
+        LOG_INF("Timestamp: %u, Uptime(ms): %u", ts, uptime);
+    }
 }
 
 static int juxta_start_advertising(void)
@@ -501,7 +443,7 @@ static int juxta_start_advertising(void)
 
 static int juxta_stop_advertising(void)
 {
-    if (!in_adv_burst)
+    if (ble_state != BLE_STATE_ADVERTISING)
     {
         LOG_WRN("❗ Attempted to stop advertising when not in burst");
         return -1;
@@ -515,7 +457,7 @@ static int juxta_stop_advertising(void)
         return ret;
     }
 
-    current_state = BLE_STATE_IDLE;
+    ble_state = BLE_STATE_WAITING;
     LOG_INF("✅ Advertising stopped successfully");
     return 0;
 }
@@ -558,7 +500,7 @@ static int juxta_start_scanning(void)
 
 static int juxta_stop_scanning(void)
 {
-    if (!in_scan_burst)
+    if (ble_state != BLE_STATE_SCANNING)
     {
         LOG_WRN("❗ Attempted to stop scan when not in burst");
         return -1;
@@ -572,7 +514,7 @@ static int juxta_stop_scanning(void)
         return ret;
     }
 
-    current_state = BLE_STATE_IDLE;
+    ble_state = BLE_STATE_WAITING;
     LOG_INF("✅ Scanning stopped successfully");
     return 0;
 }
@@ -647,7 +589,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
     }
 
     LOG_INF("🔗 Connected to peer device");
-    current_state = BLE_STATE_CONNECTED;
+    ble_state = BLE_STATE_IDLE;
 
     juxta_stop_advertising();
     juxta_stop_scanning();
@@ -661,7 +603,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
-    current_state = BLE_STATE_IDLE;
+    ble_state = BLE_STATE_IDLE;
     juxta_ble_led_set(false);
 
     last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
@@ -740,7 +682,6 @@ int main(void)
     init_randomization();
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
-    k_work_init(&minute_work, minute_work_handler); /* Initialize minute-of-day work queue */
 
     uint32_t now = get_rtc_timestamp();
     last_adv_timestamp = now - get_adv_interval();
@@ -748,6 +689,7 @@ int main(void)
     last_logged_minute = 0xFFFF; // Initialize last_logged_minute
 
     k_work_submit(&state_work);
+    k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
 
     LOG_INF("✅ JUXTA BLE Application started successfully");
 
