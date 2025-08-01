@@ -536,14 +536,15 @@ uint32_t juxta_vitals_get_file_date_yymmdd(struct juxta_vitals_ctx *ctx)
 
 uint16_t juxta_vitals_get_minute_of_day(struct juxta_vitals_ctx *ctx)
 {
-    if (!ctx || !ctx->initialized || ctx->current_timestamp == 0)
-    {
+    if (!ctx || !ctx->initialized)
         return 0;
-    }
 
-    /* Convert timestamp to minutes since midnight */
+    uint32_t live_timestamp = juxta_vitals_get_timestamp(ctx);
+    if (live_timestamp == 0)
+        return 0;
+
     struct tm timeinfo;
-    time_t time_sec = (time_t)ctx->current_timestamp;
+    time_t time_sec = (time_t)live_timestamp;
     gmtime_r(&time_sec, &timeinfo);
 
     return (uint16_t)(timeinfo.tm_hour * 60 + timeinfo.tm_min);

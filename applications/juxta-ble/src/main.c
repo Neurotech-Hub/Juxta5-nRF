@@ -19,6 +19,7 @@
 #include "juxta_vitals_nrf52/vitals.h"
 #include "ble_service.h"
 #include <stdio.h>
+#include <time.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -39,9 +40,51 @@ static uint32_t last_adv_timestamp = 0;
 static uint32_t last_scan_timestamp = 0;
 
 /* Simple JUXTA device tracking for single scan burst */
-#define MAX_JUXTA_DEVICES 10
-static char juxta_devices_found[MAX_JUXTA_DEVICES][32];
-static uint8_t juxta_device_count = 0;
+#define MAX_JUXTA_DEVICES 64
+static uint16_t last_logged_minute = 0xFFFF;
+typedef struct
+{
+    uint32_t mac_id;
+    int8_t rssi;
+} juxta_scan_entry_t;
+static juxta_scan_entry_t juxta_scan_table[MAX_JUXTA_DEVICES];
+static uint8_t juxta_scan_count = 0;
+
+static void juxta_scan_table_reset(void)
+{
+    juxta_scan_count = 0;
+    memset(juxta_scan_table, 0, sizeof(juxta_scan_table));
+}
+
+static bool juxta_scan_table_add(uint32_t mac_id, int8_t rssi)
+{
+    for (uint8_t i = 0; i < juxta_scan_count; i++)
+    {
+        if (juxta_scan_table[i].mac_id == mac_id)
+        {
+            return false; // Already present
+        }
+    }
+    if (juxta_scan_count < MAX_JUXTA_DEVICES)
+    {
+        juxta_scan_table[juxta_scan_count].mac_id = mac_id;
+        juxta_scan_table[juxta_scan_count].rssi = rssi;
+        juxta_scan_count++;
+        return true;
+    }
+    return false; // Table full
+}
+
+static void juxta_scan_table_print_and_clear(void)
+{
+    LOG_INF("==== JUXTA SCAN TABLE (simulated write) ====");
+    for (uint8_t i = 0; i < juxta_scan_count; i++)
+    {
+        LOG_INF("  MAC: %06X, RSSI: %d", juxta_scan_table[i].mac_id, juxta_scan_table[i].rssi);
+    }
+    LOG_INF("==== END OF TABLE ====");
+    juxta_scan_table_reset();
+}
 
 static struct k_work state_work;
 static struct k_timer state_timer;
@@ -62,11 +105,6 @@ static int juxta_start_advertising(void);
 static int juxta_stop_advertising(void);
 static int juxta_start_scanning(void);
 static int juxta_stop_scanning(void);
-
-/* Simple JUXTA device tracking functions */
-static void juxta_device_reset(void);
-static bool juxta_device_add_if_new(const char *name);
-static void juxta_device_report_results(void);
 
 /* Dynamic advertising name setup */
 static void setup_dynamic_adv_name(void);
@@ -126,15 +164,20 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
     }
 
     /* Track unique JUXTA devices (6 characters after JX_) */
-    if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) >= 9)
+    if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
     {
-        if (juxta_device_add_if_new(name))
+        // Convert XXXXXX to uint32_t
+        uint32_t mac_id = 0;
+        if (sscanf(name + 3, "%06X", &mac_id) == 1)
         {
-            LOG_INF("🔍 Found new JUXTA device: %s (%s), RSSI: %d", name, addr_str, rssi);
-        }
-        else
-        {
-            LOG_DBG("🔍 Duplicate JUXTA device: %s (%s), RSSI: %d", name, addr_str, rssi);
+            if (juxta_scan_table_add(mac_id, rssi))
+            {
+                LOG_INF("🔍 Added to scan table: %s (MAC: %06X, RSSI: %d)", name, mac_id, rssi);
+            }
+            else
+            {
+                LOG_DBG("�� Duplicate or table full: %s (MAC: %06X)", name, mac_id);
+            }
         }
     }
     else if (name)
@@ -182,52 +225,6 @@ static uint32_t get_rtc_timestamp(void)
     uint32_t timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
     LOG_DBG("Timestamp: %u", timestamp);
     return timestamp;
-}
-
-/* Simple JUXTA device tracking functions */
-static void juxta_device_reset(void)
-{
-    juxta_device_count = 0;
-    memset(juxta_devices_found, 0, sizeof(juxta_devices_found));
-    LOG_DBG("Reset JUXTA device tracking");
-}
-
-static bool juxta_device_add_if_new(const char *name)
-{
-    /* Check if device already in list */
-    for (int i = 0; i < juxta_device_count; i++)
-    {
-        if (strcmp(juxta_devices_found[i], name) == 0)
-        {
-            return false; /* Already found */
-        }
-    }
-
-    /* Add new device if space available */
-    if (juxta_device_count < MAX_JUXTA_DEVICES)
-    {
-        strncpy(juxta_devices_found[juxta_device_count], name, 31);
-        juxta_devices_found[juxta_device_count][31] = '\0';
-        juxta_device_count++;
-        return true; /* New device added */
-    }
-
-    return false; /* List full */
-}
-
-static void juxta_device_report_results(void)
-{
-    if (juxta_device_count == 0)
-    {
-        LOG_INF("🔍 No JUXTA devices found in this scan burst");
-        return;
-    }
-
-    LOG_INF("🔍 Scan burst completed - Found %d unique JUXTA device(s):", juxta_device_count);
-    for (int i = 0; i < juxta_device_count; i++)
-    {
-        LOG_INF("  📱 %s", juxta_devices_found[i]);
-    }
 }
 
 static void setup_dynamic_adv_name(void)
@@ -278,28 +275,42 @@ static void state_work_handler(struct k_work *work)
 {
     uint32_t current_time = get_rtc_timestamp();
 
+    // RTC-based minute-of-day scan table logging
+    uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
+    if (current_minute != last_logged_minute)
+    {
+        juxta_scan_table_print_and_clear();
+        last_logged_minute = current_minute;
+    }
+
     LOG_INF("State work handler: current_time=%u, in_adv_burst=%d, in_scan_burst=%d",
             current_time, in_adv_burst, in_scan_burst);
 
     if (in_scan_burst)
     {
         LOG_INF("Ending scan burst...");
-        juxta_stop_scanning();
-        in_scan_burst = false;
-        last_scan_timestamp = current_time;
-        LOG_INF("🔍 Scan burst completed at timestamp %u", last_scan_timestamp);
-        juxta_device_report_results(); /* Report unique devices found */
-        k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
+        int err = juxta_stop_scanning();
+        if (err == 0)
+        {
+            in_scan_burst = false;
+            last_scan_timestamp = current_time;
+            LOG_INF("🔍 Scan burst completed at timestamp %u", last_scan_timestamp);
+            juxta_scan_table_print_and_clear(); /* Report unique devices found */
+            k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
+        }
         return;
     }
     if (in_adv_burst)
     {
         LOG_INF("Ending advertising burst...");
-        juxta_stop_advertising();
-        in_adv_burst = false;
-        last_adv_timestamp = current_time;
-        LOG_INF("📡 Advertising burst completed at timestamp %u", last_adv_timestamp);
-        k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
+        int err = juxta_stop_advertising();
+        if (err == 0)
+        {
+            in_adv_burst = false;
+            last_adv_timestamp = current_time;
+            LOG_INF("📡 Advertising burst completed at timestamp %u", last_adv_timestamp);
+            k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
+        }
         return;
     }
 
@@ -311,7 +322,7 @@ static void state_work_handler(struct k_work *work)
     if (scan_due)
     {
         LOG_INF("Starting scan burst...");
-        juxta_device_reset(); /* Reset tracking for new scan burst */
+        juxta_scan_table_reset(); /* Reset tracking for new scan burst */
         if (juxta_start_scanning() == 0)
         {
             in_scan_burst = true;
@@ -357,6 +368,11 @@ static void state_work_handler(struct k_work *work)
         LOG_INF("Sleeping for %u ms until next action", next_delay_ms);
         k_timer_start(&state_timer, K_MSEC(next_delay_ms), K_NO_WAIT);
     }
+
+    uint32_t ts = juxta_vitals_get_timestamp(&vitals_ctx);
+    uint16_t min = juxta_vitals_get_minute_of_day(&vitals_ctx);
+    uint32_t uptime = k_uptime_get_32();
+    LOG_INF("Timestamp: %u, Minute of day: %u, Uptime(ms): %u", ts, min, uptime);
 }
 
 static int juxta_start_advertising(void)
@@ -407,7 +423,6 @@ static int juxta_stop_advertising(void)
         return ret;
     }
 
-    in_adv_burst = false;
     current_state = BLE_STATE_IDLE;
     LOG_INF("✅ Advertising stopped successfully");
     return 0;
@@ -462,7 +477,6 @@ static int juxta_stop_scanning(void)
         return ret;
     }
 
-    in_scan_burst = false;
     current_state = BLE_STATE_IDLE;
     LOG_INF("✅ Scanning stopped successfully");
     return 0;
@@ -499,6 +513,10 @@ static int test_rtc_functionality(void)
         LOG_ERR("Failed to initialize vitals library: %d", ret);
         return ret;
     }
+
+    // Set RTC/Unix timestamp for correct minute-of-day tracking
+    // Example: 2024-01-20 12:00:00 UTC (1705752000)
+    juxta_vitals_set_timestamp(&vitals_ctx, 1705752000);
 
     uint32_t initial_timestamp = 1705752000;
     ret = juxta_vitals_set_timestamp(&vitals_ctx, initial_timestamp);
@@ -566,6 +584,14 @@ int main(void)
     int ret;
 
     LOG_INF("🚀 Starting JUXTA BLE Application");
+
+    struct tm timeinfo;
+    time_t t = 1705752030; // 2024-01-20 12:00:30 UTC
+    gmtime_r(&t, &timeinfo);
+    LOG_INF("Test gmtime_r: %04d-%02d-%02d %02d:%02d:%02d",
+            timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+            timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+
     LOG_INF("📋 Board: %s", CONFIG_BOARD);
     LOG_INF("📟 Device: %s", CONFIG_SOC);
     LOG_INF("📱 Device will use k_timer-based pulsed advertising and scanning for device discovery");
@@ -624,6 +650,7 @@ int main(void)
     uint32_t now = get_rtc_timestamp();
     last_adv_timestamp = now - get_adv_interval();
     last_scan_timestamp = now - get_scan_interval();
+    last_logged_minute = 0xFFFF; // Initialize last_logged_minute
 
     k_work_submit(&state_work);
 
