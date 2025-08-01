@@ -466,21 +466,18 @@ static int juxta_start_scanning(void)
 {
     LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
 
-    /* Use the most basic scan parameters possible */
+    /* Use more conservative scan parameters for stability */
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_PASSIVE,
         .options = BT_LE_SCAN_OPT_NONE,
-        .interval = 0x0010, /* Very fast scan interval */
-        .window = 0x0010,   /* Very short scan window */
+        .interval = 0x0040, // 40ms
+        .window = 0x0030,   // 30ms
         .timeout = 0,
     };
 
-    /* Additional check to ensure scan is not already active in BLE stack */
-    if (bt_le_scan_stop() == 0)
-    {
-        LOG_DBG("🔍 Stopped existing scan before starting new one");
-        k_sleep(K_MSEC(50)); /* Brief delay to ensure stop completes */
-    }
+    /* Ensure advertising is fully stopped and add a longer delay before scanning */
+    bt_le_adv_stop();
+    k_sleep(K_MSEC(200)); // Increased delay for radio stability
 
     LOG_INF("🔍 About to call bt_le_scan_start with interval=0x%04x, window=0x%04x...",
             scan_param.interval, scan_param.window);
