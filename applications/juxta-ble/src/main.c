@@ -108,43 +108,43 @@ K_MSGQ_DEFINE(scan_event_q, sizeof(scan_event_t), SCAN_EVENT_QUEUE_SIZE, 4);
 /* Scan callback for BLE scanning */
 __no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad)
 {
-    ARG_UNUSED(adv_type);
-    if (!addr || !ad || ad->len == 0)
-    {
-        return;
-    }
-    const char *name = NULL;
-    char dev_name[32] = {0};
-    struct net_buf_simple_state state;
-    net_buf_simple_save(ad, &state);
-    while (ad->len > 1)
-    {
-        uint8_t len = net_buf_simple_pull_u8(ad);
-        if (len == 0 || len > ad->len)
-            break;
-        uint8_t type = net_buf_simple_pull_u8(ad);
-        len--;
-        if (len > ad->len)
-            break;
-        if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len < sizeof(dev_name))
-        {
-            memset(dev_name, 0, sizeof(dev_name));
-            memcpy(dev_name, ad->data, len);
-            dev_name[len] = '\0';
-            name = dev_name;
-        }
-        net_buf_simple_pull(ad, len);
-    }
-    net_buf_simple_restore(ad, &state);
-    if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
-    {
-        uint32_t mac_id = 0;
-        if (sscanf(name + 3, "%06X", &mac_id) == 1 && mac_id != 0)
-        {
-            scan_event_t evt = {.mac_id = mac_id, .rssi = rssi};
-            (void)k_msgq_put(&scan_event_q, &evt, K_NO_WAIT);
-        }
-    }
+    // ARG_UNUSED(adv_type);
+    // if (!addr || !ad || ad->len == 0)
+    // {
+    //     return;
+    // }
+    // const char *name = NULL;
+    // char dev_name[32] = {0};
+    // struct net_buf_simple_state state;
+    // net_buf_simple_save(ad, &state);
+    // while (ad->len > 1)
+    // {
+    //     uint8_t len = net_buf_simple_pull_u8(ad);
+    //     if (len == 0 || len > ad->len)
+    //         break;
+    //     uint8_t type = net_buf_simple_pull_u8(ad);
+    //     len--;
+    //     if (len > ad->len)
+    //         break;
+    //     if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len < sizeof(dev_name))
+    //     {
+    //         memset(dev_name, 0, sizeof(dev_name));
+    //         memcpy(dev_name, ad->data, len);
+    //         dev_name[len] = '\0';
+    //         name = dev_name;
+    //     }
+    //     net_buf_simple_pull(ad, len);
+    // }
+    // net_buf_simple_restore(ad, &state);
+    // if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
+    // {
+    //     uint32_t mac_id = 0;
+    //     if (sscanf(name + 3, "%06X", &mac_id) == 1 && mac_id != 0)
+    //     {
+    //         scan_event_t evt = {.mac_id = mac_id, .rssi = rssi};
+    //         (void)k_msgq_put(&scan_event_q, &evt, K_NO_WAIT);
+    //     }
+    // }
 }
 
 static bool motion_active(void)
