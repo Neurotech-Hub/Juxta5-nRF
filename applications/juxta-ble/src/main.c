@@ -145,6 +145,10 @@ __no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uin
     //         (void)k_msgq_put(&scan_event_q, &evt, K_NO_WAIT);
     //     }
     // }
+    ARG_UNUSED(addr);
+    ARG_UNUSED(rssi);
+    ARG_UNUSED(adv_type);
+    ARG_UNUSED(ad);
 }
 
 static bool motion_active(void)
@@ -467,11 +471,19 @@ static int juxta_start_scanning(void)
     LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
 
     /* Use more conservative scan parameters for stability */
+    // struct bt_le_scan_param scan_param = {
+    //     .type = BT_LE_SCAN_TYPE_PASSIVE,
+    //     .options = BT_LE_SCAN_OPT_NONE,
+    //     .interval = 0x0040, // 40ms
+    //     .window = 0x0030,   // 30ms
+    //     .timeout = 0,
+    // };
+
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_PASSIVE,
-        .options = BT_LE_SCAN_OPT_NONE,
-        .interval = 0x0040, // 40ms
-        .window = 0x0030,   // 30ms
+        .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+        .interval = BT_GAP_SCAN_FAST_INTERVAL,
+        .window = BT_GAP_SCAN_FAST_WINDOW,
         .timeout = 0,
     };
 
