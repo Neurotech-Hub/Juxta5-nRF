@@ -89,6 +89,7 @@ static void juxta_scan_table_print_and_clear(void)
 static struct k_work state_work;
 static struct k_timer state_timer;
 static struct k_work scan_work;
+static struct k_work minute_work; /* Separate work item for minute-of-day processing */
 
 #define ADV_BURST_DURATION_MS 250
 #define SCAN_BURST_DURATION_MS 500 /* Reduced from 1000ms to 500ms for testing */
@@ -114,81 +115,57 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
 {
     ARG_UNUSED(adv_type);
 
-    /* Defensive check for NULL address */
-    if (addr == NULL)
+    if (!addr || !ad || ad->len == 0)
     {
         return;
     }
 
-    /* Convert address to string for logging */
     char addr_str[BT_ADDR_LE_STR_LEN];
-    int ret = bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-    if (ret < 0)
+    if (bt_addr_le_to_str(addr, addr_str, sizeof(addr_str)) < 0)
     {
         return;
     }
 
-    /* Parse advertising data to find device name - with defensive bounds checking */
     const char *name = NULL;
-    char dev_name[32]; /* Non-static to prevent corruption from multiple callbacks */
+    char dev_name[32] = {0};
+    struct net_buf_simple_state state;
+    net_buf_simple_save(ad, &state);
 
-    /* Zero dev_name before use to ensure clean state */
-    memset(dev_name, 0, sizeof(dev_name));
-
-    if (ad != NULL && ad->len > 0)
+    while (ad->len > 1)
     {
-        LOG_DBG("🔍 raw ad->data ptr = %p, len = %u", ad->data, ad->len);
-        struct net_buf_simple_state state;
-        net_buf_simple_save(ad, &state);
-
-        while (ad->len > 1)
+        uint8_t len = net_buf_simple_pull_u8(ad);
+        if (len == 0 || len > ad->len || len > sizeof(dev_name) - 1)
         {
-            uint8_t len = net_buf_simple_pull_u8(ad);
-            if (len == 0 || len > ad->len)
-            {
-                LOG_DBG("🔍 Malformed packet: len=%u, ad->len=%u", len, ad->len);
-                break;
-            }
-
-            uint8_t type = net_buf_simple_pull_u8(ad);
-            len -= 1;
-
-            /* Defensive check before net_buf_simple_pull */
-            if (len > ad->len)
-            {
-                LOG_ERR("Pull length exceeds buffer: len=%u, ad->len=%u", len, ad->len);
-                break;
-            }
-
-            if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len > 0)
-            {
-                /* Defensive bounds checking before memcpy */
-                if (len < sizeof(dev_name) && ad->len >= len)
-                {
-                    size_t copy_len = MIN(len, sizeof(dev_name) - 1);
-                    memcpy(dev_name, ad->data, copy_len);
-                    dev_name[copy_len] = '\0';
-                    name = dev_name;
-                    LOG_DBG("🔍 Found name: %s (type=%u, len=%u)", dev_name, type, len);
-                }
-                else
-                {
-                    LOG_WRN("⚠️ Invalid dev_name copy: len=%u, ad->len=%u", len, ad->len);
-                    name = NULL; // ensure safe fallback
-                }
-                break;
-            }
-
-            net_buf_simple_pull(ad, len);
+            LOG_ERR("⚠️ Invalid adv field: len=%u, ad->len=%u, max=%u", len, ad->len, sizeof(dev_name) - 1);
+            break;
         }
 
-        net_buf_simple_restore(ad, &state);
+        uint8_t type = net_buf_simple_pull_u8(ad);
+        len--;
+
+        if (len > ad->len)
+        {
+            LOG_ERR("⚠️ Buffer overrun: len=%u > ad->len=%u", len, ad->len);
+            break;
+        }
+
+        if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len < sizeof(dev_name))
+        {
+            /* Zero-initialize dev_name before copying to ensure null-termination */
+            memset(dev_name, 0, sizeof(dev_name));
+            memcpy(dev_name, ad->data, len);
+            dev_name[len] = '\0';
+            name = dev_name;
+            LOG_DBG("🔍 Found name: %s (type=0x%02x, len=%u)", dev_name, type, len);
+        }
+
+        net_buf_simple_pull(ad, len);
     }
 
-    /* Track unique JUXTA devices (6 characters after JX_) */
-    if (name != NULL && strlen(name) >= 3 && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
+    net_buf_simple_restore(ad, &state);
+
+    if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
     {
-        // Convert XXXXXX to uint32_t
         uint32_t mac_id = 0;
         if (sscanf(name + 3, "%06X", &mac_id) == 1)
         {
@@ -198,7 +175,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
             }
             else
             {
-                LOG_DBG("🔍 Duplicate or table full: %s (MAC: %06X)", name, mac_id);
+                LOG_DBG("🛑 Duplicate or table full for MAC %06X, RSSI: %d", mac_id, rssi);
             }
         }
         else
@@ -212,7 +189,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, str
     }
     else
     {
-        LOG_DBG("🔍 Found device: %s (no name), RSSI: %d", addr_str, rssi);
+        LOG_DBG("🔍 Found unnamed device: %s, RSSI: %d", addr_str, rssi);
     }
 }
 
@@ -297,17 +274,24 @@ static void state_timer_callback(struct k_timer *timer)
     k_work_submit(&state_work);
 }
 
-static void state_work_handler(struct k_work *work)
+static void minute_work_handler(struct k_work *work)
 {
-    uint32_t current_time = get_rtc_timestamp();
-
-    // RTC-based minute-of-day scan table logging
+    /* This runs in thread context, safe to call gmtime_r-dependent functions */
     uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
     if (current_minute != last_logged_minute)
     {
         juxta_scan_table_print_and_clear();
         last_logged_minute = current_minute;
+        LOG_INF("🕐 Minute of day changed to: %u", current_minute);
     }
+}
+
+static void state_work_handler(struct k_work *work)
+{
+    uint32_t current_time = get_rtc_timestamp();
+
+    // Defer minute-of-day processing to thread context
+    k_work_submit(&minute_work);
 
     LOG_INF("State work handler: current_time=%u, in_adv_burst=%d, in_scan_burst=%d",
             current_time, in_adv_burst, in_scan_burst);
@@ -321,7 +305,6 @@ static void state_work_handler(struct k_work *work)
             in_scan_burst = false;
             last_scan_timestamp = current_time;
             LOG_INF("🔍 Scan burst completed at timestamp %u", last_scan_timestamp);
-            juxta_scan_table_print_and_clear(); /* Report unique devices found */
             k_timer_start(&state_timer, K_MSEC(100), K_NO_WAIT);
         }
         return;
@@ -398,9 +381,8 @@ static void state_work_handler(struct k_work *work)
     }
 
     uint32_t ts = juxta_vitals_get_timestamp(&vitals_ctx);
-    uint16_t min = juxta_vitals_get_minute_of_day(&vitals_ctx);
     uint32_t uptime = k_uptime_get_32();
-    LOG_INF("Timestamp: %u, Minute of day: %u, Uptime(ms): %u", ts, min, uptime);
+    LOG_INF("Timestamp: %u, Uptime(ms): %u", ts, uptime);
 }
 
 static int juxta_start_advertising(void)
@@ -680,7 +662,8 @@ int main(void)
     init_randomization();
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
-    k_work_init(&scan_work, NULL); /* Initialize scan work queue */
+    k_work_init(&scan_work, NULL);                  /* Initialize scan work queue */
+    k_work_init(&minute_work, minute_work_handler); /* Initialize minute-of-day work queue */
 
     uint32_t now = get_rtc_timestamp();
     last_adv_timestamp = now - get_adv_interval();
