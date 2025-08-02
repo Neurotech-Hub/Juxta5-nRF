@@ -20,7 +20,7 @@ void main(void)
         .window = BT_GAP_SCAN_FAST_WINDOW,
     };
 
-    printk("Starting Minimal Observer Scan Test\n");
+    printk("Starting Minimal Observer Scan Test (Back to Original)\n");
 
     err = bt_enable(NULL);
     if (err)

@@ -1,0 +1,9 @@
+# Copyright (c) 2024 NeurotechHub
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Zephyr"
+source "Kconfig.zephyr"
+endmenu
+
+# Source library configurations
+rsource "../../lib/juxta_vitals_nrf52/Kconfig" 
