@@ -20,18 +20,18 @@
 
 LOG_MODULE_REGISTER(juxta_ble_service, LOG_LEVEL_DBG);
 
-/* Characteristic values */
-static char node_response[JUXTA_NODE_RESPONSE_MAX_SIZE];
-static char gateway_command[JUXTA_GATEWAY_COMMAND_MAX_SIZE];
-static char filename_request[JUXTA_FILENAME_MAX_SIZE];
-static uint8_t file_transfer_chunk[JUXTA_FILE_TRANSFER_CHUNK_SIZE];
+/* Characteristic values - will be used in later phases */
+static char node_response[JUXTA_NODE_RESPONSE_MAX_SIZE] __unused;
+static char gateway_command[JUXTA_GATEWAY_COMMAND_MAX_SIZE] __unused;
+static char filename_request[JUXTA_FILENAME_MAX_SIZE] __unused;
+static uint8_t file_transfer_chunk[JUXTA_FILE_TRANSFER_CHUNK_SIZE] __unused;
 
-/* CCC descriptors for indications */
-static struct bt_gatt_ccc_cfg filename_ccc_cfg[BT_GATT_CCC_MAX] = {};
-static struct bt_gatt_ccc_cfg file_transfer_ccc_cfg[BT_GATT_CCC_MAX] = {};
+/* CCC descriptors for indications - will be used in Phase IV */
+static struct bt_gatt_ccc_cfg filename_ccc_cfg[BT_GATT_CCC_MAX] __unused;
+static struct bt_gatt_ccc_cfg file_transfer_ccc_cfg[BT_GATT_CCC_MAX] __unused;
 
-/* Current connection for indications */
-static struct bt_conn *current_conn = NULL;
+/* Current connection for indications - will be used in Phase IV */
+static struct bt_conn *current_conn __unused = NULL;
 
 /* External framfs context - will be set during initialization */
 static struct juxta_framfs_context *framfs_ctx = NULL;
@@ -486,7 +486,7 @@ int juxta_ble_get_device_id(char *device_id)
     bt_id_get(&addr, &count);
     if (count > 0)
     {
-        snprintf(device_id, 9, "JX_%02X%02X%02X",
+        snprintf(device_id, 10, "JX_%02X%02X%02X",
                  addr.a.val[3], addr.a.val[2], addr.a.val[1]);
         return 0;
     }
