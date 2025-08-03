@@ -167,12 +167,87 @@ static bool motion_active(void)
 
 static uint32_t get_adv_interval(void)
 {
-    return motion_active() ? ADV_INTERVAL_SECONDS : (ADV_INTERVAL_SECONDS * 3);
+    uint8_t adv_interval = ADV_INTERVAL_SECONDS; /* Default fallback */
+
+    /* Get interval from framfs user settings */
+    if (framfs_ctx.initialized)
+    {
+        if (juxta_framfs_get_adv_interval(&framfs_ctx, &adv_interval) == 0)
+        {
+            LOG_DBG("📡 Using adv_interval from settings: %d", adv_interval);
+        }
+        else
+        {
+            LOG_WRN("📡 Failed to get adv_interval from settings, using default: %d", ADV_INTERVAL_SECONDS);
+            adv_interval = ADV_INTERVAL_SECONDS;
+        }
+    }
+    else
+    {
+        LOG_WRN("📡 Framfs not initialized, using default adv_interval: %d", ADV_INTERVAL_SECONDS);
+        adv_interval = ADV_INTERVAL_SECONDS;
+    }
+
+    /* Apply motion gating if enabled */
+    if (!motion_active())
+    {
+        adv_interval *= 3; /* Triple the interval when no motion */
+        LOG_DBG("📡 Motion inactive, adjusted adv_interval: %d", adv_interval);
+    }
+
+    return adv_interval;
 }
 
 static uint32_t get_scan_interval(void)
 {
-    return motion_active() ? SCAN_INTERVAL_SECONDS : (SCAN_INTERVAL_SECONDS * 2);
+    uint8_t scan_interval = SCAN_INTERVAL_SECONDS; /* Default fallback */
+
+    /* Get interval from framfs user settings */
+    if (framfs_ctx.initialized)
+    {
+        if (juxta_framfs_get_scan_interval(&framfs_ctx, &scan_interval) == 0)
+        {
+            LOG_DBG("🔍 Using scan_interval from settings: %d", scan_interval);
+        }
+        else
+        {
+            LOG_WRN("🔍 Failed to get scan_interval from settings, using default: %d", SCAN_INTERVAL_SECONDS);
+            scan_interval = SCAN_INTERVAL_SECONDS;
+        }
+    }
+    else
+    {
+        LOG_WRN("🔍 Framfs not initialized, using default scan_interval: %d", SCAN_INTERVAL_SECONDS);
+        scan_interval = SCAN_INTERVAL_SECONDS;
+    }
+
+    /* Apply motion gating if enabled */
+    if (!motion_active())
+    {
+        scan_interval *= 2; /* Double the interval when no motion */
+        LOG_DBG("🔍 Motion inactive, adjusted scan_interval: %d", scan_interval);
+    }
+
+    return scan_interval;
+}
+
+/**
+ * @brief Trigger timing update when settings change
+ * Called from BLE service when user settings are updated
+ */
+void juxta_ble_timing_update_trigger(void)
+{
+    LOG_INF("⏰ Timing update triggered - recalculating intervals");
+
+    /* Force recalculation of next action times */
+    uint32_t current_time = get_rtc_timestamp();
+    if (current_time > 0)
+    {
+        last_adv_timestamp = current_time - get_adv_interval();
+        last_scan_timestamp = current_time - get_scan_interval();
+        LOG_INF("⏰ Updated timing: adv_interval=%d, scan_interval=%d",
+                get_adv_interval(), get_scan_interval());
+    }
 }
 
 static void init_randomization(void)

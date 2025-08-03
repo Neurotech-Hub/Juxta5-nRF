@@ -128,6 +128,163 @@ static ssize_t read_node_char(struct bt_conn *conn, const struct bt_gatt_attr *a
 }
 
 /**
+ * @brief Parse JSON command from gateway characteristic
+ * Expected format: {"timestamp":1234567890,"sendFilenames":true,"clearMemory":true,"advInterval":5,"scanInterval":15,"subjectId":"vole001","uploadPath":"/TEST"}
+ */
+static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_settings *settings)
+{
+    if (!json_cmd || !settings)
+    {
+        return -1;
+    }
+
+    LOG_DBG("🎛️ Parsing gateway command: %s", json_cmd);
+
+    /* Initialize settings with current values */
+    if (framfs_ctx && framfs_ctx->initialized)
+    {
+        if (juxta_framfs_get_user_settings(framfs_ctx, settings) != 0)
+        {
+            LOG_WRN("🎛️ Failed to get current settings, using defaults");
+            /* Use defaults if framfs not available */
+            settings->adv_interval = 5;
+            settings->scan_interval = 15;
+            strcpy(settings->subject_id, "");
+            strcpy(settings->upload_path, "/TEST");
+        }
+    }
+    else
+    {
+        /* Use defaults if framfs not available */
+        settings->adv_interval = 5;
+        settings->scan_interval = 15;
+        strcpy(settings->subject_id, "");
+        strcpy(settings->upload_path, "/TEST");
+    }
+
+    /* Simple JSON parsing - look for key-value pairs */
+    const char *p = json_cmd;
+    bool settings_changed = false;
+
+    /* Look for timestamp */
+    p = strstr(json_cmd, "\"timestamp\":");
+    if (p)
+    {
+        uint32_t timestamp;
+        if (sscanf(p, "\"timestamp\":%u", &timestamp) == 1)
+        {
+            LOG_INF("🎛️ Timestamp command: %u", timestamp);
+            /* TODO: Phase 4 - Implement timestamp synchronization */
+        }
+    }
+
+    /* Look for sendFilenames */
+    p = strstr(json_cmd, "\"sendFilenames\":");
+    if (p)
+    {
+        if (strstr(p, "\"sendFilenames\":true") || strstr(p, "\"sendFilenames\": true"))
+        {
+            LOG_INF("🎛️ Send filenames command received");
+            /* TODO: Phase 4 - Trigger file listing */
+        }
+    }
+
+    /* Look for clearMemory */
+    p = strstr(json_cmd, "\"clearMemory\":");
+    if (p)
+    {
+        if (strstr(p, "\"clearMemory\":true") || strstr(p, "\"clearMemory\": true"))
+        {
+            LOG_INF("🎛️ Clear memory command received");
+            /* TODO: Phase 4 - Implement memory clearing */
+        }
+    }
+
+    /* Look for advInterval */
+    p = strstr(json_cmd, "\"advInterval\":");
+    if (p)
+    {
+        uint8_t adv_interval;
+        if (sscanf(p, "\"advInterval\":%hhu", &adv_interval) == 1)
+        {
+            LOG_INF("🎛️ Advertising interval command: %d", adv_interval);
+            settings->adv_interval = adv_interval;
+            settings_changed = true;
+        }
+    }
+
+    /* Look for scanInterval */
+    p = strstr(json_cmd, "\"scanInterval\":");
+    if (p)
+    {
+        uint8_t scan_interval;
+        if (sscanf(p, "\"scanInterval\":%hhu", &scan_interval) == 1)
+        {
+            LOG_INF("🎛️ Scanning interval command: %d", scan_interval);
+            settings->scan_interval = scan_interval;
+            settings_changed = true;
+        }
+    }
+
+    /* Look for subjectId */
+    p = strstr(json_cmd, "\"subjectId\":");
+    if (p)
+    {
+        char subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN];
+        if (sscanf(p, "\"subjectId\":\"%[^\"]\"", subject_id) == 1)
+        {
+            LOG_INF("🎛️ Subject ID command: %s", subject_id);
+            strncpy(settings->subject_id, subject_id, JUXTA_FRAMFS_SUBJECT_ID_LEN - 1);
+            settings->subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN - 1] = '\0';
+            settings_changed = true;
+        }
+    }
+
+    /* Look for uploadPath */
+    p = strstr(json_cmd, "\"uploadPath\":");
+    if (p)
+    {
+        char upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN];
+        if (sscanf(p, "\"uploadPath\":\"%[^\"]\"", upload_path) == 1)
+        {
+            LOG_INF("🎛️ Upload path command: %s", upload_path);
+            strncpy(settings->upload_path, upload_path, JUXTA_FRAMFS_UPLOAD_PATH_LEN - 1);
+            settings->upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN - 1] = '\0';
+            settings_changed = true;
+        }
+    }
+
+    if (settings_changed)
+    {
+        LOG_INF("🎛️ Settings updated - saving to framfs");
+        if (framfs_ctx && framfs_ctx->initialized)
+        {
+            if (juxta_framfs_set_user_settings(framfs_ctx, settings) == 0)
+            {
+                LOG_INF("✅ Settings saved successfully");
+
+                /* Trigger timing update in main.c */
+                juxta_ble_timing_update_trigger();
+
+                return 0;
+            }
+            else
+            {
+                LOG_ERR("❌ Failed to save settings to framfs");
+                return -1;
+            }
+        }
+        else
+        {
+            LOG_WRN("⚠️ Framfs not available, settings not persisted");
+            return 0;
+        }
+    }
+
+    return 0;
+}
+
+/**
  * @brief Gateway characteristic write callback
  * Accepts JSON commands to control device behavior
  */
@@ -135,7 +292,7 @@ static ssize_t write_gateway_char(struct bt_conn *conn, const struct bt_gatt_att
                                   const void *buf, uint16_t len, uint16_t offset,
                                   uint8_t flags)
 {
-    LOG_DBG("Gateway characteristic write request, len=%d", len);
+    LOG_DBG("🎛️ Gateway characteristic write request, len=%d", len);
 
     if (offset + len > sizeof(gateway_command))
     {
@@ -145,10 +302,19 @@ static ssize_t write_gateway_char(struct bt_conn *conn, const struct bt_gatt_att
     memcpy(gateway_command + offset, buf, len);
     gateway_command[offset + len] = '\0';
 
-    LOG_INF("📱 BLE: Gateway command received: %s", gateway_command);
+    LOG_INF("🎛️ Gateway command received: %s", gateway_command);
 
-    /* TODO: Phase 3 - Implement JSON command parsing and execution */
-    /* For now, just acknowledge the write */
+    /* Parse and execute the command */
+    struct juxta_framfs_user_settings new_settings;
+    int ret = parse_gateway_command(gateway_command, &new_settings);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to parse gateway command");
+        return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+    }
+
+    /* TODO: Phase 4 - Trigger main.c timing updates */
+    /* For now, the settings are saved to framfs and will be read on next restart */
 
     return len;
 }

@@ -77,6 +77,13 @@ extern "C"
      */
     void juxta_ble_set_framfs_context(struct juxta_framfs_context *ctx);
 
+    /**
+     * @brief Trigger timing update callback (called when settings change)
+     *
+     * This function should be implemented in main.c to handle timing updates
+     */
+    extern void juxta_ble_timing_update_trigger(void);
+
 #ifdef __cplusplus
 }
 #endif
