@@ -65,7 +65,7 @@ extern "C"
     /**
      * @brief Get the current device ID (JX_XXXXXX format)
      *
-     * @param device_id Buffer to store device ID (must be at least 9 bytes)
+     * @param device_id Buffer to store device ID (must be at least 10 bytes)
      * @return 0 on success, negative error code on failure
      */
     int juxta_ble_get_device_id(char *device_id);
