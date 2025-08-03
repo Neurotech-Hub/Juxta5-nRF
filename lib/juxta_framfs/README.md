@@ -30,6 +30,14 @@ juxta_framfs_append_battery_record_data(&ctx, minute, battery_level);
 - **`juxta_framfs_append_simple_record_data()`** - Log system events (boot, connected, etc.)
 - **`juxta_framfs_append_battery_record_data()`** - Log battery level
 
+### User Settings API
+- **`juxta_framfs_get_adv_interval()`** / **`juxta_framfs_set_adv_interval()`** - Get/set advertising interval (0-255)
+- **`juxta_framfs_get_scan_interval()`** / **`juxta_framfs_set_scan_interval()`** - Get/set scanning interval (0-255)
+- **`juxta_framfs_get_subject_id()`** / **`juxta_framfs_set_subject_id()`** - Get/set subject ID (up to 16 chars)
+- **`juxta_framfs_get_upload_path()`** / **`juxta_framfs_set_upload_path()`** - Get/set upload path (up to 16 chars)
+- **`juxta_framfs_get_user_settings()`** / **`juxta_framfs_set_user_settings()`** - Get/set all settings at once
+- **`juxta_framfs_clear_user_settings()`** - Reset settings to defaults
+
 ### Low-Level API (Advanced)
 - **`juxta_framfs_create_active()`** - Create new file manually
 - **`juxta_framfs_append()`** - Write to active file
@@ -64,6 +72,35 @@ Uses 3-byte packed MAC IDs to save memory:
 uint8_t mac_id[3] = {0x55, 0x66, 0x77}; // Last 3 bytes of MAC address
 ```
 
+## User Settings
+
+Persistent user configuration stored in FRAM:
+```c
+/* Get/set individual settings */
+uint8_t adv_interval;
+juxta_framfs_get_adv_interval(&ctx, &adv_interval);
+juxta_framfs_set_adv_interval(&ctx, 5);
+
+char subject_id[16];
+juxta_framfs_get_subject_id(&ctx, subject_id);
+juxta_framfs_set_subject_id(&ctx, "vole001");
+
+/* Get/set all settings at once */
+struct juxta_framfs_user_settings settings;
+juxta_framfs_get_user_settings(&ctx, &settings);
+settings.adv_interval = 5;
+settings.scan_interval = 15;
+strcpy(settings.subject_id, "vole001");
+strcpy(settings.upload_path, "/TEST");
+juxta_framfs_set_user_settings(&ctx, &settings);
+```
+
+**Default Values:**
+- `adv_interval`: 5 (advertising every 5 seconds)
+- `scan_interval`: 15 (scanning every 15 seconds)
+- `subject_id`: "" (empty)
+- `upload_path`: "/TEST"
+
 ## Error Codes
 
 ```c
@@ -82,16 +119,18 @@ uint8_t mac_id[3] = {0x55, 0x66, 0x77}; // Last 3 bytes of MAC address
 0x0000: FileSystemHeader (13 bytes)
 0x000D: FileEntry[0-63] (1,280 bytes)
 0x050D: Global MAC Index (772 bytes)
-0x07C9: File data starts here
+0x07C9: User Settings (36 bytes)
+0x07ED: File data starts here
 ```
 
 ## Performance
 
 - **Write Speed**: 200-250 KB/s
 - **Read Speed**: 250-300 KB/s
-- **Metadata Overhead**: 0.89% of FRAM
+- **Metadata Overhead**: 1.1% of FRAM
 - **File Limit**: 64 files maximum
 - **Filename Length**: 8 characters maximum
+- **User Settings**: 36 bytes persistent storage
 
 ## Thread Safety
 

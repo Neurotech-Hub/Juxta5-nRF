@@ -51,7 +51,8 @@ static int display_filesystem_stats(void)
     uint32_t index_size = JUXTA_FRAMFS_MAX_FILES * sizeof(struct juxta_framfs_entry);
     uint32_t mac_header_size = sizeof(struct juxta_framfs_mac_header);
     uint32_t mac_table_size = JUXTA_FRAMFS_MAX_MAC_ADDRESSES * sizeof(struct juxta_framfs_mac_entry);
-    uint32_t total_overhead = header_size + index_size + mac_header_size + mac_table_size;
+    uint32_t user_settings_size = sizeof(struct juxta_framfs_user_settings);
+    uint32_t total_overhead = header_size + index_size + mac_header_size + mac_table_size + user_settings_size;
     uint32_t available_data = JUXTA_FRAM_SIZE_BYTES - total_overhead;
 
     /* Display basic statistics */
@@ -70,6 +71,7 @@ static int display_filesystem_stats(void)
     LOG_INF("  MAC table header:   %d bytes", mac_header_size);
     LOG_INF("  MAC address table:  %d bytes (%d entries × %d bytes)",
             mac_table_size, JUXTA_FRAMFS_MAX_MAC_ADDRESSES, sizeof(struct juxta_framfs_mac_entry));
+    LOG_INF("  User settings:      %d bytes", user_settings_size);
     LOG_INF("  Total overhead:     %d bytes (%.2f%%)", total_overhead,
             (double)total_overhead / JUXTA_FRAM_SIZE_BYTES * 100.0);
     LOG_INF("  Available for data: %d bytes (%.2f%%)", available_data,
@@ -751,6 +753,251 @@ static int test_error_handling(void)
 }
 
 /**
+ * @brief Test user settings operations
+ */
+static int test_user_settings_operations(void)
+{
+    int ret;
+    uint8_t adv_interval, scan_interval;
+    char subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN];
+    char upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN];
+    struct juxta_framfs_user_settings settings;
+
+    LOG_INF("⚙️  Testing user settings operations...");
+    LOG_INF("══════════════════════════════════════════════════════════════");
+
+    /* Test 1: Get default values */
+    LOG_INF("Test 1: Getting default values");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_get_adv_interval(&fs_ctx, &adv_interval);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to get adv_interval: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ adv_interval: %d", adv_interval);
+
+    ret = juxta_framfs_get_scan_interval(&fs_ctx, &scan_interval);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to get scan_interval: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ scan_interval: %d", scan_interval);
+
+    ret = juxta_framfs_get_subject_id(&fs_ctx, subject_id);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to get subject_id: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ subject_id: '%s'", subject_id);
+
+    ret = juxta_framfs_get_upload_path(&fs_ctx, upload_path);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to get upload_path: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ upload_path: '%s'", upload_path);
+
+    /* Test 2: Set individual values */
+    LOG_INF("Test 2: Setting individual values");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_set_adv_interval(&fs_ctx, 5);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to set adv_interval: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Set adv_interval to 5");
+
+    ret = juxta_framfs_set_scan_interval(&fs_ctx, 15);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to set scan_interval: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Set scan_interval to 15");
+
+    ret = juxta_framfs_set_subject_id(&fs_ctx, "vole001");
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to set subject_id: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Set subject_id to 'vole001'");
+
+    ret = juxta_framfs_set_upload_path(&fs_ctx, "/DATA");
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to set upload_path: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Set upload_path to '/DATA'");
+
+    /* Test 3: Verify individual values */
+    LOG_INF("Test 3: Verifying individual values");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_get_adv_interval(&fs_ctx, &adv_interval);
+    if (ret < 0 || adv_interval != 5)
+    {
+        LOG_ERR("❌ adv_interval verification failed: got %d, expected 5", adv_interval);
+        return -1;
+    }
+    LOG_INF("  ✅ adv_interval verified: %d", adv_interval);
+
+    ret = juxta_framfs_get_scan_interval(&fs_ctx, &scan_interval);
+    if (ret < 0 || scan_interval != 15)
+    {
+        LOG_ERR("❌ scan_interval verification failed: got %d, expected 15", scan_interval);
+        return -1;
+    }
+    LOG_INF("  ✅ scan_interval verified: %d", scan_interval);
+
+    ret = juxta_framfs_get_subject_id(&fs_ctx, subject_id);
+    if (ret < 0 || strcmp(subject_id, "vole001") != 0)
+    {
+        LOG_ERR("❌ subject_id verification failed: got '%s', expected 'vole001'", subject_id);
+        return -1;
+    }
+    LOG_INF("  ✅ subject_id verified: '%s'", subject_id);
+
+    ret = juxta_framfs_get_upload_path(&fs_ctx, upload_path);
+    if (ret < 0 || strcmp(upload_path, "/DATA") != 0)
+    {
+        LOG_ERR("❌ upload_path verification failed: got '%s', expected '/DATA'", upload_path);
+        return -1;
+    }
+    LOG_INF("  ✅ upload_path verified: '%s'", upload_path);
+
+    /* Test 4: Get all settings at once */
+    LOG_INF("Test 4: Getting all settings at once");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_get_user_settings(&fs_ctx, &settings);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to get all settings: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("  ✅ All settings retrieved:");
+    LOG_INF("     adv_interval: %d", settings.adv_interval);
+    LOG_INF("     scan_interval: %d", settings.scan_interval);
+    LOG_INF("     subject_id: '%s'", settings.subject_id);
+    LOG_INF("     upload_path: '%s'", settings.upload_path);
+
+    /* Test 5: Set all settings at once */
+    LOG_INF("Test 5: Setting all settings at once");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    settings.adv_interval = 10;
+    settings.scan_interval = 20;
+    strcpy(settings.subject_id, "vole002");
+    strcpy(settings.upload_path, "/BACKUP");
+
+    ret = juxta_framfs_set_user_settings(&fs_ctx, &settings);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to set all settings: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ All settings updated");
+
+    /* Test 6: Verify all settings */
+    LOG_INF("Test 6: Verifying all settings");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_get_adv_interval(&fs_ctx, &adv_interval);
+    if (ret < 0 || adv_interval != 10)
+    {
+        LOG_ERR("❌ adv_interval verification failed: got %d, expected 10", adv_interval);
+        return -1;
+    }
+    LOG_INF("  ✅ adv_interval verified: %d", adv_interval);
+
+    ret = juxta_framfs_get_scan_interval(&fs_ctx, &scan_interval);
+    if (ret < 0 || scan_interval != 20)
+    {
+        LOG_ERR("❌ scan_interval verification failed: got %d, expected 20", scan_interval);
+        return -1;
+    }
+    LOG_INF("  ✅ scan_interval verified: %d", scan_interval);
+
+    ret = juxta_framfs_get_subject_id(&fs_ctx, subject_id);
+    if (ret < 0 || strcmp(subject_id, "vole002") != 0)
+    {
+        LOG_ERR("❌ subject_id verification failed: got '%s', expected 'vole002'", subject_id);
+        return -1;
+    }
+    LOG_INF("  ✅ subject_id verified: '%s'", subject_id);
+
+    ret = juxta_framfs_get_upload_path(&fs_ctx, upload_path);
+    if (ret < 0 || strcmp(upload_path, "/BACKUP") != 0)
+    {
+        LOG_ERR("❌ upload_path verification failed: got '%s', expected '/BACKUP'", upload_path);
+        return -1;
+    }
+    LOG_INF("  ✅ upload_path verified: '%s'", upload_path);
+
+    /* Test 7: Clear settings (reset to defaults) */
+    LOG_INF("Test 7: Clearing settings (reset to defaults)");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_clear_user_settings(&fs_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to clear settings: %d", ret);
+        return ret;
+    }
+    LOG_INF("  ✅ Settings cleared");
+
+    /* Test 8: Verify defaults */
+    LOG_INF("Test 8: Verifying default values");
+    LOG_INF("──────────────────────────────────────────────────────────────");
+
+    ret = juxta_framfs_get_adv_interval(&fs_ctx, &adv_interval);
+    if (ret < 0 || adv_interval != 5)
+    {
+        LOG_ERR("❌ adv_interval default verification failed: got %d, expected 5", adv_interval);
+        return -1;
+    }
+    LOG_INF("  ✅ adv_interval default verified: %d", adv_interval);
+
+    ret = juxta_framfs_get_scan_interval(&fs_ctx, &scan_interval);
+    if (ret < 0 || scan_interval != 15)
+    {
+        LOG_ERR("❌ scan_interval default verification failed: got %d, expected 15", scan_interval);
+        return -1;
+    }
+    LOG_INF("  ✅ scan_interval default verified: %d", scan_interval);
+
+    ret = juxta_framfs_get_subject_id(&fs_ctx, subject_id);
+    if (ret < 0 || strcmp(subject_id, "") != 0)
+    {
+        LOG_ERR("❌ subject_id default verification failed: got '%s', expected ''", subject_id);
+        return -1;
+    }
+    LOG_INF("  ✅ subject_id default verified: '%s'", subject_id);
+
+    ret = juxta_framfs_get_upload_path(&fs_ctx, upload_path);
+    if (ret < 0 || strcmp(upload_path, "/TEST") != 0)
+    {
+        LOG_ERR("❌ upload_path default verification failed: got '%s', expected '/TEST'", upload_path);
+        return -1;
+    }
+    LOG_INF("  ✅ upload_path default verified: '%s'", upload_path);
+
+    LOG_INF("══════════════════════════════════════════════════════════════");
+    LOG_INF("✅ All user settings tests passed!");
+    return 0;
+}
+
+/**
  * @brief Main test function
  */
 int framfs_test_main(void)
@@ -856,8 +1103,27 @@ int framfs_test_main(void)
     }
     LOG_INF("✅ Error handling tests passed");
 
+    /* Clear again for user settings tests */
+    LOG_INF("🧹 Step 11: Clearing file system for user settings tests...");
+    ret = clear_filesystem();
+    if (ret < 0)
+    {
+        LOG_ERR("❌ File system clear failed: %d", ret);
+        return ret;
+    }
+    LOG_INF("✅ File system cleared successfully");
+
+    LOG_INF("⚙️  Step 12: Testing user settings operations...");
+    ret = test_user_settings_operations();
+    if (ret < 0)
+    {
+        LOG_ERR("❌ User settings tests failed: %d", ret);
+        return ret;
+    }
+    LOG_INF("✅ User settings tests passed");
+
     /* Display final state */
-    LOG_INF("📊 Step 11: Checking final state...");
+    LOG_INF("📊 Step 13: Checking final state...");
     ret = display_filesystem_stats();
     if (ret < 0)
     {
@@ -873,6 +1139,7 @@ int framfs_test_main(void)
     LOG_INF("  • MAC Address Table ✓");
     LOG_INF("  • Record Encoding/Decoding ✓");
     LOG_INF("  • Error Handling ✓");
+    LOG_INF("  • User Settings ✓");
     LOG_INF("══════════════════════════════════════════════════════════════");
     return 0;
 }

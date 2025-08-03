@@ -40,6 +40,12 @@ extern "C"
 #define JUXTA_FRAMFS_MAC_MAGIC 0x4D41 /* "MA" */
 #define JUXTA_FRAMFS_MAC_VERSION 0x02 /* Version bump for new format */
 
+/* User settings constants */
+#define JUXTA_FRAMFS_USER_SETTINGS_MAGIC 0x5553 /* "US" */
+#define JUXTA_FRAMFS_USER_SETTINGS_VERSION 0x01
+#define JUXTA_FRAMFS_SUBJECT_ID_LEN 16
+#define JUXTA_FRAMFS_UPLOAD_PATH_LEN 16
+
 /* Entry flags */
 #define JUXTA_FRAMFS_FLAG_VALID 0x01  /* Entry is valid */
 #define JUXTA_FRAMFS_FLAG_ACTIVE 0x02 /* Currently being written */
@@ -129,6 +135,20 @@ extern "C"
     } __packed;
 
     /**
+     * @brief User settings structure (36 bytes)
+     */
+    struct juxta_framfs_user_settings
+    {
+        uint16_t magic;                                 /* User settings magic number */
+        uint8_t version;                                /* User settings version */
+        uint8_t reserved;                               /* Reserved for future use */
+        uint8_t adv_interval;                           /* Advertising interval (0-255) */
+        uint8_t scan_interval;                          /* Scanning interval (0-255) */
+        char subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN];   /* Subject ID string */
+        char upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN]; /* Upload path string */
+    } __packed;
+
+    /**
      * @brief Device scan record structure (variable length)
      *
      * Used for type 0x01-0x80 records (1-128 devices)
@@ -171,11 +191,12 @@ extern "C"
      */
     struct juxta_framfs_context
     {
-        struct juxta_fram_device *fram_dev;        /* Underlying FRAM device */
-        struct juxta_framfs_header header;         /* Cached header */
-        struct juxta_framfs_mac_header mac_header; /* MAC table header */
-        bool initialized;                          /* Initialization state */
-        int16_t active_file_index;                 /* Index of active file (-1 if none) */
+        struct juxta_fram_device *fram_dev;              /* Underlying FRAM device */
+        struct juxta_framfs_header header;               /* Cached header */
+        struct juxta_framfs_mac_header mac_header;       /* MAC table header */
+        struct juxta_framfs_user_settings user_settings; /* User settings */
+        bool initialized;                                /* Initialization state */
+        int16_t active_file_index;                       /* Index of active file (-1 if none) */
     };
 
     /* ========================================================================
@@ -381,6 +402,118 @@ extern "C"
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx);
+
+    /* ========================================================================
+     * User Settings API
+     * ======================================================================== */
+
+    /**
+     * @brief Get advertising interval
+     *
+     * @param ctx File system context
+     * @param interval Pointer to store advertising interval (0-255)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_adv_interval(struct juxta_framfs_context *ctx,
+                                      uint8_t *interval);
+
+    /**
+     * @brief Set advertising interval
+     *
+     * @param ctx File system context
+     * @param interval Advertising interval (0-255)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_set_adv_interval(struct juxta_framfs_context *ctx,
+                                      uint8_t interval);
+
+    /**
+     * @brief Get scanning interval
+     *
+     * @param ctx File system context
+     * @param interval Pointer to store scanning interval (0-255)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_scan_interval(struct juxta_framfs_context *ctx,
+                                       uint8_t *interval);
+
+    /**
+     * @brief Set scanning interval
+     *
+     * @param ctx File system context
+     * @param interval Scanning interval (0-255)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
+                                       uint8_t interval);
+
+    /**
+     * @brief Get subject ID
+     *
+     * @param ctx File system context
+     * @param subject_id Buffer to store subject ID (size JUXTA_FRAMFS_SUBJECT_ID_LEN)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_subject_id(struct juxta_framfs_context *ctx,
+                                    char *subject_id);
+
+    /**
+     * @brief Set subject ID
+     *
+     * @param ctx File system context
+     * @param subject_id Subject ID string (max JUXTA_FRAMFS_SUBJECT_ID_LEN-1 chars)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_set_subject_id(struct juxta_framfs_context *ctx,
+                                    const char *subject_id);
+
+    /**
+     * @brief Get upload path
+     *
+     * @param ctx File system context
+     * @param upload_path Buffer to store upload path (size JUXTA_FRAMFS_UPLOAD_PATH_LEN)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_upload_path(struct juxta_framfs_context *ctx,
+                                     char *upload_path);
+
+    /**
+     * @brief Set upload path
+     *
+     * @param ctx File system context
+     * @param upload_path Upload path string (max JUXTA_FRAMFS_UPLOAD_PATH_LEN-1 chars)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_set_upload_path(struct juxta_framfs_context *ctx,
+                                     const char *upload_path);
+
+    /**
+     * @brief Get all user settings
+     *
+     * @param ctx File system context
+     * @param settings Pointer to store user settings
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_user_settings(struct juxta_framfs_context *ctx,
+                                       struct juxta_framfs_user_settings *settings);
+
+    /**
+     * @brief Set all user settings
+     *
+     * @param ctx File system context
+     * @param settings User settings to set
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_set_user_settings(struct juxta_framfs_context *ctx,
+                                       const struct juxta_framfs_user_settings *settings);
+
+    /**
+     * @brief Clear user settings (reset to defaults)
+     *
+     * @param ctx File system context
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx);
 
     /* ========================================================================
      * Data Encoding/Decoding API

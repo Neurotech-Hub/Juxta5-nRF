@@ -33,6 +33,11 @@ static int framfs_write_mac_entry(struct juxta_framfs_context *ctx, uint8_t inde
 static uint32_t framfs_get_mac_header_addr(void);
 static uint32_t framfs_get_mac_entry_addr(uint8_t index);
 
+/* User settings helper functions */
+static int framfs_read_user_settings(struct juxta_framfs_context *ctx);
+static int framfs_write_user_settings(struct juxta_framfs_context *ctx);
+static uint32_t framfs_get_user_settings_addr(void);
+
 /* ========================================================================
  * File System Management Functions
  * ======================================================================== */
@@ -107,6 +112,22 @@ int juxta_framfs_init(struct juxta_framfs_context *ctx,
         }
     }
 
+    /* Try to read existing user settings */
+    ret = framfs_read_user_settings(ctx);
+    if (ret < 0 || ctx->user_settings.magic != JUXTA_FRAMFS_USER_SETTINGS_MAGIC)
+    {
+        LOG_WRN("User settings not found or invalid, initializing new user settings");
+        LOG_INF("Initializing new user settings");
+
+        /* Initialize user settings */
+        ret = juxta_framfs_clear_user_settings(ctx);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to initialize user settings: %d", ret);
+            return ret;
+        }
+    }
+
     if (ctx->header.version != JUXTA_FRAMFS_VERSION)
     {
         LOG_WRN("File system version mismatch: %d (expected %d)",
@@ -125,6 +146,20 @@ int juxta_framfs_init(struct juxta_framfs_context *ctx,
     {
         LOG_WRN("MAC table version mismatch: %d (expected %d)",
                 ctx->mac_header.version, JUXTA_FRAMFS_MAC_VERSION);
+    }
+
+    /* Validate user settings (after ensuring it's initialized) */
+    if (ctx->user_settings.magic != JUXTA_FRAMFS_USER_SETTINGS_MAGIC)
+    {
+        LOG_ERR("Invalid user settings magic: 0x%04X (expected 0x%04X)",
+                ctx->user_settings.magic, JUXTA_FRAMFS_USER_SETTINGS_MAGIC);
+        return JUXTA_FRAMFS_ERROR_INVALID;
+    }
+
+    if (ctx->user_settings.version != JUXTA_FRAMFS_USER_SETTINGS_VERSION)
+    {
+        LOG_WRN("User settings version mismatch: %d (expected %d)",
+                ctx->user_settings.version, JUXTA_FRAMFS_USER_SETTINGS_VERSION);
     }
 
     /* Find active file if any */
@@ -653,7 +688,8 @@ static uint32_t framfs_get_data_start_addr(void)
     return sizeof(struct juxta_framfs_header) +
            (JUXTA_FRAMFS_MAX_FILES * sizeof(struct juxta_framfs_entry)) +
            sizeof(struct juxta_framfs_mac_header) +
-           (JUXTA_FRAMFS_MAX_MAC_ADDRESSES * sizeof(struct juxta_framfs_mac_entry));
+           (JUXTA_FRAMFS_MAX_MAC_ADDRESSES * sizeof(struct juxta_framfs_mac_entry)) +
+           sizeof(struct juxta_framfs_user_settings);
 }
 
 /* ========================================================================
@@ -671,6 +707,32 @@ static uint32_t framfs_get_mac_entry_addr(uint8_t index)
     return framfs_get_mac_header_addr() +
            sizeof(struct juxta_framfs_mac_header) +
            (index * sizeof(struct juxta_framfs_mac_entry));
+}
+
+/* ========================================================================
+ * User Settings Helper Functions
+ * ======================================================================== */
+
+static uint32_t framfs_get_user_settings_addr(void)
+{
+    return sizeof(struct juxta_framfs_header) +
+           (JUXTA_FRAMFS_MAX_FILES * sizeof(struct juxta_framfs_entry)) +
+           sizeof(struct juxta_framfs_mac_header) +
+           (JUXTA_FRAMFS_MAX_MAC_ADDRESSES * sizeof(struct juxta_framfs_mac_entry));
+}
+
+static int framfs_read_user_settings(struct juxta_framfs_context *ctx)
+{
+    uint32_t addr = framfs_get_user_settings_addr();
+    return juxta_fram_read(ctx->fram_dev, addr,
+                           (uint8_t *)&ctx->user_settings, sizeof(ctx->user_settings));
+}
+
+static int framfs_write_user_settings(struct juxta_framfs_context *ctx)
+{
+    uint32_t addr = framfs_get_user_settings_addr();
+    return juxta_fram_write(ctx->fram_dev, addr,
+                            (uint8_t *)&ctx->user_settings, sizeof(ctx->user_settings));
 }
 
 static int framfs_read_mac_header(struct juxta_framfs_context *ctx)
@@ -938,6 +1000,164 @@ int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx)
     }
 
     LOG_INF("MAC address table cleared successfully");
+    return JUXTA_FRAMFS_OK;
+}
+
+/* ========================================================================
+ * User Settings API Functions
+ * ======================================================================== */
+
+int juxta_framfs_get_adv_interval(struct juxta_framfs_context *ctx,
+                                  uint8_t *interval)
+{
+    if (!ctx || !ctx->initialized || !interval)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    *interval = ctx->user_settings.adv_interval;
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_adv_interval(struct juxta_framfs_context *ctx,
+                                  uint8_t interval)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    ctx->user_settings.adv_interval = interval;
+    return framfs_write_user_settings(ctx);
+}
+
+int juxta_framfs_get_scan_interval(struct juxta_framfs_context *ctx,
+                                   uint8_t *interval)
+{
+    if (!ctx || !ctx->initialized || !interval)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    *interval = ctx->user_settings.scan_interval;
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
+                                   uint8_t interval)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    ctx->user_settings.scan_interval = interval;
+    return framfs_write_user_settings(ctx);
+}
+
+int juxta_framfs_get_subject_id(struct juxta_framfs_context *ctx,
+                                char *subject_id)
+{
+    if (!ctx || !ctx->initialized || !subject_id)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    strncpy(subject_id, ctx->user_settings.subject_id, JUXTA_FRAMFS_SUBJECT_ID_LEN);
+    subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN - 1] = '\0';
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_subject_id(struct juxta_framfs_context *ctx,
+                                const char *subject_id)
+{
+    if (!ctx || !ctx->initialized || !subject_id)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    strncpy(ctx->user_settings.subject_id, subject_id, JUXTA_FRAMFS_SUBJECT_ID_LEN - 1);
+    ctx->user_settings.subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN - 1] = '\0';
+    return framfs_write_user_settings(ctx);
+}
+
+int juxta_framfs_get_upload_path(struct juxta_framfs_context *ctx,
+                                 char *upload_path)
+{
+    if (!ctx || !ctx->initialized || !upload_path)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    strncpy(upload_path, ctx->user_settings.upload_path, JUXTA_FRAMFS_UPLOAD_PATH_LEN);
+    upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN - 1] = '\0';
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_upload_path(struct juxta_framfs_context *ctx,
+                                 const char *upload_path)
+{
+    if (!ctx || !ctx->initialized || !upload_path)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    strncpy(ctx->user_settings.upload_path, upload_path, JUXTA_FRAMFS_UPLOAD_PATH_LEN - 1);
+    ctx->user_settings.upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN - 1] = '\0';
+    return framfs_write_user_settings(ctx);
+}
+
+int juxta_framfs_get_user_settings(struct juxta_framfs_context *ctx,
+                                   struct juxta_framfs_user_settings *settings)
+{
+    if (!ctx || !ctx->initialized || !settings)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    *settings = ctx->user_settings;
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_user_settings(struct juxta_framfs_context *ctx,
+                                   const struct juxta_framfs_user_settings *settings)
+{
+    if (!ctx || !ctx->initialized || !settings)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    ctx->user_settings = *settings;
+    return framfs_write_user_settings(ctx);
+}
+
+int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx)
+{
+    if (!ctx || !ctx->fram_dev)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    LOG_INF("Clearing user settings");
+
+    /* Initialize user settings with defaults */
+    memset(&ctx->user_settings, 0, sizeof(ctx->user_settings));
+    ctx->user_settings.magic = JUXTA_FRAMFS_USER_SETTINGS_MAGIC;
+    ctx->user_settings.version = JUXTA_FRAMFS_USER_SETTINGS_VERSION;
+    ctx->user_settings.adv_interval = 5;             /* Default: advertising every 5 seconds */
+    ctx->user_settings.scan_interval = 15;           /* Default: scanning every 15 seconds */
+    strcpy(ctx->user_settings.subject_id, "");       /* Default: empty */
+    strcpy(ctx->user_settings.upload_path, "/TEST"); /* Default: /TEST */
+
+    /* Write to FRAM */
+    int ret = framfs_write_user_settings(ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write user settings: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("User settings cleared successfully");
     return JUXTA_FRAMFS_OK;
 }
 
