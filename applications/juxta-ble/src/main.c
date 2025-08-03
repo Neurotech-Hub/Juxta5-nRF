@@ -666,6 +666,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
     in_adv_burst = false;
     in_scan_burst = false;
 
+    /* Notify BLE service of connection */
+    juxta_ble_connection_established(conn);
+
     LOG_INF("📤 Hublink gateway connected - ready for data exchange");
 }
 
@@ -673,6 +676,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
     ble_state = BLE_STATE_IDLE;
+
+    /* Notify BLE service of disconnection */
+    juxta_ble_connection_terminated();
 
     last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
     last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();

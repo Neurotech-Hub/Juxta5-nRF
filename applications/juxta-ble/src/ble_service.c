@@ -36,6 +36,12 @@ static struct bt_conn *current_conn = NULL;
 /* External framfs context - will be set during initialization */
 static struct juxta_framfs_context *framfs_ctx = NULL;
 
+/* File transfer state */
+static bool file_transfer_active = false;
+static char current_transfer_filename[JUXTA_FRAMFS_FILENAME_LEN];
+static uint32_t current_transfer_offset = 0;
+static int current_transfer_file_size = -1;
+
 /**
  * @brief Set the framfs context for user settings access
  */
@@ -185,7 +191,28 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         if (strstr(p, "\"sendFilenames\":true") || strstr(p, "\"sendFilenames\": true"))
         {
             LOG_INF("🎛️ Send filenames command received");
-            /* TODO: Phase 4 - Trigger file listing */
+            /* Trigger file listing via filename characteristic */
+            if (current_conn)
+            {
+                char file_listing[JUXTA_NODE_RESPONSE_MAX_SIZE];
+                int listing_len = generate_file_listing(file_listing, sizeof(file_listing));
+
+                if (listing_len > 0)
+                {
+                    /* Send file listing via indication */
+                    send_indication(current_conn, &juxta_hublink_svc.attrs[8], file_listing, listing_len);
+                }
+                else
+                {
+                    /* Send error response */
+                    const char *error = "NFF";
+                    send_indication(current_conn, &juxta_hublink_svc.attrs[8], error, strlen(error));
+                }
+            }
+            else
+            {
+                LOG_WRN("🎛️ No active connection for file listing");
+            }
         }
     }
 
@@ -320,15 +347,182 @@ static ssize_t write_gateway_char(struct bt_conn *conn, const struct bt_gatt_att
 }
 
 /**
+ * @brief Generate file listing response
+ * Format: "filename1.txt|1234;filename2.csv|5678;EOF"
+ */
+static int generate_file_listing(char *buffer, size_t buffer_size)
+{
+    if (!framfs_ctx || !framfs_ctx->initialized)
+    {
+        LOG_ERR("📁 Framfs not available for file listing");
+        return -1;
+    }
+
+    char filenames[JUXTA_FRAMFS_MAX_FILES][JUXTA_FRAMFS_FILENAME_LEN];
+    int file_count = juxta_framfs_list_files(framfs_ctx, filenames, JUXTA_FRAMFS_MAX_FILES);
+
+    if (file_count < 0)
+    {
+        LOG_ERR("📁 Failed to list files: %d", file_count);
+        return -1;
+    }
+
+    LOG_INF("📁 Generating file listing for %d files", file_count);
+
+    int written = 0;
+    for (int i = 0; i < file_count; i++)
+    {
+        struct juxta_framfs_entry entry;
+        int ret = juxta_framfs_get_file_info(framfs_ctx, filenames[i], &entry);
+        if (ret == 0)
+        {
+            int len = snprintf(buffer + written, buffer_size - written,
+                               "%s|%d;", filenames[i], entry.length);
+            if (len >= 0 && written + len < buffer_size)
+            {
+                written += len;
+            }
+            else
+            {
+                LOG_WRN("📁 File listing buffer full, truncating");
+                break;
+            }
+        }
+        else
+        {
+            LOG_WRN("📁 Failed to get info for file %s: %d", filenames[i], ret);
+        }
+    }
+
+    /* Add EOF marker */
+    int eof_len = snprintf(buffer + written, buffer_size - written, "EOF");
+    if (eof_len >= 0 && written + eof_len < buffer_size)
+    {
+        written += eof_len;
+    }
+
+    LOG_INF("📁 Generated file listing: %s", buffer);
+    return written;
+}
+
+/**
+ * @brief Start file transfer for requested filename
+ */
+static int start_file_transfer(const char *filename)
+{
+    if (!framfs_ctx || !framfs_ctx->initialized)
+    {
+        LOG_ERR("📁 Framfs not available for file transfer");
+        return -1;
+    }
+
+    /* Get file info */
+    struct juxta_framfs_entry entry;
+    int ret = juxta_framfs_get_file_info(framfs_ctx, filename, &entry);
+    if (ret != 0)
+    {
+        LOG_ERR("📁 File not found: %s", filename);
+        return -1;
+    }
+
+    /* Initialize transfer state */
+    strncpy(current_transfer_filename, filename, JUXTA_FRAMFS_FILENAME_LEN - 1);
+    current_transfer_filename[JUXTA_FRAMFS_FILENAME_LEN - 1] = '\0';
+    current_transfer_offset = 0;
+    current_transfer_file_size = entry.length;
+    file_transfer_active = true;
+
+    LOG_INF("📁 Started file transfer: %s (%d bytes)", filename, entry.length);
+    return 0;
+}
+
+/**
+ * @brief Get next chunk of file data for transfer
+ */
+static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *bytes_read)
+{
+    if (!file_transfer_active || !framfs_ctx || !framfs_ctx->initialized)
+    {
+        return -1;
+    }
+
+    /* Calculate chunk size */
+    size_t remaining = current_transfer_file_size - current_transfer_offset;
+    size_t chunk_size = MIN(buffer_size, remaining);
+
+    if (chunk_size == 0)
+    {
+        *bytes_read = 0;
+        return 0; /* Transfer complete */
+    }
+
+    /* Read file chunk */
+    int ret = juxta_framfs_read(framfs_ctx, current_transfer_filename,
+                                current_transfer_offset, buffer, chunk_size);
+    if (ret < 0)
+    {
+        LOG_ERR("📁 Failed to read file chunk at offset %u: %d", current_transfer_offset, ret);
+        return ret;
+    }
+
+    current_transfer_offset += ret;
+    *bytes_read = ret;
+
+    LOG_DBG("📁 File transfer chunk: offset=%u, bytes=%zu", current_transfer_offset, *bytes_read);
+    return 0;
+}
+
+/**
+ * @brief End current file transfer
+ */
+static void end_file_transfer(void)
+{
+    file_transfer_active = false;
+    current_transfer_offset = 0;
+    current_transfer_file_size = -1;
+    memset(current_transfer_filename, 0, sizeof(current_transfer_filename));
+    LOG_INF("📁 File transfer ended");
+}
+
+/**
+ * @brief Send indication to connected client
+ */
+static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                           const void *data, uint16_t len)
+{
+    if (!conn)
+    {
+        return -1;
+    }
+
+    struct bt_gatt_notify_params params = {
+        .attr = attr,
+        .data = data,
+        .len = len,
+        .func = NULL,
+    };
+
+    int ret = bt_gatt_notify_cb(conn, &params);
+    if (ret < 0)
+    {
+        LOG_ERR("📤 Failed to send indication: %d", ret);
+        return ret;
+    }
+
+    LOG_DBG("📤 Indication sent: %d bytes", len);
+    return 0;
+}
+
+/**
  * @brief Filename characteristic read callback
  */
 static ssize_t read_filename_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   void *buf, uint16_t len, uint16_t offset)
 {
-    LOG_DBG("Filename characteristic read request");
+    LOG_DBG("📁 Filename characteristic read request");
 
-    /* TODO: Phase 4 - Return current filename or status */
-    const char *response = "";
+    /* Return current filename or empty string */
+    const char *response = current_transfer_filename;
     size_t response_len = strlen(response);
 
     if (offset >= response_len)
@@ -349,7 +543,7 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
                                    const void *buf, uint16_t len, uint16_t offset,
                                    uint8_t flags)
 {
-    LOG_DBG("Filename characteristic write request, len=%d", len);
+    LOG_DBG("📁 Filename characteristic write request, len=%d", len);
 
     if (offset + len > sizeof(filename_request))
     {
@@ -359,9 +553,43 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
     memcpy(filename_request + offset, buf, len);
     filename_request[offset + len] = '\0';
 
-    LOG_INF("📱 BLE: Filename request received: %s", filename_request);
+    LOG_INF("📁 Filename request received: %s", filename_request);
 
-    /* TODO: Phase 4 - Process filename request and trigger file transfer */
+    /* Process filename request */
+    if (strcmp(filename_request, "LIST") == 0)
+    {
+        /* File listing request */
+        char file_listing[JUXTA_NODE_RESPONSE_MAX_SIZE];
+        int listing_len = generate_file_listing(file_listing, sizeof(file_listing));
+
+        if (listing_len > 0)
+        {
+            /* Send file listing via indication */
+            send_indication(conn, &juxta_hublink_svc.attrs[8], file_listing, listing_len);
+        }
+        else
+        {
+            /* Send error response */
+            const char *error = "NFF";
+            send_indication(conn, &juxta_hublink_svc.attrs[8], error, strlen(error));
+        }
+    }
+    else
+    {
+        /* File transfer request */
+        int ret = start_file_transfer(filename_request);
+        if (ret == 0)
+        {
+            /* Send filename confirmation via indication */
+            send_indication(conn, &juxta_hublink_svc.attrs[8], filename_request, strlen(filename_request));
+        }
+        else
+        {
+            /* Send error response */
+            const char *error = "NFF";
+            send_indication(conn, &juxta_hublink_svc.attrs[8], error, strlen(error));
+        }
+    }
 
     return len;
 }
@@ -372,21 +600,45 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
 static ssize_t read_file_transfer_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                        void *buf, uint16_t len, uint16_t offset)
 {
-    LOG_DBG("File transfer characteristic read request");
+    LOG_DBG("📤 File transfer characteristic read request");
 
-    /* TODO: Phase 4 - Return file content or status */
-    const char *response = "";
-    size_t response_len = strlen(response);
-
-    if (offset >= response_len)
+    if (!file_transfer_active)
     {
-        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+        /* No active transfer */
+        const char *response = "";
+        size_t response_len = strlen(response);
+
+        if (offset >= response_len)
+        {
+            return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+        }
+
+        size_t copy_len = MIN(len, response_len - offset);
+        memcpy(buf, response + offset, copy_len);
+        return copy_len;
     }
 
-    size_t copy_len = MIN(len, response_len - offset);
-    memcpy(buf, response + offset, copy_len);
+    /* Get file transfer chunk */
+    size_t bytes_read = 0;
+    int ret = get_file_transfer_chunk(buf, len, &bytes_read);
+    if (ret < 0)
+    {
+        LOG_ERR("📤 Failed to get file transfer chunk: %d", ret);
+        return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+    }
 
-    return copy_len;
+    /* Check if transfer is complete */
+    if (bytes_read == 0)
+    {
+        /* Transfer complete, send EOF */
+        const char *eof = "EOF";
+        size_t eof_len = MIN(len, strlen(eof));
+        memcpy(buf, eof, eof_len);
+        end_file_transfer();
+        return eof_len;
+    }
+
+    return bytes_read;
 }
 
 /**
@@ -404,7 +656,26 @@ static void filename_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value
 static void file_transfer_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
     bool notif_enabled = (value == BT_GATT_CCC_NOTIFY) || (value == BT_GATT_CCC_INDICATE);
-    LOG_INF("📱 BLE: File transfer CCC changed, notifications %s", notif_enabled ? "enabled" : "disabled");
+    LOG_INF("📤 File transfer CCC changed, notifications %s", notif_enabled ? "enabled" : "disabled");
+}
+
+/**
+ * @brief Connection established callback
+ */
+void juxta_ble_connection_established(struct bt_conn *conn)
+{
+    current_conn = conn;
+    LOG_INF("🔗 BLE connection established for file transfer");
+}
+
+/**
+ * @brief Connection terminated callback
+ */
+void juxta_ble_connection_terminated(void)
+{
+    current_conn = NULL;
+    end_file_transfer(); /* Clean up any active transfer */
+    LOG_INF("🔌 BLE connection terminated, file transfer cleaned up");
 }
 
 /* JUXTA Hublink BLE Service Definition */

@@ -84,6 +84,18 @@ extern "C"
      */
     extern void juxta_ble_timing_update_trigger(void);
 
+    /**
+     * @brief Connection established callback
+     *
+     * @param conn Bluetooth connection handle
+     */
+    void juxta_ble_connection_established(struct bt_conn *conn);
+
+    /**
+     * @brief Connection terminated callback
+     */
+    void juxta_ble_connection_terminated(void);
+
 #ifdef __cplusplus
 }
 #endif
