@@ -20,6 +20,11 @@
 
 LOG_MODULE_REGISTER(juxta_ble_service, LOG_LEVEL_DBG);
 
+/* Forward declarations */
+static int generate_file_listing(char *buffer, size_t buffer_size);
+static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                           const void *data, uint16_t len);
+
 /* Characteristic values - will be used in later phases */
 static char node_response[JUXTA_NODE_RESPONSE_MAX_SIZE] __unused;
 static char gateway_command[JUXTA_GATEWAY_COMMAND_MAX_SIZE] __unused;
@@ -30,8 +35,12 @@ static uint8_t file_transfer_chunk[JUXTA_FILE_TRANSFER_CHUNK_SIZE] __unused;
 static struct bt_gatt_ccc_cfg filename_ccc_cfg[BT_GATT_CCC_MAX] __unused;
 static struct bt_gatt_ccc_cfg file_transfer_ccc_cfg[BT_GATT_CCC_MAX] __unused;
 
-/* Current connection for indications - will be used in Phase IV */
-static struct bt_conn *current_conn __unused = NULL;
+/* Current connection for indications */
+static struct bt_conn *current_conn = NULL;
+
+/* Service attribute references for indications */
+static const struct bt_gatt_attr *filename_char_attr = NULL;
+static const struct bt_gatt_attr *file_transfer_char_attr = NULL;
 
 /* External framfs context - will be set during initialization */
 static struct juxta_framfs_context *framfs_ctx = NULL;
@@ -200,13 +209,19 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
                 if (listing_len > 0)
                 {
                     /* Send file listing via indication */
-                    send_indication(current_conn, &juxta_hublink_svc.attrs[8], file_listing, listing_len);
+                    if (filename_char_attr && current_conn)
+                    {
+                        send_indication(current_conn, filename_char_attr, file_listing, listing_len);
+                    }
                 }
                 else
                 {
                     /* Send error response */
-                    const char *error = "NFF";
-                    send_indication(current_conn, &juxta_hublink_svc.attrs[8], error, strlen(error));
+                    if (filename_char_attr && current_conn)
+                    {
+                        const char *error = "NFF";
+                        send_indication(current_conn, filename_char_attr, error, strlen(error));
+                    }
                 }
             }
             else
@@ -565,13 +580,19 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
         if (listing_len > 0)
         {
             /* Send file listing via indication */
-            send_indication(conn, &juxta_hublink_svc.attrs[8], file_listing, listing_len);
+            if (filename_char_attr && conn)
+            {
+                send_indication(conn, filename_char_attr, file_listing, listing_len);
+            }
         }
         else
         {
             /* Send error response */
-            const char *error = "NFF";
-            send_indication(conn, &juxta_hublink_svc.attrs[8], error, strlen(error));
+            if (filename_char_attr && conn)
+            {
+                const char *error = "NFF";
+                send_indication(conn, filename_char_attr, error, strlen(error));
+            }
         }
     }
     else
@@ -581,13 +602,19 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
         if (ret == 0)
         {
             /* Send filename confirmation via indication */
-            send_indication(conn, &juxta_hublink_svc.attrs[8], filename_request, strlen(filename_request));
+            if (filename_char_attr && conn)
+            {
+                send_indication(conn, filename_char_attr, filename_request, strlen(filename_request));
+            }
         }
         else
         {
             /* Send error response */
-            const char *error = "NFF";
-            send_indication(conn, &juxta_hublink_svc.attrs[8], error, strlen(error));
+            if (filename_char_attr && conn)
+            {
+                const char *error = "NFF";
+                send_indication(conn, filename_char_attr, error, strlen(error));
+            }
         }
     }
 
