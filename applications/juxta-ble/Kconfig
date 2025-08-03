@@ -22,4 +22,9 @@ config JUXTA_BLE_MOTION_GATING
 endmenu
 
 # Include Zephyr Kconfig
-source "Kconfig.zephyr" 
+source "Kconfig.zephyr"
+
+# Include library Kconfig files
+rsource "../../lib/juxta_vitals_nrf52/Kconfig"
+rsource "../../lib/juxta_fram/Kconfig"
+rsource "../../lib/juxta_framfs/Kconfig"

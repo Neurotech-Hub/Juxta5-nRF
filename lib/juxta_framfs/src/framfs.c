@@ -7,6 +7,7 @@
 
 #include <juxta_framfs/framfs.h>
 #include <zephyr/logging/log.h>
+#include <stdio.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(juxta_framfs, CONFIG_JUXTA_FRAMFS_LOG_LEVEL);
