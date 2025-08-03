@@ -42,6 +42,33 @@ static char current_transfer_filename[JUXTA_FRAMFS_FILENAME_LEN];
 static uint32_t current_transfer_offset = 0;
 static int current_transfer_file_size = -1;
 
+/* MTU and connection state */
+static uint16_t current_mtu = 23; /* Default BLE MTU */
+static bool mtu_negotiated = false;
+
+/**
+ * @brief MTU exchange callback
+ */
+static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchange_params *params)
+{
+    if (err)
+    {
+        LOG_ERR("📏 MTU exchange failed: %d", err);
+        mtu_negotiated = false;
+        current_mtu = 23; /* Fallback to default */
+    }
+    else
+    {
+        current_mtu = bt_gatt_get_mtu(conn);
+        mtu_negotiated = true;
+        LOG_INF("📏 MTU negotiated: %d bytes", current_mtu);
+    }
+}
+
+static struct bt_gatt_exchange_params exchange_params = {
+    .func = mtu_exchange_cb,
+};
+
 /**
  * @brief Set the framfs context for user settings access
  */
@@ -141,7 +168,14 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
 {
     if (!json_cmd || !settings)
     {
-        return -1;
+        LOG_ERR("🎛️ Invalid parameters for gateway command parsing");
+        return -EINVAL;
+    }
+
+    if (strlen(json_cmd) == 0)
+    {
+        LOG_ERR("🎛️ Empty gateway command received");
+        return -EINVAL;
     }
 
     LOG_DBG("🎛️ Parsing gateway command: %s", json_cmd);
@@ -237,6 +271,10 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
             LOG_INF("🎛️ Advertising interval command: %d", adv_interval);
             settings->adv_interval = adv_interval;
             settings_changed = true;
+        }
+        else
+        {
+            LOG_WRN("🎛️ Invalid advInterval format in command");
         }
     }
 
@@ -347,7 +385,29 @@ static ssize_t write_gateway_char(struct bt_conn *conn, const struct bt_gatt_att
 }
 
 /**
- * @brief Generate file listing response
+ * @brief Enhanced error handling for file operations
+ */
+static int handle_file_error(int error_code, const char *operation, const char *filename)
+{
+    switch (error_code)
+    {
+    case JUXTA_FRAMFS_ERROR_NOT_FOUND:
+        LOG_ERR("📁 File not found: %s (%s)", filename, operation);
+        return -ENOENT;
+    case JUXTA_FRAMFS_ERROR_INVALID:
+        LOG_ERR("📁 Invalid file operation: %s (%s)", filename, operation);
+        return -EINVAL;
+    case JUXTA_FRAMFS_ERROR_FULL:
+        LOG_ERR("📁 File system full: %s (%s)", filename, operation);
+        return -ENOSPC;
+    default:
+        LOG_ERR("📁 File operation failed: %s (%s) - error %d", filename, operation, error_code);
+        return -EIO;
+    }
+}
+
+/**
+ * @brief Generate file listing response with enhanced error handling
  * Format: "filename1.txt|1234;filename2.csv|5678;EOF"
  */
 static int generate_file_listing(char *buffer, size_t buffer_size)
@@ -384,13 +444,13 @@ static int generate_file_listing(char *buffer, size_t buffer_size)
             }
             else
             {
-                LOG_WRN("📁 File listing buffer full, truncating");
+                LOG_WRN("📁 File listing buffer full, truncating at %d files", i);
                 break;
             }
         }
         else
         {
-            LOG_WRN("📁 Failed to get info for file %s: %d", filenames[i], ret);
+            handle_file_error(ret, "get_file_info", filenames[i]);
         }
     }
 
@@ -401,12 +461,12 @@ static int generate_file_listing(char *buffer, size_t buffer_size)
         written += eof_len;
     }
 
-    LOG_INF("📁 Generated file listing: %s", buffer);
+    LOG_INF("📁 Generated file listing (%d bytes): %s", written, buffer);
     return written;
 }
 
 /**
- * @brief Start file transfer for requested filename
+ * @brief Start file transfer for requested filename with enhanced error handling
  */
 static int start_file_transfer(const char *filename)
 {
@@ -416,13 +476,25 @@ static int start_file_transfer(const char *filename)
         return -1;
     }
 
+    if (!filename || strlen(filename) == 0)
+    {
+        LOG_ERR("📁 Invalid filename for file transfer");
+        return -EINVAL;
+    }
+
     /* Get file info */
     struct juxta_framfs_entry entry;
     int ret = juxta_framfs_get_file_info(framfs_ctx, filename, &entry);
     if (ret != 0)
     {
-        LOG_ERR("📁 File not found: %s", filename);
-        return -1;
+        return handle_file_error(ret, "get_file_info", filename);
+    }
+
+    /* Validate file size */
+    if (entry.length <= 0)
+    {
+        LOG_ERR("📁 Invalid file size: %d bytes", entry.length);
+        return -EINVAL;
     }
 
     /* Initialize transfer state */
@@ -432,12 +504,13 @@ static int start_file_transfer(const char *filename)
     current_transfer_file_size = entry.length;
     file_transfer_active = true;
 
-    LOG_INF("📁 Started file transfer: %s (%d bytes)", filename, entry.length);
+    LOG_INF("📁 Started file transfer: %s (%d bytes, MTU: %d)",
+            filename, entry.length, current_mtu);
     return 0;
 }
 
 /**
- * @brief Get next chunk of file data for transfer
+ * @brief Get next chunk of file data for transfer with MTU optimization
  */
 static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *bytes_read)
 {
@@ -446,9 +519,10 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         return -1;
     }
 
-    /* Calculate chunk size */
+    /* Calculate optimal chunk size based on MTU */
+    size_t max_chunk_size = current_mtu - 3; /* Account for ATT header */
     size_t remaining = current_transfer_file_size - current_transfer_offset;
-    size_t chunk_size = MIN(buffer_size, remaining);
+    size_t chunk_size = MIN(MIN(buffer_size, max_chunk_size), remaining);
 
     if (chunk_size == 0)
     {
@@ -461,14 +535,15 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
                                 current_transfer_offset, buffer, chunk_size);
     if (ret < 0)
     {
-        LOG_ERR("📁 Failed to read file chunk at offset %u: %d", current_transfer_offset, ret);
-        return ret;
+        return handle_file_error(ret, "read_file_chunk", current_transfer_filename);
     }
 
     current_transfer_offset += ret;
     *bytes_read = ret;
 
-    LOG_DBG("📁 File transfer chunk: offset=%u, bytes=%zu", current_transfer_offset, *bytes_read);
+    LOG_DBG("📁 File transfer chunk: offset=%u/%d, bytes=%zu, progress=%.1f%%",
+            current_transfer_offset, current_transfer_file_size, *bytes_read,
+            (float)current_transfer_offset / current_transfer_file_size * 100.0);
     return 0;
 }
 
@@ -492,7 +567,14 @@ static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr
 {
     if (!conn)
     {
-        return -1;
+        LOG_ERR("📤 No connection available for indication");
+        return -ENOTCONN;
+    }
+
+    if (!data || len == 0)
+    {
+        LOG_ERR("📤 Invalid data for indication");
+        return -EINVAL;
     }
 
     struct bt_gatt_notify_params params = {
@@ -666,6 +748,19 @@ void juxta_ble_connection_established(struct bt_conn *conn)
 {
     current_conn = conn;
     LOG_INF("🔗 BLE connection established for file transfer");
+
+    /* Request MTU exchange for larger file transfers */
+    int ret = bt_gatt_exchange_mtu(conn, &exchange_params);
+    if (ret < 0)
+    {
+        LOG_WRN("📏 MTU exchange request failed: %d", ret);
+        mtu_negotiated = false;
+        current_mtu = 23;
+    }
+    else
+    {
+        LOG_INF("📏 MTU exchange requested");
+    }
 }
 
 /**
@@ -674,6 +769,8 @@ void juxta_ble_connection_established(struct bt_conn *conn)
 void juxta_ble_connection_terminated(void)
 {
     current_conn = NULL;
+    mtu_negotiated = false;
+    current_mtu = 23;
     end_file_transfer(); /* Clean up any active transfer */
     LOG_INF("🔌 BLE connection terminated, file transfer cleaned up");
 }
@@ -736,6 +833,10 @@ int juxta_ble_service_init(void)
     LOG_INF("🎛️ Gateway Characteristic UUID: 57617368-5504-0001-8000-00805f9b34fb");
     LOG_INF("📁 Filename Characteristic UUID: 57617368-5502-0001-8000-00805f9b34fb");
     LOG_INF("📤 File Transfer Characteristic UUID: 57617368-5503-0001-8000-00805f9b34fb");
+    LOG_INF("📏 Target MTU: 515 bytes (512 + 3 byte header)");
+    LOG_INF("📁 File transfer chunk size: %d bytes", JUXTA_FILE_TRANSFER_CHUNK_SIZE);
+    LOG_INF("📊 Node response max size: %d bytes", JUXTA_NODE_RESPONSE_MAX_SIZE);
+    LOG_INF("🎛️ Gateway command max size: %d bytes", JUXTA_GATEWAY_COMMAND_MAX_SIZE);
 
     /* Service is automatically registered with BT_GATT_SERVICE_DEFINE */
     return 0;
@@ -764,4 +865,23 @@ int juxta_ble_get_device_id(char *device_id)
 
     strcpy(device_id, "JX_ERROR");
     return -1;
+}
+
+/**
+ * @brief Get current service status for debugging
+ */
+int juxta_ble_get_status(uint16_t *mtu, bool *connected, bool *transfer_active)
+{
+    if (!mtu || !connected || !transfer_active)
+    {
+        return -EINVAL;
+    }
+
+    *mtu = current_mtu;
+    *connected = (current_conn != NULL);
+    *transfer_active = file_transfer_active;
+
+    LOG_DBG("📊 Service status: MTU=%d, Connected=%s, Transfer=%s",
+            *mtu, *connected ? "yes" : "no", *transfer_active ? "active" : "idle");
+    return 0;
 }

@@ -96,6 +96,16 @@ extern "C"
      */
     void juxta_ble_connection_terminated(void);
 
+    /**
+     * @brief Get current service status for debugging
+     *
+     * @param mtu Pointer to store current MTU size
+     * @param connected Pointer to store connection status
+     * @param transfer_active Pointer to store file transfer status
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_ble_get_status(uint16_t *mtu, bool *connected, bool *transfer_active);
+
 #ifdef __cplusplus
 }
 #endif
