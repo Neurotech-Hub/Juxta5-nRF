@@ -92,6 +92,7 @@ static int juxta_start_advertising(void);
 static int juxta_stop_advertising(void);
 static int juxta_start_scanning(void);
 static int juxta_stop_scanning(void);
+static uint32_t get_rtc_timestamp(void);
 
 /* Dynamic advertising name setup */
 static void setup_dynamic_adv_name(void);
