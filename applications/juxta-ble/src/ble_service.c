@@ -12,6 +12,7 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/att.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -53,8 +54,6 @@ static int current_transfer_file_size = -1;
 /* MTU and connection state */
 static uint16_t current_mtu = 23; /* Default BLE MTU */
 static bool mtu_negotiated = false;
-
-/* MTU exchange will be implemented in a future phase */
 
 /**
  * @brief Set the framfs context for user settings access
@@ -754,10 +753,11 @@ void juxta_ble_connection_established(struct bt_conn *conn)
     current_conn = conn;
     LOG_INF("🔗 BLE connection established for file transfer");
 
-    /* For now, use default MTU - MTU exchange will be implemented in a future phase */
-    LOG_INF("📏 Using default MTU (23 bytes)");
-    mtu_negotiated = false;
-    current_mtu = 23;
+    // SoftDevice controller does not support GATT client MTU exchange.
+    // The peer (e.g., mobile app) must initiate MTU exchange for larger MTU.
+    current_mtu = bt_gatt_get_mtu(conn); // Will be 23 unless peer requests larger
+    mtu_negotiated = (current_mtu > 23);
+    LOG_INF("📏 Current MTU: %d bytes (negotiated=%s)", current_mtu, mtu_negotiated ? "yes" : "no");
 }
 
 /**
