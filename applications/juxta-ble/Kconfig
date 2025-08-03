@@ -1,44 +1,30 @@
+# JUXTA BLE Application Configuration
+#
 # Copyright (c) 2024 NeurotechHub
 # SPDX-License-Identifier: Apache-2.0
-#
-# This file is the application Kconfig entry point. All application Kconfig
-# options can be defined here or included via other application Kconfig files.
-# You can browse these options using the west targets menuconfig (terminal) or
-# guiconfig (GUI).
 
-menu "Zephyr"
-source "Kconfig.zephyr"
-endmenu
-
-# Source library configurations
-rsource "../../lib/juxta_vitals_nrf52/Kconfig"
-
-# JUXTA BLE Application Configuration
-menu "JUXTA BLE Configuration"
-
-config JUXTA_BLE_SCAN_DURATION_MS
-    int "BLE Scan Duration (milliseconds)"
-    default 1000
-    range 500 2000
-    help
-      Duration of each BLE scanning burst in milliseconds.
-      Range: 500-2000ms, default: 1000ms
-
-config JUXTA_BLE_MOTION_GATING
-    bool "Enable Motion-Based Interval Adjustment"
-    default y
-    help
-      Enable motion gating to adjust BLE intervals based on activity.
-      When disabled, uses fixed intervals regardless of motion.
+menu "JUXTA BLE Application"
 
 config JUXTA_BLE_RANDOMIZATION
-    bool "Enable Advertising Randomization"
-    default y
-    help
-      Enable random boot delay to avoid lock-step collisions between devices.
+	bool "Enable randomization for BLE operations"
+	default y
+	help
+	  Enable randomization for BLE advertising and scanning intervals
+	  to reduce collision probability in dense deployments.
+
+config JUXTA_BLE_MOTION_GATING
+	bool "Enable motion-based BLE gating"
+	default y
+	help
+	  Enable motion-based gating that adjusts BLE intervals based on
+	  motion activity to save power.
 
 endmenu
 
-module = APP
-module-str = APP
-source "subsys/logging/Kconfig.template.log_config" 
+# Include Zephyr Kconfig
+source "Kconfig.zephyr"
+
+# Include library Kconfig files
+rsource "../../lib/juxta_vitals_nrf52/Kconfig"
+rsource "../../lib/juxta_fram/Kconfig"
+rsource "../../lib/juxta_framfs/Kconfig" 
