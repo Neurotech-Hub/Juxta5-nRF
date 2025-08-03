@@ -13,7 +13,6 @@
 #include <zephyr/bluetooth/gap.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/random/random.h>
 #include "juxta_vitals_nrf52/vitals.h"
@@ -35,8 +34,6 @@ static ble_state_t ble_state = BLE_STATE_IDLE;
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
-#define LED_NODE DT_ALIAS(led0)
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 static struct juxta_vitals_ctx vitals_ctx;
 
 static bool in_adv_burst = false;
@@ -532,25 +529,6 @@ static int juxta_stop_scanning(void)
     return 0;
 }
 
-int juxta_ble_led_set(bool state)
-{
-    if (!device_is_ready(led.port))
-    {
-        LOG_ERR("LED device not ready");
-        return -1;
-    }
-
-    int ret = gpio_pin_set_dt(&led, state ? 0 : 1);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to set LED (err %d)", ret);
-        return ret;
-    }
-
-    LOG_DBG("LED set to %s", state ? "ON" : "OFF");
-    return 0;
-}
-
 static int test_rtc_functionality(void)
 {
     int ret;
@@ -608,16 +586,14 @@ static void connected(struct bt_conn *conn, uint8_t err)
     juxta_stop_scanning();
     in_adv_burst = false;
     in_scan_burst = false;
-    juxta_ble_led_set(true);
 
-    LOG_INF("📤 TODO: Implement data exchange with peer");
+    LOG_INF("📤 Hublink gateway connected - ready for data exchange");
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
     ble_state = BLE_STATE_IDLE;
-    juxta_ble_led_set(false);
 
     last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
     last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();
@@ -651,20 +627,7 @@ int main(void)
     LOG_INF("🎲 Randomization: %s", CONFIG_JUXTA_BLE_RANDOMIZATION ? "enabled" : "disabled");
     LOG_INF("🏃 Motion gating: %s", CONFIG_JUXTA_BLE_MOTION_GATING ? "enabled" : "disabled");
 
-    if (!device_is_ready(led.port))
-    {
-        LOG_ERR("LED device not ready");
-        return -1;
-    }
-
-    ret = juxta_ble_led_set(false);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to initialize LED");
-        return ret;
-    }
-
-    LOG_INF("💡 LED initialized on pin %s", led.port->name);
+    LOG_INF("💡 LED support removed - using Hublink BLE service");
 
     ret = bt_enable(NULL);
     if (ret)
@@ -713,9 +676,6 @@ int main(void)
         heartbeat_counter++;
         LOG_INF("💓 System heartbeat: %u (uptime: %u seconds)",
                 heartbeat_counter, heartbeat_counter * 10);
-        juxta_ble_led_set(true);
-        k_sleep(K_MSEC(50));
-        juxta_ble_led_set(false);
     }
 
     return 0;

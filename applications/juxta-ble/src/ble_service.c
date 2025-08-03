@@ -1,6 +1,6 @@
 /*
  * JUXTA BLE Service Implementation
- * Implements BLE GATT service for JUXTA device control
+ * Implements BLE GATT service for JUXTA Hublink protocol
  *
  * Copyright (c) 2024 NeurotechHub
  * SPDX-License-Identifier: Apache-2.0
@@ -11,95 +11,250 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/conn.h>
+#include <string.h>
+#include <stdio.h>
 
 #include "ble_service.h"
 
 LOG_MODULE_REGISTER(juxta_ble_service, LOG_LEVEL_DBG);
 
-/* Current LED state */
-static uint8_t led_state = JUXTA_LED_OFF;
+/* Characteristic values */
+static char node_response[JUXTA_NODE_RESPONSE_MAX_SIZE];
+static char gateway_command[JUXTA_GATEWAY_COMMAND_MAX_SIZE];
+static char filename_request[JUXTA_FILENAME_MAX_SIZE];
+static uint8_t file_transfer_chunk[JUXTA_FILE_TRANSFER_CHUNK_SIZE];
 
-/* LED control characteristic value */
-static uint8_t led_char_value = JUXTA_LED_OFF;
+/* CCC descriptors for indications */
+static struct bt_gatt_ccc_cfg filename_ccc_cfg[BT_GATT_CCC_MAX] = {};
+static struct bt_gatt_ccc_cfg file_transfer_ccc_cfg[BT_GATT_CCC_MAX] = {};
 
-/**
- * @brief LED characteristic read callback
- */
-static ssize_t read_led_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-                             void *buf, uint16_t len, uint16_t offset)
-{
-    LOG_DBG("LED characteristic read, current state: %s",
-            led_char_value ? "ON" : "OFF");
-
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, &led_char_value,
-                             sizeof(led_char_value));
-}
+/* Current connection for indications */
+static struct bt_conn *current_conn = NULL;
 
 /**
- * @brief LED characteristic write callback
+ * @brief Node characteristic read callback
+ * Returns device status and configuration information in JSON format
  */
-static ssize_t write_led_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-                              const void *buf, uint16_t len, uint16_t offset,
-                              uint8_t flags)
+static ssize_t read_node_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                              void *buf, uint16_t len, uint16_t offset)
 {
-    uint8_t *value = attr->user_data;
+    LOG_DBG("Node characteristic read request");
 
-    if (offset + len > sizeof(led_char_value))
+    /* TODO: Phase 2 - Implement actual JSON response with device info */
+    const char *response = "{\"upload_path\":\"/TEST\",\"firmware_version\":\"1.0.0\",\"battery_level\":0,\"device_id\":\"JX_000000\",\"alert\":\"\"}";
+
+    size_t response_len = strlen(response);
+    if (offset >= response_len)
     {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
     }
 
-    memcpy(value + offset, buf, len);
+    size_t copy_len = MIN(len, response_len - offset);
+    memcpy(buf, response + offset, copy_len);
 
-    /* Validate the written value */
-    if (led_char_value != JUXTA_LED_OFF && led_char_value != JUXTA_LED_ON)
+    LOG_INF("📱 BLE: Node characteristic read, returned %zu bytes", copy_len);
+    return copy_len;
+}
+
+/**
+ * @brief Gateway characteristic write callback
+ * Accepts JSON commands to control device behavior
+ */
+static ssize_t write_gateway_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                  const void *buf, uint16_t len, uint16_t offset,
+                                  uint8_t flags)
+{
+    LOG_DBG("Gateway characteristic write request, len=%d", len);
+
+    if (offset + len > sizeof(gateway_command))
     {
-        LOG_WRN("Invalid LED value written: 0x%02X (expected 0x00 or 0x01)",
-                led_char_value);
-        return BT_GATT_ERR(BT_ATT_ERR_OUT_OF_RANGE);
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
     }
 
-    /* Update LED state */
-    led_state = led_char_value;
+    memcpy(gateway_command + offset, buf, len);
+    gateway_command[offset + len] = '\0';
 
-    /* Control the actual LED */
-    int ret = juxta_ble_led_set(led_state == JUXTA_LED_ON);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to control LED: %d", ret);
-        return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
-    }
+    LOG_INF("📱 BLE: Gateway command received: %s", gateway_command);
 
-    LOG_INF("📱 BLE: LED set to %s via characteristic write",
-            led_state ? "ON" : "OFF");
+    /* TODO: Phase 3 - Implement JSON command parsing and execution */
+    /* For now, just acknowledge the write */
 
     return len;
 }
 
-/* JUXTA BLE Service Definition */
-BT_GATT_SERVICE_DEFINE(juxta_ble_svc,
-                       /* Service Declaration */
-                       BT_GATT_PRIMARY_SERVICE(BT_UUID_JUXTA_SERVICE),
+/**
+ * @brief Filename characteristic read callback
+ */
+static ssize_t read_filename_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                  void *buf, uint16_t len, uint16_t offset)
+{
+    LOG_DBG("Filename characteristic read request");
 
-                       /* LED Control Characteristic */
-                       BT_GATT_CHARACTERISTIC(BT_UUID_JUXTA_LED_CHAR,
-                                              BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
-                                              BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
-                                              read_led_char, write_led_char, &led_char_value),
+    /* TODO: Phase 4 - Return current filename or status */
+    const char *response = "";
+    size_t response_len = strlen(response);
 
-                       /* LED Control Characteristic User Description */
-                       BT_GATT_CUD("LED Control", BT_GATT_PERM_READ), );
+    if (offset >= response_len)
+    {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+
+    size_t copy_len = MIN(len, response_len - offset);
+    memcpy(buf, response + offset, copy_len);
+
+    return copy_len;
+}
 
 /**
- * @brief Initialize the JUXTA BLE service
+ * @brief Filename characteristic write callback
+ */
+static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                   const void *buf, uint16_t len, uint16_t offset,
+                                   uint8_t flags)
+{
+    LOG_DBG("Filename characteristic write request, len=%d", len);
+
+    if (offset + len > sizeof(filename_request))
+    {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+
+    memcpy(filename_request + offset, buf, len);
+    filename_request[offset + len] = '\0';
+
+    LOG_INF("📱 BLE: Filename request received: %s", filename_request);
+
+    /* TODO: Phase 4 - Process filename request and trigger file transfer */
+
+    return len;
+}
+
+/**
+ * @brief File transfer characteristic read callback
+ */
+static ssize_t read_file_transfer_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                       void *buf, uint16_t len, uint16_t offset)
+{
+    LOG_DBG("File transfer characteristic read request");
+
+    /* TODO: Phase 4 - Return file content or status */
+    const char *response = "";
+    size_t response_len = strlen(response);
+
+    if (offset >= response_len)
+    {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+
+    size_t copy_len = MIN(len, response_len - offset);
+    memcpy(buf, response + offset, copy_len);
+
+    return copy_len;
+}
+
+/**
+ * @brief CCC changed callback for filename characteristic
+ */
+static void filename_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    bool notif_enabled = (value == BT_GATT_CCC_NOTIFY) || (value == BT_GATT_CCC_INDICATE);
+    LOG_INF("📱 BLE: Filename CCC changed, notifications %s", notif_enabled ? "enabled" : "disabled");
+}
+
+/**
+ * @brief CCC changed callback for file transfer characteristic
+ */
+static void file_transfer_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    bool notif_enabled = (value == BT_GATT_CCC_NOTIFY) || (value == BT_GATT_CCC_INDICATE);
+    LOG_INF("📱 BLE: File transfer CCC changed, notifications %s", notif_enabled ? "enabled" : "disabled");
+}
+
+/* JUXTA Hublink BLE Service Definition */
+BT_GATT_SERVICE_DEFINE(juxta_hublink_svc,
+                       /* Service Declaration */
+                       BT_GATT_PRIMARY_SERVICE(BT_UUID_JUXTA_HUBLINK_SERVICE),
+
+                       /* Node Characteristic (READ) */
+                       BT_GATT_CHARACTERISTIC(BT_UUID_JUXTA_NODE_CHAR,
+                                              BT_GATT_CHRC_READ,
+                                              BT_GATT_PERM_READ,
+                                              read_node_char, NULL, NULL),
+
+                       /* Node Characteristic User Description */
+                       BT_GATT_CUD("Node Status", BT_GATT_PERM_READ),
+
+                       /* Gateway Characteristic (WRITE) */
+                       BT_GATT_CHARACTERISTIC(BT_UUID_JUXTA_GATEWAY_CHAR,
+                                              BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+                                              BT_GATT_PERM_WRITE,
+                                              NULL, write_gateway_char, NULL),
+
+                       /* Gateway Characteristic User Description */
+                       BT_GATT_CUD("Gateway Commands", BT_GATT_PERM_READ),
+
+                       /* Filename Characteristic (READ/WRITE/INDICATE) */
+                       BT_GATT_CHARACTERISTIC(BT_UUID_JUXTA_FILENAME_CHAR,
+                                              BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_INDICATE,
+                                              BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+                                              read_filename_char, write_filename_char, NULL),
+
+                       /* Filename Characteristic CCC */
+                       BT_GATT_CCC(filename_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+
+                       /* Filename Characteristic User Description */
+                       BT_GATT_CUD("Filename Operations", BT_GATT_PERM_READ),
+
+                       /* File Transfer Characteristic (READ/INDICATE) */
+                       BT_GATT_CHARACTERISTIC(BT_UUID_JUXTA_FILE_TRANSFER_CHAR,
+                                              BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE,
+                                              BT_GATT_PERM_READ,
+                                              read_file_transfer_char, NULL, NULL),
+
+                       /* File Transfer Characteristic CCC */
+                       BT_GATT_CCC(file_transfer_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+
+                       /* File Transfer Characteristic User Description */
+                       BT_GATT_CUD("File Transfer", BT_GATT_PERM_READ), );
+
+/**
+ * @brief Initialize the JUXTA Hublink BLE service
  */
 int juxta_ble_service_init(void)
 {
-    LOG_INF("🔵 JUXTA BLE Service initialized");
-    LOG_INF("📋 Service UUID: 12340000-0000-1000-8000-00805f9b34fb");
-    LOG_INF("💡 LED Characteristic UUID: 12350000-0000-1000-8000-00805f9b34fb");
-    LOG_INF("📝 LED Control: Write 0x00 (OFF) or 0x01 (ON)");
+    LOG_INF("🔵 JUXTA Hublink BLE Service initialized");
+    LOG_INF("📋 Service UUID: 57617368-5501-0001-8000-00805f9b34fb");
+    LOG_INF("📊 Node Characteristic UUID: 57617368-5505-0001-8000-00805f9b34fb");
+    LOG_INF("🎛️ Gateway Characteristic UUID: 57617368-5504-0001-8000-00805f9b34fb");
+    LOG_INF("📁 Filename Characteristic UUID: 57617368-5502-0001-8000-00805f9b34fb");
+    LOG_INF("📤 File Transfer Characteristic UUID: 57617368-5503-0001-8000-00805f9b34fb");
 
     /* Service is automatically registered with BT_GATT_SERVICE_DEFINE */
     return 0;
+}
+
+/**
+ * @brief Get the current device ID (JX_XXXXXX format)
+ */
+int juxta_ble_get_device_id(char *device_id)
+{
+    if (!device_id)
+    {
+        return -1;
+    }
+
+    bt_addr_le_t addr;
+    size_t count = 1;
+
+    bt_id_get(&addr, &count);
+    if (count > 0)
+    {
+        snprintf(device_id, 9, "JX_%02X%02X%02X",
+                 addr.a.val[3], addr.a.val[2], addr.a.val[1]);
+        return 0;
+    }
+
+    strcpy(device_id, "JX_ERROR");
+    return -1;
 }

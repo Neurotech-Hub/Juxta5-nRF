@@ -1,6 +1,6 @@
 /*
  * JUXTA BLE Service Header
- * Defines BLE service and characteristics for JUXTA device control
+ * Defines BLE service and characteristics for JUXTA Hublink protocol
  *
  * Copyright (c) 2024 NeurotechHub
  * SPDX-License-Identifier: Apache-2.0
@@ -17,27 +17,45 @@ extern "C"
 {
 #endif
 
-/* Service UUID: 12340000-0000-1000-8000-00805F9B34FB */
-#define JUXTA_SERVICE_UUID 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x10, \
-                           0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
+/* Hublink Service UUID: 57617368-5501-0001-8000-00805f9b34fb */
+#define JUXTA_HUBLINK_SERVICE_UUID 0x68, 0x73, 0x61, 0x57, 0x01, 0x55, 0x01, 0x00, \
+                                   0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
 
-/* LED Control Characteristic UUID: 12350000-0000-1000-8000-00805F9B34FB */
-#define JUXTA_LED_CHAR_UUID 0x00, 0x00, 0x35, 0x12, 0x00, 0x00, 0x00, 0x10, \
-                            0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
+/* Node Characteristic UUID: 57617368-5505-0001-8000-00805f9b34fb (READ) */
+#define JUXTA_NODE_CHAR_UUID 0x68, 0x73, 0x61, 0x57, 0x05, 0x55, 0x01, 0x00, \
+                             0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
 
-#define BT_UUID_JUXTA_SERVICE BT_UUID_DECLARE_128(JUXTA_SERVICE_UUID)
-#define BT_UUID_JUXTA_LED_CHAR BT_UUID_DECLARE_128(JUXTA_LED_CHAR_UUID)
+/* Gateway Characteristic UUID: 57617368-5504-0001-8000-00805f9b34fb (WRITE) */
+#define JUXTA_GATEWAY_CHAR_UUID 0x68, 0x73, 0x61, 0x57, 0x04, 0x55, 0x01, 0x00, \
+                                0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
 
-/**
- * @brief LED state values
- */
-#define JUXTA_LED_OFF 0x00
-#define JUXTA_LED_ON 0x01
+/* Filename Characteristic UUID: 57617368-5502-0001-8000-00805f9b34fb (READ/WRITE/INDICATE) */
+#define JUXTA_FILENAME_CHAR_UUID 0x68, 0x73, 0x61, 0x57, 0x02, 0x55, 0x01, 0x00, \
+                                 0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
+
+/* File Transfer Characteristic UUID: 57617368-5503-0001-8000-00805f9b34fb (READ/INDICATE) */
+#define JUXTA_FILE_TRANSFER_CHAR_UUID 0x68, 0x73, 0x61, 0x57, 0x03, 0x55, 0x01, 0x00, \
+                                      0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
+
+#define BT_UUID_JUXTA_HUBLINK_SERVICE BT_UUID_DECLARE_128(JUXTA_HUBLINK_SERVICE_UUID)
+#define BT_UUID_JUXTA_NODE_CHAR BT_UUID_DECLARE_128(JUXTA_NODE_CHAR_UUID)
+#define BT_UUID_JUXTA_GATEWAY_CHAR BT_UUID_DECLARE_128(JUXTA_GATEWAY_CHAR_UUID)
+#define BT_UUID_JUXTA_FILENAME_CHAR BT_UUID_DECLARE_128(JUXTA_FILENAME_CHAR_UUID)
+#define BT_UUID_JUXTA_FILE_TRANSFER_CHAR BT_UUID_DECLARE_128(JUXTA_FILE_TRANSFER_CHAR_UUID)
+
+/* Firmware version */
+#define JUXTA_FIRMWARE_VERSION "1.0.0"
+
+/* Maximum JSON response sizes */
+#define JUXTA_NODE_RESPONSE_MAX_SIZE 256
+#define JUXTA_GATEWAY_COMMAND_MAX_SIZE 256
+#define JUXTA_FILENAME_MAX_SIZE 64
+#define JUXTA_FILE_TRANSFER_CHUNK_SIZE 512
 
     /**
-     * @brief Initialize the JUXTA BLE service
+     * @brief Initialize the JUXTA Hublink BLE service
      *
-     * This function registers the JUXTA BLE service and its characteristics
+     * This function registers the JUXTA Hublink BLE service and its characteristics
      * with the Bluetooth stack.
      *
      * @return 0 on success, negative error code on failure
@@ -45,12 +63,12 @@ extern "C"
     int juxta_ble_service_init(void);
 
     /**
-     * @brief LED control function (called from main.c)
+     * @brief Get the current device ID (JX_XXXXXX format)
      *
-     * @param state LED state (true = on, false = off)
+     * @param device_id Buffer to store device ID (must be at least 9 bytes)
      * @return 0 on success, negative error code on failure
      */
-    extern int juxta_ble_led_set(bool state);
+    int juxta_ble_get_device_id(char *device_id);
 
 #ifdef __cplusplus
 }
