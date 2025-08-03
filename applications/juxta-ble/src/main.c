@@ -38,7 +38,6 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 static struct juxta_vitals_ctx vitals_ctx;
 static struct juxta_framfs_context framfs_ctx;
-static struct juxta_fram_device fram_dev;
 
 static bool in_adv_burst = false;
 static bool in_scan_burst = false;

@@ -40,7 +40,6 @@ static struct bt_conn *current_conn = NULL;
 
 /* Service attribute references for indications */
 static const struct bt_gatt_attr *filename_char_attr = NULL;
-static const struct bt_gatt_attr *file_transfer_char_attr = NULL;
 
 /* External framfs context - will be set during initialization */
 static struct juxta_framfs_context *framfs_ctx = NULL;
@@ -55,28 +54,7 @@ static int current_transfer_file_size = -1;
 static uint16_t current_mtu = 23; /* Default BLE MTU */
 static bool mtu_negotiated = false;
 
-/**
- * @brief MTU exchange callback
- */
-static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchange_params *params)
-{
-    if (err)
-    {
-        LOG_ERR("📏 MTU exchange failed: %d", err);
-        mtu_negotiated = false;
-        current_mtu = 23; /* Fallback to default */
-    }
-    else
-    {
-        current_mtu = bt_gatt_get_mtu(conn);
-        mtu_negotiated = true;
-        LOG_INF("📏 MTU negotiated: %d bytes", current_mtu);
-    }
-}
-
-static struct bt_gatt_exchange_params exchange_params = {
-    .func = mtu_exchange_cb,
-};
+/* MTU exchange will be implemented in a future phase */
 
 /**
  * @brief Set the framfs context for user settings access
@@ -558,7 +536,7 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
 
     LOG_DBG("📁 File transfer chunk: offset=%u/%d, bytes=%zu, progress=%.1f%%",
             current_transfer_offset, current_transfer_file_size, *bytes_read,
-            (float)current_transfer_offset / current_transfer_file_size * 100.0);
+            (double)current_transfer_offset / current_transfer_file_size * 100.0);
     return 0;
 }
 
@@ -776,18 +754,10 @@ void juxta_ble_connection_established(struct bt_conn *conn)
     current_conn = conn;
     LOG_INF("🔗 BLE connection established for file transfer");
 
-    /* Request MTU exchange for larger file transfers */
-    int ret = bt_gatt_exchange_mtu(conn, &exchange_params);
-    if (ret < 0)
-    {
-        LOG_WRN("📏 MTU exchange request failed: %d", ret);
-        mtu_negotiated = false;
-        current_mtu = 23;
-    }
-    else
-    {
-        LOG_INF("📏 MTU exchange requested");
-    }
+    /* For now, use default MTU - MTU exchange will be implemented in a future phase */
+    LOG_INF("📏 Using default MTU (23 bytes)");
+    mtu_negotiated = false;
+    current_mtu = 23;
 }
 
 /**
