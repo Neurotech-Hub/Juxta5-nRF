@@ -16,6 +16,7 @@
 #include <stdio.h>
 
 #include "ble_service.h"
+#include "juxta_framfs/framfs.h"
 
 LOG_MODULE_REGISTER(juxta_ble_service, LOG_LEVEL_DBG);
 
@@ -32,6 +33,71 @@ static struct bt_gatt_ccc_cfg file_transfer_ccc_cfg[BT_GATT_CCC_MAX] = {};
 /* Current connection for indications */
 static struct bt_conn *current_conn = NULL;
 
+/* External framfs context - will be set during initialization */
+static struct juxta_framfs_context *framfs_ctx = NULL;
+
+/**
+ * @brief Set the framfs context for user settings access
+ */
+void juxta_ble_set_framfs_context(struct juxta_framfs_context *ctx)
+{
+    framfs_ctx = ctx;
+    LOG_INF("📁 BLE service linked to framfs context");
+}
+
+/**
+ * @brief Generate Node characteristic JSON response
+ */
+static int generate_node_response(char *buffer, size_t buffer_size)
+{
+    char device_id[16];
+    char upload_path[32];
+    uint8_t battery_level = 0;
+    const char *alert = ""; /* TODO: Phase 3 - Implement alert system */
+
+    /* Get device ID */
+    if (juxta_ble_get_device_id(device_id) < 0)
+    {
+        strcpy(device_id, "JX_ERROR");
+    }
+
+    /* Get upload path from framfs user settings */
+    if (framfs_ctx && framfs_ctx->initialized)
+    {
+        if (juxta_framfs_get_upload_path(framfs_ctx, upload_path) == 0)
+        {
+            LOG_DBG("📁 Using upload path from framfs: %s", upload_path);
+        }
+        else
+        {
+            strcpy(upload_path, "/TEST");
+            LOG_WRN("📁 Failed to get upload path from framfs, using default");
+        }
+    }
+    else
+    {
+        strcpy(upload_path, "/TEST");
+        LOG_WRN("📁 Framfs not available, using default upload path");
+    }
+
+    /* TODO: Phase 3 - Get battery level from system */
+    /* For now, battery_level = 0 means "not set" */
+
+    /* Generate JSON response */
+    int written = snprintf(buffer, buffer_size,
+                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"alert\":\"%s\"}",
+                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, alert);
+
+    if (written >= buffer_size)
+    {
+        LOG_ERR("📊 Node response too large (%d >= %zu)", written, buffer_size);
+        return -1;
+    }
+
+    LOG_DBG("📊 Generated node response: %s", buffer);
+    return written;
+}
+
 /**
  * @brief Node characteristic read callback
  * Returns device status and configuration information in JSON format
@@ -39,21 +105,25 @@ static struct bt_conn *current_conn = NULL;
 static ssize_t read_node_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                               void *buf, uint16_t len, uint16_t offset)
 {
-    LOG_DBG("Node characteristic read request");
+    LOG_DBG("📊 Node characteristic read request");
 
-    /* TODO: Phase 2 - Implement actual JSON response with device info */
-    const char *response = "{\"upload_path\":\"/TEST\",\"firmware_version\":\"1.0.0\",\"battery_level\":0,\"device_id\":\"JX_000000\",\"alert\":\"\"}";
+    /* Generate the JSON response */
+    int response_len = generate_node_response(node_response, sizeof(node_response));
+    if (response_len < 0)
+    {
+        LOG_ERR("📊 Failed to generate node response");
+        return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+    }
 
-    size_t response_len = strlen(response);
     if (offset >= response_len)
     {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
     }
 
     size_t copy_len = MIN(len, response_len - offset);
-    memcpy(buf, response + offset, copy_len);
+    memcpy(buf, node_response + offset, copy_len);
 
-    LOG_INF("📱 BLE: Node characteristic read, returned %zu bytes", copy_len);
+    LOG_INF("📊 Node characteristic read, returned %zu bytes", copy_len);
     return copy_len;
 }
 

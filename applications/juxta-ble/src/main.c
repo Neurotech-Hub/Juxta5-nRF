@@ -16,6 +16,8 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/random/random.h>
 #include "juxta_vitals_nrf52/vitals.h"
+#include "juxta_framfs/framfs.h"
+#include "juxta_fram/fram.h"
 #include "ble_service.h"
 #include <stdio.h>
 #include <time.h>
@@ -35,6 +37,8 @@ static ble_state_t ble_state = BLE_STATE_IDLE;
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 static struct juxta_vitals_ctx vitals_ctx;
+static struct juxta_framfs_context framfs_ctx;
+static struct juxta_fram_device fram_dev;
 
 static bool in_adv_burst = false;
 static bool in_scan_burst = false;
@@ -647,6 +651,19 @@ int main(void)
         LOG_ERR("BLE service init failed (err %d)", ret);
         return ret;
     }
+
+    /* Initialize framfs for user settings */
+    LOG_INF("📁 Initializing framfs for user settings...");
+    ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
+    if (ret < 0)
+    {
+        LOG_ERR("Framfs init failed (err %d)", ret);
+        return ret;
+    }
+    LOG_INF("✅ Framfs initialized successfully");
+
+    /* Link framfs context to BLE service */
+    juxta_ble_set_framfs_context(&framfs_ctx);
 
     ret = test_rtc_functionality();
     if (ret < 0)

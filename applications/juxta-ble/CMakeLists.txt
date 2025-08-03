@@ -17,9 +17,13 @@ target_sources(app PRIVATE
 # Add include directories for our libraries
 target_include_directories(app PRIVATE 
     ../../lib/juxta_vitals_nrf52/include
+    ../../lib/juxta_framfs/include
+    ../../lib/juxta_fram/include
 )
 
 # Add library source files directly
 target_sources(app PRIVATE 
     ../../lib/juxta_vitals_nrf52/src/vitals.c
+    ../../lib/juxta_framfs/src/framfs.c
+    ../../lib/juxta_fram/src/fram.c
 ) 

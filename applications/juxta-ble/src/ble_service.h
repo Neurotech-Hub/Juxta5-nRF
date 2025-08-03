@@ -70,6 +70,13 @@ extern "C"
      */
     int juxta_ble_get_device_id(char *device_id);
 
+    /**
+     * @brief Set the framfs context for user settings access
+     *
+     * @param ctx Initialized framfs context
+     */
+    void juxta_ble_set_framfs_context(struct juxta_framfs_context *ctx);
+
 #ifdef __cplusplus
 }
 #endif
