@@ -12,6 +12,9 @@
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/uuid.h>
 
+/* Forward declaration for framfs context */
+struct juxta_framfs_context;
+
 #ifdef __cplusplus
 extern "C"
 {
