@@ -15,6 +15,10 @@
 #include <zephyr/device.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/random/random.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/pm/pm.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/policy.h>
 #include "juxta_vitals_nrf52/vitals.h"
 #include "juxta_framfs/framfs.h"
 #include "juxta_fram/fram.h"
@@ -112,6 +116,202 @@ static uint32_t get_rtc_timestamp(void);
 static int juxta_start_connectable_advertising(void);
 
 /* Dynamic advertising name setup */
+static void setup_dynamic_adv_name(void);
+
+#define SCAN_EVENT_QUEUE_SIZE 16
+
+typedef struct
+{
+    uint32_t mac_id;
+    int8_t rssi;
+} scan_event_t;
+
+K_MSGQ_DEFINE(scan_event_q, sizeof(scan_event_t), SCAN_EVENT_QUEUE_SIZE, 4);
+
+/* Scan callback for BLE scanning - runs in ISR context */
+__no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad)
+{
+    ARG_UNUSED(adv_type);
+    if (!addr || !ad || ad->len == 0)
+    {
+        return;
+    }
+
+    const char *name = NULL;
+    char dev_name[32] = {0};
+    struct net_buf_simple_state state;
+    net_buf_simple_save(ad, &state);
+
+    while (ad->len > 1)
+    {
+        uint8_t len = net_buf_simple_pull_u8(ad);
+        if (len == 0 || len > ad->len)
+            break;
+        uint8_t type = net_buf_simple_pull_u8(ad);
+        len--;
+        if (len > ad->len)
+            break;
+        if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len < sizeof(dev_name))
+        {
+            memset(dev_name, 0, sizeof(dev_name));
+            memcpy(dev_name, ad->data, len);
+            dev_name[len] = '\0';
+            name = dev_name;
+        }
+        net_buf_simple_pull(ad, len);
+    }
+    net_buf_simple_restore(ad, &state);
+
+    // New logic: recognize JXGA_XXXX (gateway) and JX_XXXXXX (peripheral)
+    char mac_str[7] = {0}; // Always 6 chars for logging
+    if (name)
+    {
+        if (strncmp(name, "JXGA_", 5) == 0 && strlen(name) == 9) // JXGA_XXXX (gateway)
+        {
+            snprintf(mac_str, sizeof(mac_str), "FF%.4s", name + 5); // Prepend FF
+            if (!doGatewayAdvertise)                                // Only set if not already set
+            {
+                doGatewayAdvertise = true;
+                LOG_INF("🔔 Gateway detected: %s - will trigger connectable advertising", mac_str);
+            }
+        }
+        else if (strncmp(name, "JX_", 3) == 0 && strlen(name) == 9) // JX_XXXXXX (peripheral)
+        {
+            snprintf(mac_str, sizeof(mac_str), "%.6s", name + 3);
+        }
+        else
+        {
+            // Not a recognized pattern, ignore
+            return;
+        }
+
+        // Convert to uint32_t for storage (first 6 hex digits)
+        uint32_t mac_id = 0;
+        if (sscanf(mac_str, "%6x", &mac_id) == 1 && mac_id != 0)
+        {
+            scan_event_t evt = {.mac_id = mac_id, .rssi = rssi};
+            (void)k_msgq_put(&scan_event_q, &evt, K_NO_WAIT);
+
+            // Use printk for ISR context logging
+            char addr_str[BT_ADDR_LE_STR_LEN];
+            bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+            printk("Found JUXTA device: %s (%s), RSSI: %d\n", mac_str, addr_str, rssi);
+        }
+    }
+}
+
+static bool motion_active(void)
+{
+#if CONFIG_JUXTA_BLE_MOTION_GATING
+    return true;
+#else
+    return true;
+#endif
+}
+
+static uint32_t get_adv_interval(void)
+{
+    uint8_t adv_interval = ADV_INTERVAL_SECONDS; /* Default fallback */
+
+    /* Get interval from framfs user settings */
+    if (framfs_ctx.initialized)
+    {
+        if (juxta_framfs_get_adv_interval(&framfs_ctx, &adv_interval) == 0)
+        {
+            LOG_DBG("📡 Using adv_interval from settings: %d", adv_interval);
+        }
+        else
+        {
+            LOG_WRN("📡 Failed to get adv_interval from settings, using default: %d", ADV_INTERVAL_SECONDS);
+            adv_interval = ADV_INTERVAL_SECONDS;
+        }
+    }
+    else
+    {
+        LOG_WRN("📡 Framfs not initialized, using default adv_interval: %d", ADV_INTERVAL_SECONDS);
+        adv_interval = ADV_INTERVAL_SECONDS;
+    }
+
+    /* Apply motion gating if enabled */
+    if (!motion_active())
+    {
+        adv_interval *= 3; /* Triple the interval when no motion */
+        LOG_DBG("📡 Motion inactive, adjusted adv_interval: %d", adv_interval);
+    }
+
+    return adv_interval;
+}
+
+static uint32_t get_scan_interval(void)
+{
+    uint8_t scan_interval = SCAN_INTERVAL_SECONDS; /* Default fallback */
+
+    /* Get interval from framfs user settings */
+    if (framfs_ctx.initialized)
+    {
+        if (juxta_framfs_get_scan_interval(&framfs_ctx, &scan_interval) == 0)
+        {
+            LOG_DBG("🔍 Using scan_interval from settings: %d", scan_interval);
+        }
+        else
+        {
+            LOG_WRN("🔍 Failed to get scan_interval from settings, using default: %d", SCAN_INTERVAL_SECONDS);
+            scan_interval = SCAN_INTERVAL_SECONDS;
+        }
+    }
+    else
+    {
+        LOG_WRN("🔍 Framfs not initialized, using default scan_interval: %d", SCAN_INTERVAL_SECONDS);
+        scan_interval = SCAN_INTERVAL_SECONDS;
+    }
+
+    /* Apply motion gating if enabled */
+    if (!motion_active())
+    {
+        scan_interval *= 2; /* Double the interval when no motion */
+        LOG_DBG("🔍 Motion inactive, adjusted scan_interval: %d", scan_interval);
+    }
+
+    return scan_interval;
+}
+
+/**
+ * @brief Trigger timing update when settings change
+ * Called from BLE service when user settings are updated
+ */
+void juxta_ble_timing_update_trigger(void)
+{
+    LOG_INF("⏰ Timing update triggered - recalculating intervals");
+
+    /* Force recalculation of next action times */
+    uint32_t current_time = get_rtc_timestamp();
+    if (current_time > 0)
+    {
+        last_adv_timestamp = current_time - get_adv_interval();
+        last_scan_timestamp = current_time - get_scan_interval();
+        LOG_INF("⏰ Updated timing: adv_interval=%d, scan_interval=%d",
+                get_adv_interval(), get_scan_interval());
+    }
+}
+
+static void init_randomization(void)
+{
+#if CONFIG_JUXTA_BLE_RANDOMIZATION
+    boot_delay_ms = sys_rand32_get() % 1000;
+    LOG_INF("🎲 Random boot delay: %u ms", boot_delay_ms);
+#else
+    boot_delay_ms = 0;
+    LOG_INF("🎲 Randomization disabled");
+#endif
+}
+
+static uint32_t get_rtc_timestamp(void)
+{
+    uint32_t timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
+    LOG_DBG("Timestamp: %u", timestamp);
+    return timestamp;
+}
+
 static void setup_dynamic_adv_name(void)
 {
     bt_addr_le_t addr;
@@ -599,7 +799,7 @@ static int juxta_start_connectable_advertising(void)
         .id = BT_ID_DEFAULT,
         .sid = 0,
         .secondary_max_skip = 0,
-        .options = BT_LE_ADV_OPT_CONNECTABLE,      // Explicitly connectable, no USE_NAME since we set name manually
+        .options = 0,                              // Connectable by default (modern approach, no deprecated flag)
         .interval_min = BT_GAP_ADV_FAST_INT_MIN_1, // Slower intervals for better connection
         .interval_max = BT_GAP_ADV_FAST_INT_MAX_1, // ~200ms intervals
         .peer = NULL,
@@ -629,14 +829,70 @@ static int juxta_start_connectable_advertising(void)
     return ret;
 }
 
+// Magnet sensor and LED definitions using Zephyr device tree
+static const struct gpio_dt_spec magnet_sensor = GPIO_DT_SPEC_GET(DT_PATH(gpio_keys, magnet_sensor), gpios);
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
+
+static void blink_led_three_times(void)
+{
+    LOG_INF("💡 Blinking LED three times to indicate wake-up");
+    for (int i = 0; i < 3; i++)
+    {
+        gpio_pin_set_dt(&led, 1); // LED ON (active high)
+        k_sleep(K_MSEC(200));
+        gpio_pin_set_dt(&led, 0); // LED OFF
+        k_sleep(K_MSEC(200));
+    }
+    gpio_pin_set_dt(&led, 0); // Ensure LED is off
+    LOG_INF("✅ LED blink sequence completed");
+}
+
+static void wait_for_magnet_sensor(void)
+{
+    LOG_INF("🧲 Waiting for magnet sensor to go high (active)...");
+    if (!device_is_ready(magnet_sensor.port))
+    {
+        LOG_ERR("❌ Magnet sensor device not ready");
+        return;
+    }
+    if (!device_is_ready(led.port))
+    {
+        LOG_ERR("❌ LED device not ready");
+        return;
+    }
+
+    // Configure pins manually since device tree doesn't always configure them
+    int ret = gpio_pin_configure(magnet_sensor.port, magnet_sensor.pin, GPIO_INPUT); // No flags, no pull-up
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to configure magnet sensor: %d", ret);
+        return;
+    }
+    ret = gpio_pin_configure(led.port, led.pin, GPIO_OUTPUT_ACTIVE | GPIO_ACTIVE_HIGH);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to configure LED: %d", ret);
+        return;
+    }
+
+    gpio_pin_set_dt(&led, 0); // LED OFF initially
+    while (gpio_pin_get_dt(&magnet_sensor))
+    {
+        LOG_INF("💤 Waiting for magnet sensor activation (debug every 1s)...");
+        k_sleep(K_SECONDS(1));
+    }
+    LOG_INF("🔔 Magnet sensor activated! Waking up...");
+    blink_led_three_times();
+}
+
 int main(void)
 {
     int ret;
 
-    // Set up placeholder name via prj.conf (JX_BOOT)
-    // Do NOT call setup_dynamic_adv_name() before bt_enable()
-
     LOG_INF("🚀 Starting JUXTA BLE Application");
+
+    // Wait for magnet sensor activation before starting BLE
+    wait_for_magnet_sensor();
 
     struct tm timeinfo;
     time_t t = 1705752030; // 2024-01-20 12:00:30 UTC

@@ -18,10 +18,10 @@ The Juxta5-4_nRF52840 is a comprehensive sensor board based on the nRF52840 SoC 
 | P0.05 | CS       | Output    | Accelerometer chip select            |
 | P0.08 | MISO     | Input     | SPI Master In Slave Out              |
 | P0.12 | SCK      | Output    | SPI Serial Clock                     |
-| P0.15 | LED      | Output    | Status LED                           |
+| P0.15 | LED      | Output    | Status LED (active high)             |
 | P0.18 | RESET    | Input     | System reset                         |
 | P1.09 | MOSI     | Output    | SPI Master Out Slave In              |
-| P1.11 | GPIO     | Input     | Magnet sensor interrupt              |
+| P1.11 | GPIO     | Input     | Magnet sensor interrupt (active high) |
 | P1.13 | CS       | Output    | FRAM chip select                     |
 | G1    | SWDCLK   | -         | SWD debug clock                      |
 | F1    | SWDIO    | -         | SWD debug data                       |
