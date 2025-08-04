@@ -27,10 +27,27 @@ typedef enum
     BLE_STATE_IDLE = 0,
     BLE_STATE_ADVERTISING,
     BLE_STATE_SCANNING,
-    BLE_STATE_WAITING
+    BLE_STATE_WAITING,
+    BLE_STATE_GATEWAY_ADVERTISING
 } ble_state_t;
 
 static ble_state_t ble_state = BLE_STATE_IDLE;
+
+// Add gateway advertising flag and timer
+static bool doGatewayAdvertise = false;
+static struct k_timer ten_minute_timer;
+static bool ble_connected = false; // Track connection state
+
+// Add 10-minute timer handler
+static void ten_minute_timeout(struct k_timer *timer)
+{
+    printk("🕐 10-minute timer: clearing gateway advertise flag and logging low-frequency data\n");
+    doGatewayAdvertise = false;
+
+    // TODO: Add low-frequency data logging here (battery, temperature, etc.)
+    // For now, just log that this function is working
+    printk("📊 Low-frequency data logging placeholder (battery, temperature, etc.)\n");
+}
 
 #define BLE_MIN_INTER_BURST_DELAY_MS 100
 
@@ -92,182 +109,9 @@ static int juxta_stop_advertising(void);
 static int juxta_start_scanning(void);
 static int juxta_stop_scanning(void);
 static uint32_t get_rtc_timestamp(void);
+static int juxta_start_connectable_advertising(void);
 
 /* Dynamic advertising name setup */
-static void setup_dynamic_adv_name(void);
-
-#define SCAN_EVENT_QUEUE_SIZE 16
-
-typedef struct
-{
-    uint32_t mac_id;
-    int8_t rssi;
-} scan_event_t;
-
-K_MSGQ_DEFINE(scan_event_q, sizeof(scan_event_t), SCAN_EVENT_QUEUE_SIZE, 4);
-
-/* Scan callback for BLE scanning - runs in ISR context */
-__no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad)
-{
-    ARG_UNUSED(adv_type);
-    if (!addr || !ad || ad->len == 0)
-    {
-        return;
-    }
-
-    const char *name = NULL;
-    char dev_name[32] = {0};
-    struct net_buf_simple_state state;
-    net_buf_simple_save(ad, &state);
-
-    while (ad->len > 1)
-    {
-        uint8_t len = net_buf_simple_pull_u8(ad);
-        if (len == 0 || len > ad->len)
-            break;
-        uint8_t type = net_buf_simple_pull_u8(ad);
-        len--;
-        if (len > ad->len)
-            break;
-        if ((type == BT_DATA_NAME_COMPLETE || type == BT_DATA_NAME_SHORTENED) && len < sizeof(dev_name))
-        {
-            memset(dev_name, 0, sizeof(dev_name));
-            memcpy(dev_name, ad->data, len);
-            dev_name[len] = '\0';
-            name = dev_name;
-        }
-        net_buf_simple_pull(ad, len);
-    }
-    net_buf_simple_restore(ad, &state);
-
-    if (name && strncmp(name, "JX_", 3) == 0 && strlen(name) == 9)
-    {
-        uint32_t mac_id = 0;
-        if (sscanf(name + 3, "%06X", &mac_id) == 1 && mac_id != 0)
-        {
-            scan_event_t evt = {.mac_id = mac_id, .rssi = rssi};
-            (void)k_msgq_put(&scan_event_q, &evt, K_NO_WAIT);
-
-            // Use printk for ISR context logging
-            char addr_str[BT_ADDR_LE_STR_LEN];
-            bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-            printk("Found JUXTA device: %s (%s), RSSI: %d\n", name, addr_str, rssi);
-        }
-    }
-}
-
-static bool motion_active(void)
-{
-#if CONFIG_JUXTA_BLE_MOTION_GATING
-    return true;
-#else
-    return true;
-#endif
-}
-
-static uint32_t get_adv_interval(void)
-{
-    uint8_t adv_interval = ADV_INTERVAL_SECONDS; /* Default fallback */
-
-    /* Get interval from framfs user settings */
-    if (framfs_ctx.initialized)
-    {
-        if (juxta_framfs_get_adv_interval(&framfs_ctx, &adv_interval) == 0)
-        {
-            LOG_DBG("📡 Using adv_interval from settings: %d", adv_interval);
-        }
-        else
-        {
-            LOG_WRN("📡 Failed to get adv_interval from settings, using default: %d", ADV_INTERVAL_SECONDS);
-            adv_interval = ADV_INTERVAL_SECONDS;
-        }
-    }
-    else
-    {
-        LOG_WRN("📡 Framfs not initialized, using default adv_interval: %d", ADV_INTERVAL_SECONDS);
-        adv_interval = ADV_INTERVAL_SECONDS;
-    }
-
-    /* Apply motion gating if enabled */
-    if (!motion_active())
-    {
-        adv_interval *= 3; /* Triple the interval when no motion */
-        LOG_DBG("📡 Motion inactive, adjusted adv_interval: %d", adv_interval);
-    }
-
-    return adv_interval;
-}
-
-static uint32_t get_scan_interval(void)
-{
-    uint8_t scan_interval = SCAN_INTERVAL_SECONDS; /* Default fallback */
-
-    /* Get interval from framfs user settings */
-    if (framfs_ctx.initialized)
-    {
-        if (juxta_framfs_get_scan_interval(&framfs_ctx, &scan_interval) == 0)
-        {
-            LOG_DBG("🔍 Using scan_interval from settings: %d", scan_interval);
-        }
-        else
-        {
-            LOG_WRN("🔍 Failed to get scan_interval from settings, using default: %d", SCAN_INTERVAL_SECONDS);
-            scan_interval = SCAN_INTERVAL_SECONDS;
-        }
-    }
-    else
-    {
-        LOG_WRN("🔍 Framfs not initialized, using default scan_interval: %d", SCAN_INTERVAL_SECONDS);
-        scan_interval = SCAN_INTERVAL_SECONDS;
-    }
-
-    /* Apply motion gating if enabled */
-    if (!motion_active())
-    {
-        scan_interval *= 2; /* Double the interval when no motion */
-        LOG_DBG("🔍 Motion inactive, adjusted scan_interval: %d", scan_interval);
-    }
-
-    return scan_interval;
-}
-
-/**
- * @brief Trigger timing update when settings change
- * Called from BLE service when user settings are updated
- */
-void juxta_ble_timing_update_trigger(void)
-{
-    LOG_INF("⏰ Timing update triggered - recalculating intervals");
-
-    /* Force recalculation of next action times */
-    uint32_t current_time = get_rtc_timestamp();
-    if (current_time > 0)
-    {
-        last_adv_timestamp = current_time - get_adv_interval();
-        last_scan_timestamp = current_time - get_scan_interval();
-        LOG_INF("⏰ Updated timing: adv_interval=%d, scan_interval=%d",
-                get_adv_interval(), get_scan_interval());
-    }
-}
-
-static void init_randomization(void)
-{
-#if CONFIG_JUXTA_BLE_RANDOMIZATION
-    boot_delay_ms = sys_rand32_get() % 1000;
-    LOG_INF("🎲 Random boot delay: %u ms", boot_delay_ms);
-#else
-    boot_delay_ms = 0;
-    LOG_INF("🎲 Randomization disabled");
-#endif
-}
-
-static uint32_t get_rtc_timestamp(void)
-{
-    uint32_t timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
-    LOG_DBG("Timestamp: %u", timestamp);
-    return timestamp;
-}
-
 static void setup_dynamic_adv_name(void)
 {
     bt_addr_le_t addr;
@@ -375,13 +219,39 @@ static void state_work_handler(struct k_work *work)
         LOG_INF("🕐 Minute of day changed to: %u", current_minute);
     }
 
+    // Pause state machine if connected
+    if (ble_connected)
+    {
+        LOG_DBG("⏸️ State machine paused - BLE connection active");
+        return;
+    }
+
     // Only handle BLE state transitions if triggered by timer event
     if (state_event == EVENT_TIMER_EXPIRED)
     {
         state_event = EVENT_NONE;
 
-        LOG_INF("State work handler: current_time=%u, ble_state=%d",
-                current_time, ble_state);
+        LOG_INF("State work handler: current_time=%u, ble_state=%d, doGatewayAdvertise=%s",
+                current_time, ble_state, doGatewayAdvertise ? "true" : "false");
+
+        // Handle gateway advertising state
+        if (ble_state == BLE_STATE_GATEWAY_ADVERTISING)
+        {
+            LOG_INF("Ending gateway advertising burst...");
+            int err = juxta_stop_advertising();
+            if (err == 0)
+            {
+                ble_state = BLE_STATE_WAITING;
+                last_adv_timestamp = current_time;
+                LOG_INF("🔔 Gateway advertising burst completed at timestamp %u", last_adv_timestamp);
+                k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
+            }
+            else
+            {
+                LOG_ERR("Failed to stop gateway advertising burst, skipping transition");
+            }
+            return;
+        }
 
         if (ble_state == BLE_STATE_SCANNING)
         {
@@ -421,7 +291,8 @@ static void state_work_handler(struct k_work *work)
         bool scan_due = is_time_to_scan();
         bool adv_due = is_time_to_advertise();
 
-        LOG_INF("Checking for new bursts: scan_due=%d, adv_due=%d", scan_due, adv_due);
+        LOG_INF("Checking for new bursts: scan_due=%d, adv_due=%d, doGatewayAdvertise=%s",
+                scan_due, adv_due, doGatewayAdvertise ? "true" : "false");
 
         if (scan_due && ble_state == BLE_STATE_IDLE)
         {
@@ -442,6 +313,27 @@ static void state_work_handler(struct k_work *work)
             }
             return;
         }
+
+        // Check for gateway advertising first (higher priority)
+        if (adv_due && ble_state == BLE_STATE_IDLE && doGatewayAdvertise)
+        {
+            LOG_INF("Starting gateway advertising burst (30s connectable)...");
+            ble_state = BLE_STATE_GATEWAY_ADVERTISING;
+            int err = juxta_start_connectable_advertising();
+            if (err == 0)
+            {
+                LOG_INF("🔔 Starting gateway advertising burst (30s connectable)");
+                k_timer_start(&state_timer, K_SECONDS(30), K_NO_WAIT); // Changed from 10s to 30s
+            }
+            else
+            {
+                ble_state = BLE_STATE_IDLE;
+                LOG_ERR("Gateway advertising failed, retrying in 1 second");
+                k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
+            }
+            return;
+        }
+
         if (adv_due && ble_state == BLE_STATE_IDLE)
         {
             LOG_INF("Starting advertising burst...");
@@ -500,11 +392,12 @@ static int juxta_start_advertising(void)
         boot_delay_ms = 0;
     }
 
+    // Use non-connectable advertising for energy efficiency
     struct bt_le_adv_param adv_param = {
         .id = BT_ID_DEFAULT,
         .sid = 0,
         .secondary_max_skip = 0,
-        .options = 0, /* No BT_LE_ADV_OPT_USE_NAME since we're manually setting name */
+        .options = 0, // Non-connectable for energy efficiency (0 = non-connectable by default)
         .interval_min = BT_GAP_ADV_FAST_INT_MIN_2,
         .interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
         .peer = NULL,
@@ -521,15 +414,15 @@ static int juxta_start_advertising(void)
         return ret;
     }
 
-    LOG_INF("📢 BLE advertising started as '%s' (connectable mode)", adv_name);
+    LOG_INF("📢 BLE advertising started as '%s' (non-connectable burst)", adv_name);
     return 0;
 }
 
 static int juxta_stop_advertising(void)
 {
-    if (ble_state != BLE_STATE_ADVERTISING)
+    if (ble_state != BLE_STATE_ADVERTISING && ble_state != BLE_STATE_GATEWAY_ADVERTISING)
     {
-        LOG_WRN("❗ Attempted to stop advertising when not in burst");
+        LOG_WRN("❗ Attempted to stop advertising when not in advertising burst");
         return -1;
     }
 
@@ -659,22 +552,28 @@ static void connected(struct bt_conn *conn, uint8_t err)
     }
 
     LOG_INF("🔗 Connected to peer device");
-    ble_state = BLE_STATE_IDLE;
+    ble_connected = true; // Mark as connected
 
+    // Stop any ongoing advertising or scanning
     juxta_stop_advertising();
     juxta_stop_scanning();
     in_adv_burst = false;
     in_scan_burst = false;
 
+    // Clear the gateway advertise flag since we successfully connected
+    doGatewayAdvertise = false;
+
     /* Notify BLE service of connection */
     juxta_ble_connection_established(conn);
 
     LOG_INF("📤 Hublink gateway connected - ready for data exchange");
+    LOG_INF("⏸️ State machine paused - will resume after disconnection");
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
+    ble_connected = false; // Mark as disconnected
     ble_state = BLE_STATE_IDLE;
 
     /* Notify BLE service of disconnection */
@@ -682,6 +581,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
     last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
     last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();
+
+    LOG_INF("▶️ State machine resumed - resuming normal operation");
     k_work_submit(&state_work);
 }
 
@@ -690,9 +591,50 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .disconnected = disconnected,
 };
 
+// Add the missing connectable advertising function
+static int juxta_start_connectable_advertising(void)
+{
+    // Use explicit connectable advertising parameters for maximum compatibility
+    struct bt_le_adv_param adv_param = {
+        .id = BT_ID_DEFAULT,
+        .sid = 0,
+        .secondary_max_skip = 0,
+        .options = BT_LE_ADV_OPT_CONNECTABLE,      // Explicitly connectable, no USE_NAME since we set name manually
+        .interval_min = BT_GAP_ADV_FAST_INT_MIN_1, // Slower intervals for better connection
+        .interval_max = BT_GAP_ADV_FAST_INT_MAX_1, // ~200ms intervals
+        .peer = NULL,
+    };
+
+    // Comprehensive advertising data for maximum discoverability
+    struct bt_data adv_data[] = {
+        BT_DATA(BT_DATA_FLAGS, (uint8_t[]){BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR}, 1),
+        BT_DATA(BT_DATA_NAME_COMPLETE, adv_name, strlen(adv_name)),
+    };
+
+    // Add scan response data for additional information
+    struct bt_data scan_data[] = {
+        BT_DATA(BT_DATA_NAME_COMPLETE, adv_name, strlen(adv_name)),
+    };
+
+    int ret = bt_le_adv_start(&adv_param, adv_data, ARRAY_SIZE(adv_data),
+                              scan_data, ARRAY_SIZE(scan_data));
+    if (ret < 0)
+    {
+        LOG_ERR("Connectable advertising failed to start (err %d)", ret);
+    }
+    else
+    {
+        LOG_INF("🔔 Connectable advertising started as '%s' (30s window, public, ~200ms intervals)", adv_name);
+    }
+    return ret;
+}
+
 int main(void)
 {
     int ret;
+
+    // Set up placeholder name via prj.conf (JX_BOOT)
+    // Do NOT call setup_dynamic_adv_name() before bt_enable()
 
     LOG_INF("🚀 Starting JUXTA BLE Application");
 
@@ -723,7 +665,7 @@ int main(void)
 
     LOG_INF("🔵 Bluetooth initialized");
 
-    /* Set up dynamic advertising name */
+    // Set up dynamic advertising name for non-connectable advertising only
     setup_dynamic_adv_name();
 
     ret = juxta_ble_service_init();
@@ -770,6 +712,10 @@ int main(void)
     init_randomization();
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
+
+    // Initialize 10-minute timer
+    k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
+    k_timer_start(&ten_minute_timer, K_MINUTES(10), K_MINUTES(10)); // every 10 minutes
 
     uint32_t now = get_rtc_timestamp();
     last_adv_timestamp = now - get_adv_interval();

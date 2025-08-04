@@ -15,7 +15,7 @@
 4. Samples I've collected from the Zephyr project are in ./samples. You must refer to these first before coding.
 
 #### BLE
-BLE should should observe other devices and obtain their MAC and RSSI. These will have a filter applied so we only focus on devices with a specific advertisment name (eg, "JUXTA_XXXX" where XXXX will be the last four characters of that devices MAC address). These devices will also need to connect to a gateway to retrieve settings and perform transfer data. Advertising will occur at a fixed rate whereas observing will need to be duty cycles (eg, once every 30s with a scan duration of 5s).
+BLE should observe other devices and obtain their MAC and RSSI. These will have a filter applied so we only focus on devices with a specific advertisement name (eg, "JUXTA_XXXX" where XXXX will be the last four characters of that devices MAC address). These devices will also need to connect to a gateway to retrieve settings and perform transfer data. Advertising will occur at a fixed rate whereas observing will need to be duty cycles (eg, once every 30s with a scan duration of 5s).
 
 #### Memory
 We will be writing to a MB85RS1M FRAM memory chip. We have developed a hardware layer in ./lib/juxta_fram. We will utilize a file system layer in ./lib/juxta_framfs.
@@ -24,11 +24,6 @@ We will be writing to a MB85RS1M FRAM memory chip. We have developed a hardware 
 We are making ./lib/juxta_vitals_nrf52 to support other critical functions:
 1. We will need to read the device voltage using the internal ADC to measure VDD.
 2. We will need the ability to write to, and read the RTC. We will get the current time over BLE, but this library should only work on the RTC level and accept a unix timestamp to set the RTC (it shall not interact directly with BLE).
-
-We are currently work on this feature and should remain narrowly focused:
-
-Please review our source and provide a strategy for the next steps before coding.
-
 
 ## Setup Instructions
 
@@ -87,12 +82,13 @@ cd Juxta5
 - `/applications` - Application code
   - `juxta-mvp` - **Original working application** (direct SPI, stable baseline)
   - `juxta-file-system` - **FRAM library testing application** (validates libraries)
-  - `juxta-ble` - Bluetooth application
+  - `juxta-ble` - **Bluetooth application** (device discovery and gateway connectivity)
   - `juxta-axy` - Accelerometer application
 - `/boards` - Custom board definitions
 - `/lib` - Shared libraries
   - `juxta_fram` - FRAM driver library
   - `juxta_framfs` - FRAM file system library
+  - `juxta_vitals_nrf52` - Vitals monitoring library (ADC, RTC)
 
 ## Applications Overview
 
@@ -108,8 +104,25 @@ cd Juxta5
 - **Use case**: Validate `juxta_fram` and `juxta_framfs` libraries
 - **Features**: Full test suite, performance metrics, file system validation
 
-### 📱 Other Applications
-- `juxta-ble` - Bluetooth functionality
+### 📱 `juxta-ble` (Bluetooth Device Discovery & Gateway Connectivity)
+- **Purpose**: BLE device discovery, scanning, and gateway connectivity
+- **Status**: ✅ **Core functionality implemented and tested**
+- **Features**:
+  - **Device Discovery**: Scans for other JUXTA devices with MAC-based filtering
+  - **Dynamic Naming**: Device names generated as "JX_XXXXXX" based on MAC address
+  - **Gateway Detection**: Recognizes gateway devices advertising as "JXGA_XXXX"
+  - **Smart Advertising**: 
+    - Normal bursts: Non-connectable for energy efficiency
+    - Gateway-triggered: 30-second connectable windows for file transfer
+  - **State Management**: Pauses during connections, resumes after disconnection
+  - **10-minute Cooldown**: Limits gateway advertising to once per 10 minutes
+  - **MTU Optimization**: Supports 247-byte MTU for efficient data transfer
+- **Advertising Strategy**:
+  - **Normal Operation**: 5-second non-connectable advertising bursts
+  - **Gateway Response**: 30-second connectable advertising when gateway detected
+  - **Connection Persistence**: Maintains connections without state machine interference
+
+### 📊 Other Applications
 - `juxta-axy` - Accelerometer sensor integration
 
 ## Build Configurations
@@ -132,13 +145,19 @@ Multiple build configurations are available:
 2. **Monitor RTT output** - Detailed test results
 3. **Verify all tests pass** - Libraries are ready for use
 
+### For BLE Development:
+1. **Build `juxta-ble`** - Core BLE functionality
+2. **Test device discovery** - Verify scanning and filtering work
+3. **Test gateway connectivity** - Verify connectable advertising and file transfer
+
 ## Development Notes
 
 - The project uses the nRF52840 SoC
 - Custom board definitions are provided for Juxta5-1_ADC and Juxta5-1_AXY variants
 - Build artifacts are stored in the `build` directory (ignored by git)
 - VS Code workspace settings ensure consistent development environment
-- **FRAM Libraries**: `juxta_fram` and `juxta_framfs` are available for applications 
+- **FRAM Libraries**: `juxta_fram` and `juxta_framfs` are available for applications
+- **BLE Features**: Device discovery, gateway connectivity, and file transfer capabilities implemented
 
 ## Coding Agents
 
