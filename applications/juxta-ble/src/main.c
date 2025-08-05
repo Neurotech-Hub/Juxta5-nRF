@@ -25,6 +25,7 @@
 #include "ble_service.h"
 #include <stdio.h>
 #include <time.h>
+#include <zephyr/drivers/sensor.h>
 
 typedef enum
 {
@@ -885,6 +886,197 @@ static void wait_for_magnet_sensor(void)
     blink_led_three_times();
 }
 
+static void check_lis2dh(void)
+{
+    const struct device *accel = DEVICE_DT_GET_ANY(st_lis2dh);
+
+    if (!accel)
+    {
+        LOG_ERR("No LIS2DH device found in device tree");
+        return;
+    }
+
+    LOG_INF("LIS2DH device found: %s", accel->name);
+
+    // Check SPI bus readiness
+    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
+    if (!spi_dev)
+    {
+        LOG_ERR("SPI0 device not found");
+        return;
+    }
+    if (!device_is_ready(spi_dev))
+    {
+        LOG_ERR("SPI0 device not ready");
+        return;
+    }
+    LOG_INF("SPI0 device ready: %s", spi_dev->name);
+
+    // Debug CS pin configuration
+    static const struct gpio_dt_spec lis2dh_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
+    if (!device_is_ready(lis2dh_cs.port))
+    {
+        LOG_ERR("❌ LIS2DH CS GPIO port not ready");
+        return;
+    }
+    LOG_INF("✅ LIS2DH CS GPIO port ready: %s", lis2dh_cs.port->name);
+    LOG_INF("✅ LIS2DH CS pin: %d, flags: 0x%08X", lis2dh_cs.pin, lis2dh_cs.dt_flags);
+
+    // Manual WHOAMI register read to test basic communication
+    LOG_INF("🔧 Attempting manual WHOAMI read...");
+    struct spi_config spi_cfg = {
+        .frequency = 8000000,
+        .operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPOL | SPI_MODE_CPHA,
+    };
+
+    uint8_t whoami_cmd = 0x8F; // WHOAMI register read (0x0F with read bit set)
+    uint8_t whoami_data = 0;
+
+    struct spi_buf tx_buf = {
+        .buf = &whoami_cmd,
+        .len = 1};
+    struct spi_buf rx_buf = {
+        .buf = &whoami_data,
+        .len = 1};
+    const struct spi_buf_set tx = {
+        .buffers = &tx_buf,
+        .count = 1};
+    const struct spi_buf_set rx = {
+        .buffers = &rx_buf,
+        .count = 1};
+
+    // Manually control CS
+    gpio_pin_set_dt(&lis2dh_cs, 0); // Assert CS (active low)
+    int spi_ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
+    gpio_pin_set_dt(&lis2dh_cs, 1); // De-assert CS
+
+    if (spi_ret == 0)
+    {
+        LOG_INF("✅ Manual WHOAMI read successful: 0x%02X (expected: 0x33)", whoami_data);
+    }
+    else
+    {
+        LOG_ERR("❌ Manual WHOAMI read failed: %d", spi_ret);
+    }
+
+    if (!device_is_ready(accel))
+    {
+        LOG_ERR("LIS2DH device %s is not ready", accel->name);
+        LOG_ERR("This usually indicates a hardware connection issue or power-up problem");
+        LOG_ERR("Check: 1) Power supply to LIS2DH12, 2) SPI connections, 3) CS pin (P0.05)");
+        return;
+    }
+
+    LOG_INF("LIS2DH device found: %s", accel->name);
+
+    // Let the Zephyr driver handle CS management
+    int rc = sensor_sample_fetch(accel);
+    if (rc)
+    {
+        LOG_ERR("Failed to fetch sample from LIS2DH: %d", rc);
+    }
+    else
+    {
+        LOG_INF("LIS2DH sensor sample fetch OK (WHOAMI check passed)");
+    }
+
+    struct sensor_value accel_xyz[3];
+    rc = sensor_channel_get(accel, SENSOR_CHAN_ACCEL_XYZ, accel_xyz);
+    if (rc == 0)
+    {
+        LOG_INF("Accel X: %f, Y: %f, Z: %f",
+                sensor_value_to_double(&accel_xyz[0]),
+                sensor_value_to_double(&accel_xyz[1]),
+                sensor_value_to_double(&accel_xyz[2]));
+    }
+    else
+    {
+        LOG_ERR("Failed to read accel: %d", rc);
+    }
+}
+
+/**
+ * @brief Quick FRAM test to verify SPI bus functionality
+ */
+static void test_fram_functionality(void)
+{
+    LOG_INF("🔧 Testing FRAM functionality...");
+
+    /* Get SPI device */
+    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
+    if (!spi_dev)
+    {
+        LOG_ERR("❌ SPI0 device not found");
+        return;
+    }
+    if (!device_is_ready(spi_dev))
+    {
+        LOG_ERR("❌ SPI0 device not ready");
+        return;
+    }
+    LOG_INF("✅ SPI0 device ready: %s", spi_dev->name);
+
+    /* Get FRAM CS pin */
+    static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
+    if (!device_is_ready(fram_cs.port))
+    {
+        LOG_ERR("❌ FRAM CS device not ready");
+        return;
+    }
+
+    /* Initialize FRAM device */
+    struct juxta_fram_device fram_dev;
+    int ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to initialize FRAM: %d", ret);
+        return;
+    }
+    LOG_INF("✅ FRAM device initialized");
+
+    /* Read and verify FRAM device ID */
+    struct juxta_fram_id id;
+    ret = juxta_fram_read_id(&fram_dev, &id);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Failed to read FRAM ID: %d", ret);
+        return;
+    }
+
+    LOG_INF("✅ FRAM Device ID verified:");
+    LOG_INF("  Manufacturer: 0x%02X (expected: 0x04)", id.manufacturer_id);
+    LOG_INF("  Continuation: 0x%02X (expected: 0x7F)", id.continuation_code);
+    LOG_INF("  Product ID 1: 0x%02X (expected: 0x27)", id.product_id_1);
+    LOG_INF("  Product ID 2: 0x%02X (expected: 0x03)", id.product_id_2);
+
+    /* Quick write/read test */
+    uint8_t test_data[] = {0xAA, 0x55, 0x12, 0x34};
+    uint8_t read_data[sizeof(test_data)];
+
+    ret = juxta_fram_write(&fram_dev, 0x1000, test_data, sizeof(test_data));
+    if (ret < 0)
+    {
+        LOG_ERR("❌ FRAM write failed: %d", ret);
+        return;
+    }
+
+    ret = juxta_fram_read(&fram_dev, 0x1000, read_data, sizeof(read_data));
+    if (ret < 0)
+    {
+        LOG_ERR("❌ FRAM read failed: %d", ret);
+        return;
+    }
+
+    if (memcmp(test_data, read_data, sizeof(test_data)) != 0)
+    {
+        LOG_ERR("❌ FRAM data verification failed");
+        return;
+    }
+
+    LOG_INF("✅ FRAM read/write test passed");
+    LOG_INF("✅ FRAM functionality verified - SPI bus working correctly");
+}
+
 int main(void)
 {
     int ret;
@@ -980,6 +1172,23 @@ int main(void)
 
     k_work_submit(&state_work);
     k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
+
+    // FRAM functionality test (verify SPI bus is working)
+    LOG_INF("🔧 Testing FRAM functionality before LIS2DH12...");
+    test_fram_functionality();
+
+    // LIS2DH12 check (does not alter existing functionality)
+    k_sleep(K_MSEC(500)); // Give LIS2DH12 more time to power up
+    check_lis2dh();
+
+    // Try again after a longer delay
+    k_sleep(K_MSEC(1000));
+    LOG_INF("Retrying LIS2DH12 check after additional delay...");
+    check_lis2dh();
+
+    // FRAM functionality test after LIS2DH12 (verify no conflicts)
+    LOG_INF("🔧 Testing FRAM functionality after LIS2DH12...");
+    test_fram_functionality();
 
     LOG_INF("✅ JUXTA BLE Application started successfully");
 
