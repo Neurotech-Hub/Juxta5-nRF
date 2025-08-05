@@ -88,8 +88,9 @@
 		jedec-id = [04 7F 27];
 	};
 
+	/* LIS2DH12 accelerometer - using custom driver */
 	accel0: accel@1 {
-		compatible = "st,lis2dh";
+		compatible = "st,lis2dh12-spi";
 		reg = <1>;
 		spi-max-frequency = <8000000>;
 		label = "LIS2DH12";

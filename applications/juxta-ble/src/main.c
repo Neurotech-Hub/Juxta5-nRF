@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <zephyr/drivers/sensor.h>
+#include "lis2dh12_zephyr.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -44,57 +45,72 @@ static bool ble_connected = false; // Track connection state
 
 // LIS2DH motion detection
 static uint8_t motion_count = 0;
+static struct lis2dh12_zephyr_dev lis2dh_dev;
 
-static void lis2dh_trigger_handler(const struct device *dev, const struct sensor_trigger *trig)
+// GPIO interrupt callback for LIS2DH motion detection
+static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
     motion_count++;
     printk("🏃 Motion detected! Count: %d\n", motion_count);
 }
 
+static struct gpio_callback lis2dh_int_cb;
+
 static int configure_lis2dh_motion_detection(void)
 {
-    const struct device *lis2dh = DEVICE_DT_GET_ANY(st_lis2dh);
-    if (!device_is_ready(lis2dh))
+    // Initialize LIS2DH device
+    lis2dh_dev.spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
+
+    // Initialize GPIO specs manually
+    lis2dh_dev.cs_gpio.port = DEVICE_DT_GET(DT_GPIO_CTLR_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1));
+    lis2dh_dev.cs_gpio.pin = DT_GPIO_PIN_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
+    lis2dh_dev.cs_gpio.dt_flags = DT_GPIO_FLAGS_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
+
+    lis2dh_dev.int_gpio.port = DEVICE_DT_GET(DT_GPIO_CTLR(DT_PATH(gpio_keys, accel_int), gpios));
+    lis2dh_dev.int_gpio.pin = DT_GPIO_PIN(DT_PATH(gpio_keys, accel_int), gpios);
+    lis2dh_dev.int_gpio.dt_flags = DT_GPIO_FLAGS(DT_PATH(gpio_keys, accel_int), gpios);
+
+    int ret = lis2dh12_zephyr_init(&lis2dh_dev);
+    if (ret < 0)
     {
-        LOG_ERR("LIS2DH device not ready");
+        LOG_ERR("Failed to initialize LIS2DH: %d", ret);
+        return ret;
+    }
+
+    // Configure motion detection with low threshold (0.05g = ~5 in LIS2DH units)
+    ret = lis2dh12_zephyr_configure_motion_detection(&lis2dh_dev, 5, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure LIS2DH motion detection: %d", ret);
+        return ret;
+    }
+
+    // Configure GPIO interrupt for INT1
+    if (!device_is_ready(lis2dh_dev.int_gpio.port))
+    {
+        LOG_ERR("LIS2DH INT GPIO not ready");
         return -ENODEV;
     }
 
-    // Set ODR (Output Data Rate) to 10Hz
-    struct sensor_value odr = {.val1 = 10, .val2 = 0};
-    int ret = sensor_attr_set(lis2dh, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+    ret = gpio_pin_configure(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin, GPIO_INPUT | GPIO_PULL_UP);
     if (ret < 0)
     {
-        LOG_ERR("Failed to set LIS2DH ODR: %d", ret);
+        LOG_ERR("Failed to configure LIS2DH INT GPIO: %d", ret);
         return ret;
     }
 
-    // Set motion threshold (0.05g)
-    struct sensor_value threshold = {.val1 = 0, .val2 = 50000};
-    ret = sensor_attr_set(lis2dh, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_TH, &threshold);
+    ret = gpio_pin_interrupt_configure(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin, GPIO_INT_EDGE_FALLING);
     if (ret < 0)
     {
-        LOG_ERR("Failed to set LIS2DH motion threshold: %d", ret);
+        LOG_ERR("Failed to configure LIS2DH INT interrupt: %d", ret);
         return ret;
     }
 
-    // Set motion duration (minimum 1 sample)
-    struct sensor_value duration = {.val1 = 1, .val2 = 0};
-    ret = sensor_attr_set(lis2dh, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_DUR, &duration);
+    gpio_init_callback(&lis2dh_int_cb, lis2dh_int_callback, BIT(lis2dh_dev.int_gpio.pin));
+    ret = gpio_add_callback(lis2dh_dev.int_gpio.port, &lis2dh_int_cb);
     if (ret < 0)
     {
-        LOG_ERR("Failed to set LIS2DH motion duration: %d", ret);
-        return ret;
-    }
-
-    // Set up trigger for motion detection on INT1
-    struct sensor_trigger trig = {
-        .type = SENSOR_TRIG_DELTA,
-        .chan = SENSOR_CHAN_ACCEL_XYZ};
-    ret = sensor_trigger_set(lis2dh, &trig, lis2dh_trigger_handler);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to set LIS2DH trigger: %d", ret);
+        LOG_ERR("Failed to add LIS2DH INT callback: %d", ret);
         return ret;
     }
 
@@ -104,29 +120,17 @@ static int configure_lis2dh_motion_detection(void)
 
 static void check_lis2dh(void)
 {
-    const struct device *accel = DEVICE_DT_GET_ANY(st_lis2dh);
-
-    if (!accel || !device_is_ready(accel))
+    if (!lis2dh12_zephyr_is_ready(&lis2dh_dev))
     {
         LOG_ERR("❌ LIS2DH device not ready");
         return;
     }
 
-    int rc = sensor_sample_fetch(accel);
-    if (rc)
-    {
-        LOG_ERR("❌ LIS2DH sample fetch failed: %d", rc);
-        return;
-    }
-
-    struct sensor_value accel_xyz[3];
-    rc = sensor_channel_get(accel, SENSOR_CHAN_ACCEL_XYZ, accel_xyz);
+    float x, y, z;
+    int rc = lis2dh12_zephyr_read_accel(&lis2dh_dev, &x, &y, &z);
     if (rc == 0)
     {
-        LOG_INF("✅ LIS2DH: X=%d.%06d, Y=%d.%06d, Z=%d.%06d",
-                accel_xyz[0].val1, accel_xyz[0].val2,
-                accel_xyz[1].val1, accel_xyz[1].val2,
-                accel_xyz[2].val1, accel_xyz[2].val2);
+        LOG_INF("✅ LIS2DH: X=%.3f mg, Y=%.3f mg, Z=%.3f mg", (double)x, (double)y, (double)z);
     }
     else
     {
@@ -1130,13 +1134,17 @@ int main(void)
     // Quick hardware verification
     LOG_INF("🔧 Hardware verification...");
     test_fram_functionality();
-    check_lis2dh();
 
-    // Configure LIS2DH motion detection
+    // Configure LIS2DH motion detection first
     ret = configure_lis2dh_motion_detection();
     if (ret < 0)
     {
         LOG_WRN("⚠️ LIS2DH motion detection configuration failed, continuing without motion detection");
+    }
+    else
+    {
+        // Only check LIS2DH if initialization was successful
+        check_lis2dh();
     }
 
     LOG_INF("✅ Hardware verification complete");
