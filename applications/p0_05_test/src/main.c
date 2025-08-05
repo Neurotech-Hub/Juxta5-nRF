@@ -13,10 +13,10 @@
 
 LOG_MODULE_REGISTER(p0_05_test, LOG_LEVEL_INF);
 
-/* Direct GPIO device reference for P0.05 and P0.15 */
+/* Direct GPIO device reference for P0.05 (LED) and P0.15 (LIS2DH CS) */
 #define GPIO_DEVICE_NODE DT_NODELABEL(gpio0)
-#define P0_05_PIN 5
-#define P0_15_PIN 15
+#define P0_05_PIN 5  /* LED pin */
+#define P0_15_PIN 15 /* LIS2DH CS pin */
 
 int main(void)
 {
@@ -30,8 +30,8 @@ int main(void)
 
     /* Force immediate output */
     k_sleep(K_MSEC(100));
-    LOG_INF("🔧 P0.05 and P0.15 GPIO Toggle Test Starting");
-    LOG_INF("📋 Target: nRF52840 P0.05 and P0.15 pins");
+    LOG_INF("🔧 P0.05 (LED) and P0.15 (LIS2DH CS) GPIO Toggle Test Starting");
+    LOG_INF("📋 Target: nRF52840 P0.05 (LED) and P0.15 (LIS2DH CS) pins");
     LOG_INF("🎯 Purpose: Hardware connectivity verification");
     LOG_INF("⏱️  Toggle interval: 500ms (2Hz)");
     LOG_INF("🔄 Mode: Continuous toggle until power off");
@@ -62,9 +62,9 @@ int main(void)
         return ret;
     }
 
-    LOG_INF("✅ P0.05 and P0.15 configured as GPIO outputs");
+    LOG_INF("✅ P0.05 (LED) and P0.15 (LIS2DH CS) configured as GPIO outputs");
     LOG_INF("🔧 Starting continuous toggle test...");
-    LOG_INF("📊 Monitor P0.05 and P0.15 with oscilloscope/logic analyzer");
+    LOG_INF("📊 Monitor P0.05 (LED) and P0.15 (LIS2DH CS) with oscilloscope/logic analyzer");
     LOG_INF("💡 Expected: 2Hz square wave (500ms period) on both pins");
 
     /* Continuous toggle loop */
@@ -74,22 +74,22 @@ int main(void)
         ret = gpio_pin_set(gpio_dev, P0_05_PIN, pin_state);
         if (ret != 0)
         {
-            LOG_ERR("❌ Failed to set P0.05: %d", ret);
+            LOG_ERR("❌ Failed to set P0.05 (LED): %d", ret);
         }
 
         ret = gpio_pin_set(gpio_dev, P0_15_PIN, pin_state);
         if (ret != 0)
         {
-            LOG_ERR("❌ Failed to set P0.15: %d", ret);
+            LOG_ERR("❌ Failed to set P0.15 (LIS2DH CS): %d", ret);
         }
 
         if (ret == 0) /* Only increment if both pins were set successfully */
         {
             toggle_count++;
-            if (toggle_count % 10 == 0)
+                        if (toggle_count % 10 == 0)
             { /* Log every 10 toggles */
-                LOG_INF("🔄 Toggle #%u: P0.05 = %s, P0.15 = %s", toggle_count,
-                        pin_state ? "HIGH" : "LOW", pin_state ? "HIGH" : "LOW");
+                LOG_INF("🔄 Toggle #%u: P0.05 (LED) = %s, P0.15 (LIS2DH CS) = %s", toggle_count,
+                         pin_state ? "HIGH" : "LOW", pin_state ? "HIGH" : "LOW");
             }
         }
 

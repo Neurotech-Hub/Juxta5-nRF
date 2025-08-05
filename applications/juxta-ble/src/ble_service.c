@@ -825,15 +825,14 @@ BT_GATT_SERVICE_DEFINE(juxta_hublink_svc,
 int juxta_ble_service_init(void)
 {
     LOG_INF("🔵 JUXTA Hublink BLE Service initialized");
-    LOG_INF("📋 Service UUID: 57617368-5501-0001-8000-00805f9b34fb");
-    LOG_INF("📊 Node Characteristic UUID: 57617368-5505-0001-8000-00805f9b34fb");
-    LOG_INF("🎛️ Gateway Characteristic UUID: 57617368-5504-0001-8000-00805f9b34fb");
-    LOG_INF("📁 Filename Characteristic UUID: 57617368-5502-0001-8000-00805f9b34fb");
-    LOG_INF("📤 File Transfer Characteristic UUID: 57617368-5503-0001-8000-00805f9b34fb");
-    LOG_INF("📏 Target MTU: 515 bytes (512 + 3 byte header)");
-    LOG_INF("📁 File transfer chunk size: %d bytes", JUXTA_FILE_TRANSFER_CHUNK_SIZE);
-    LOG_INF("📊 Node response max size: %d bytes", JUXTA_NODE_RESPONSE_MAX_SIZE);
-    LOG_INF("🎛️ Gateway command max size: %d bytes", JUXTA_GATEWAY_COMMAND_MAX_SIZE);
+    LOG_INF("📋 Service: 57617368-5501-0001-8000-00805f9b34fb");
+    LOG_INF("📊 Node: 57617368-5505-0001-8000-00805f9b34fb");
+    LOG_INF("🎛️ Gateway: 57617368-5504-0001-8000-00805f9b34fb");
+    LOG_INF("📁 Filename: 57617368-5502-0001-8000-00805f9b34fb");
+    LOG_INF("📤 File Transfer: 57617368-5503-0001-8000-00805f9b34fb");
+    LOG_INF("📏 MTU: %d bytes, Chunk: %d bytes, Node: %d bytes, Gateway: %d bytes",
+            JUXTA_FILE_TRANSFER_CHUNK_SIZE + 3, JUXTA_FILE_TRANSFER_CHUNK_SIZE,
+            JUXTA_NODE_RESPONSE_MAX_SIZE, JUXTA_GATEWAY_COMMAND_MAX_SIZE);
 
     /* Service is automatically registered with BT_GATT_SERVICE_DEFINE */
     return 0;

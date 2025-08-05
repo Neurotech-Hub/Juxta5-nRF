@@ -890,164 +890,71 @@ static void check_lis2dh(void)
 {
     const struct device *accel = DEVICE_DT_GET_ANY(st_lis2dh);
 
-    if (!accel)
+    if (!accel || !device_is_ready(accel))
     {
-        LOG_ERR("No LIS2DH device found in device tree");
+        LOG_ERR("❌ LIS2DH device not ready");
         return;
     }
 
-    LOG_INF("LIS2DH device found: %s", accel->name);
-
-    // Check SPI bus readiness
-    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
-    if (!spi_dev)
-    {
-        LOG_ERR("SPI0 device not found");
-        return;
-    }
-    if (!device_is_ready(spi_dev))
-    {
-        LOG_ERR("SPI0 device not ready");
-        return;
-    }
-    LOG_INF("SPI0 device ready: %s", spi_dev->name);
-
-    // Debug CS pin configuration
-    static const struct gpio_dt_spec lis2dh_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
-    if (!device_is_ready(lis2dh_cs.port))
-    {
-        LOG_ERR("❌ LIS2DH CS GPIO port not ready");
-        return;
-    }
-    LOG_INF("✅ LIS2DH CS GPIO port ready: %s", lis2dh_cs.port->name);
-    LOG_INF("✅ LIS2DH CS pin: %d, flags: 0x%08X", lis2dh_cs.pin, lis2dh_cs.dt_flags);
-
-    // Let Zephyr driver handle LIS2DH12 CS management
-    LOG_INF("🔧 Testing LIS2DH12 with Zephyr driver CS management...");
-
-    if (!device_is_ready(accel))
-    {
-        LOG_ERR("LIS2DH device %s is not ready", accel->name);
-        LOG_ERR("This usually indicates a hardware connection issue or power-up problem");
-        LOG_ERR("Check: 1) Power supply to LIS2DH12, 2) SPI connections, 3) CS pin (P0.05)");
-        return;
-    }
-
-    LOG_INF("LIS2DH device found: %s", accel->name);
-
-    // Let the Zephyr driver handle CS management
     int rc = sensor_sample_fetch(accel);
     if (rc)
     {
-        LOG_ERR("Failed to fetch sample from LIS2DH: %d", rc);
-    }
-    else
-    {
-        LOG_INF("LIS2DH sensor sample fetch OK (WHOAMI check passed)");
+        LOG_ERR("❌ LIS2DH sample fetch failed: %d", rc);
+        return;
     }
 
     struct sensor_value accel_xyz[3];
     rc = sensor_channel_get(accel, SENSOR_CHAN_ACCEL_XYZ, accel_xyz);
     if (rc == 0)
     {
-        LOG_INF("Accel X: %f, Y: %f, Z: %f",
-                sensor_value_to_double(&accel_xyz[0]),
-                sensor_value_to_double(&accel_xyz[1]),
-                sensor_value_to_double(&accel_xyz[2]));
+        LOG_INF("✅ LIS2DH: X=%d.%06d, Y=%d.%06d, Z=%d.%06d",
+                accel_xyz[0].val1, accel_xyz[0].val2,
+                accel_xyz[1].val1, accel_xyz[1].val2,
+                accel_xyz[2].val1, accel_xyz[2].val2);
     }
     else
     {
-        LOG_ERR("Failed to read accel: %d", rc);
+        LOG_ERR("❌ LIS2DH read failed: %d", rc);
     }
 }
 
 /**
- * @brief Quick FRAM test to verify SPI bus functionality
+ * @brief Quick FRAM test to verify basic functionality
  */
 static void test_fram_functionality(void)
 {
-    LOG_INF("🔧 Testing FRAM functionality...");
-
-    /* Get SPI device */
     const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
-    if (!spi_dev)
-    {
-        LOG_ERR("❌ SPI0 device not found");
-        return;
-    }
-    if (!device_is_ready(spi_dev))
+    if (!spi_dev || !device_is_ready(spi_dev))
     {
         LOG_ERR("❌ SPI0 device not ready");
         return;
     }
-    LOG_INF("✅ SPI0 device ready: %s", spi_dev->name);
 
-    /* Get FRAM CS pin */
     static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
     if (!device_is_ready(fram_cs.port))
     {
-        LOG_ERR("❌ FRAM CS device not ready");
+        LOG_ERR("❌ FRAM CS not ready");
         return;
     }
 
-    /* FRAM test - no LIS2DH12 CS configuration */
-    LOG_INF("🔧 FRAM test - isolated from LIS2DH12 CS management");
-
-    /* Initialize FRAM device */
     struct juxta_fram_device fram_dev;
     int ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
     if (ret < 0)
     {
-        LOG_ERR("❌ Failed to initialize FRAM: %d", ret);
+        LOG_ERR("❌ FRAM init failed: %d", ret);
         return;
     }
-    LOG_INF("✅ FRAM device initialized");
 
-    /* Read and verify FRAM device ID */
     struct juxta_fram_id id;
     ret = juxta_fram_read_id(&fram_dev, &id);
     if (ret < 0)
     {
-        LOG_ERR("❌ Failed to read FRAM ID: %d", ret);
-        LOG_ERR("🔍 This suggests either:");
-        LOG_ERR("   1) CS pin conflict with LIS2DH12");
-        LOG_ERR("   2) FRAM not responding");
-        LOG_ERR("   3) SPI bus issue");
+        LOG_ERR("❌ FRAM ID read failed: %d", ret);
         return;
     }
 
-    LOG_INF("✅ FRAM Device ID verified:");
-    LOG_INF("  Manufacturer: 0x%02X (expected: 0x04)", id.manufacturer_id);
-    LOG_INF("  Continuation: 0x%02X (expected: 0x7F)", id.continuation_code);
-    LOG_INF("  Product ID 1: 0x%02X (expected: 0x27)", id.product_id_1);
-    LOG_INF("  Product ID 2: 0x%02X (expected: 0x03)", id.product_id_2);
-
-    /* Quick write/read test */
-    uint8_t test_data[] = {0xAA, 0x55, 0x12, 0x34};
-    uint8_t read_data[sizeof(test_data)];
-
-    ret = juxta_fram_write(&fram_dev, 0x1000, test_data, sizeof(test_data));
-    if (ret < 0)
-    {
-        LOG_ERR("❌ FRAM write failed: %d", ret);
-        return;
-    }
-
-    ret = juxta_fram_read(&fram_dev, 0x1000, read_data, sizeof(read_data));
-    if (ret < 0)
-    {
-        LOG_ERR("❌ FRAM read failed: %d", ret);
-        return;
-    }
-
-    if (memcmp(test_data, read_data, sizeof(test_data)) != 0)
-    {
-        LOG_ERR("❌ FRAM data verification failed");
-        return;
-    }
-
-    LOG_INF("✅ FRAM read/write test passed");
-    LOG_INF("✅ FRAM functionality verified - SPI bus working correctly");
+    LOG_INF("✅ FRAM: ID=0x%02X%02X%02X%02X",
+            id.manufacturer_id, id.continuation_code, id.product_id_1, id.product_id_2);
 }
 
 int main(void)
@@ -1089,12 +996,18 @@ int main(void)
     // Set up dynamic advertising name for non-connectable advertising only
     setup_dynamic_adv_name();
 
+    // Small delay to allow RTT buffer to catch up
+    k_sleep(K_MSEC(25));
+
     ret = juxta_ble_service_init();
     if (ret < 0)
     {
         LOG_ERR("BLE service init failed (err %d)", ret);
         return ret;
     }
+
+    // Small delay to allow RTT buffer to catch up
+    k_sleep(K_MSEC(50));
 
     /* Initialize FRAM device first */
     LOG_INF("📁 Initializing FRAM device...");
@@ -1146,28 +1059,13 @@ int main(void)
     k_work_submit(&state_work);
     k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
 
-    // Test FRAM first (clean state)
-    LOG_INF("🔧 Testing FRAM functionality FIRST (clean state)...");
+    // Quick hardware verification
+    LOG_INF("🔧 Hardware verification...");
     test_fram_functionality();
-
-    // Wait and test LIS2DH12
-    k_sleep(K_MSEC(1000)); // Give time for CS state to settle
-    LOG_INF("🔧 Testing LIS2DH12 after FRAM...");
     check_lis2dh();
+    LOG_INF("✅ Hardware verification complete");
 
-    // Wait and test FRAM again to see if LIS2DH12 corrupted it
-    k_sleep(K_MSEC(1000));
-    LOG_INF("🔧 Testing FRAM functionality AFTER LIS2DH12...");
-    test_fram_functionality();
-
-    LOG_INF("✅ SPI Testing Complete - Entering test loop");
-
-    // Simple test loop - focus on SPI debugging
-    while (1)
-    {
-        k_sleep(K_MSEC(5000)); // 5 second delay
-        LOG_INF("🔄 Test loop iteration...");
-    }
+    LOG_INF("✅ JUXTA BLE Application started successfully");
 
     uint32_t heartbeat_counter = 0;
     while (1)
