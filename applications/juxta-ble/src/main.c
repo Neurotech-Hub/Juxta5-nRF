@@ -922,42 +922,8 @@ static void check_lis2dh(void)
     LOG_INF("✅ LIS2DH CS GPIO port ready: %s", lis2dh_cs.port->name);
     LOG_INF("✅ LIS2DH CS pin: %d, flags: 0x%08X", lis2dh_cs.pin, lis2dh_cs.dt_flags);
 
-    // Manual WHOAMI register read to test basic communication
-    LOG_INF("🔧 Attempting manual WHOAMI read...");
-    struct spi_config spi_cfg = {
-        .frequency = 8000000,
-        .operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPOL | SPI_MODE_CPHA,
-    };
-
-    uint8_t whoami_cmd = 0x8F; // WHOAMI register read (0x0F with read bit set)
-    uint8_t whoami_data = 0;
-
-    struct spi_buf tx_buf = {
-        .buf = &whoami_cmd,
-        .len = 1};
-    struct spi_buf rx_buf = {
-        .buf = &whoami_data,
-        .len = 1};
-    const struct spi_buf_set tx = {
-        .buffers = &tx_buf,
-        .count = 1};
-    const struct spi_buf_set rx = {
-        .buffers = &rx_buf,
-        .count = 1};
-
-    // Manually control CS
-    gpio_pin_set_dt(&lis2dh_cs, 0); // Assert CS (active low)
-    int spi_ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
-    gpio_pin_set_dt(&lis2dh_cs, 1); // De-assert CS
-
-    if (spi_ret == 0)
-    {
-        LOG_INF("✅ Manual WHOAMI read successful: 0x%02X (expected: 0x33)", whoami_data);
-    }
-    else
-    {
-        LOG_ERR("❌ Manual WHOAMI read failed: %d", spi_ret);
-    }
+    // Let Zephyr driver handle LIS2DH12 CS management
+    LOG_INF("🔧 Testing LIS2DH12 with Zephyr driver CS management...");
 
     if (!device_is_ready(accel))
     {
@@ -1024,6 +990,9 @@ static void test_fram_functionality(void)
         return;
     }
 
+    /* FRAM test - no LIS2DH12 CS configuration */
+    LOG_INF("🔧 FRAM test - isolated from LIS2DH12 CS management");
+
     /* Initialize FRAM device */
     struct juxta_fram_device fram_dev;
     int ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
@@ -1040,6 +1009,10 @@ static void test_fram_functionality(void)
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to read FRAM ID: %d", ret);
+        LOG_ERR("🔍 This suggests either:");
+        LOG_ERR("   1) CS pin conflict with LIS2DH12");
+        LOG_ERR("   2) FRAM not responding");
+        LOG_ERR("   3) SPI bus issue");
         return;
     }
 
@@ -1084,7 +1057,7 @@ int main(void)
     LOG_INF("🚀 Starting JUXTA BLE Application");
 
     // Wait for magnet sensor activation before starting BLE
-    wait_for_magnet_sensor();
+    // wait_for_magnet_sensor(); // COMMENTED OUT FOR SPI TESTING
 
     struct tm timeinfo;
     time_t t = 1705752030; // 2024-01-20 12:00:30 UTC
@@ -1173,24 +1146,28 @@ int main(void)
     k_work_submit(&state_work);
     k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
 
-    // FRAM functionality test (verify SPI bus is working)
-    LOG_INF("🔧 Testing FRAM functionality before LIS2DH12...");
+    // Test FRAM first (clean state)
+    LOG_INF("🔧 Testing FRAM functionality FIRST (clean state)...");
     test_fram_functionality();
 
-    // LIS2DH12 check (does not alter existing functionality)
-    k_sleep(K_MSEC(500)); // Give LIS2DH12 more time to power up
+    // Wait and test LIS2DH12
+    k_sleep(K_MSEC(1000)); // Give time for CS state to settle
+    LOG_INF("🔧 Testing LIS2DH12 after FRAM...");
     check_lis2dh();
 
-    // Try again after a longer delay
+    // Wait and test FRAM again to see if LIS2DH12 corrupted it
     k_sleep(K_MSEC(1000));
-    LOG_INF("Retrying LIS2DH12 check after additional delay...");
-    check_lis2dh();
-
-    // FRAM functionality test after LIS2DH12 (verify no conflicts)
-    LOG_INF("🔧 Testing FRAM functionality after LIS2DH12...");
+    LOG_INF("🔧 Testing FRAM functionality AFTER LIS2DH12...");
     test_fram_functionality();
 
-    LOG_INF("✅ JUXTA BLE Application started successfully");
+    LOG_INF("✅ SPI Testing Complete - Entering test loop");
+
+    // Simple test loop - focus on SPI debugging
+    while (1)
+    {
+        k_sleep(K_MSEC(5000)); // 5 second delay
+        LOG_INF("🔄 Test loop iteration...");
+    }
 
     uint32_t heartbeat_counter = 0;
     while (1)
