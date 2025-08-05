@@ -16,9 +16,6 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/random/random.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/pm/pm.h>
-#include <zephyr/pm/device.h>
-#include <zephyr/pm/policy.h>
 #include "juxta_vitals_nrf52/vitals.h"
 #include "juxta_framfs/framfs.h"
 #include "juxta_fram/fram.h"
@@ -26,6 +23,8 @@
 #include <stdio.h>
 #include <time.h>
 #include <zephyr/drivers/sensor.h>
+
+LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 typedef enum
 {
@@ -43,20 +42,138 @@ static bool doGatewayAdvertise = false;
 static struct k_timer ten_minute_timer;
 static bool ble_connected = false; // Track connection state
 
-// Add 10-minute timer handler
-static void ten_minute_timeout(struct k_timer *timer)
-{
-    printk("🕐 10-minute timer: clearing gateway advertise flag and logging low-frequency data\n");
-    doGatewayAdvertise = false;
+// LIS2DH motion detection
+static uint8_t motion_count = 0;
 
-    // TODO: Add low-frequency data logging here (battery, temperature, etc.)
-    // For now, just log that this function is working
-    printk("📊 Low-frequency data logging placeholder (battery, temperature, etc.)\n");
+static void lis2dh_trigger_handler(const struct device *dev, const struct sensor_trigger *trig)
+{
+    motion_count++;
+    printk("🏃 Motion detected! Count: %d\n", motion_count);
+}
+
+static int configure_lis2dh_motion_detection(void)
+{
+    const struct device *lis2dh = DEVICE_DT_GET_ANY(st_lis2dh);
+    if (!device_is_ready(lis2dh))
+    {
+        LOG_ERR("LIS2DH device not ready");
+        return -ENODEV;
+    }
+
+    // Set ODR (Output Data Rate) to 10Hz
+    struct sensor_value odr = {.val1 = 10, .val2 = 0};
+    int ret = sensor_attr_set(lis2dh, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set LIS2DH ODR: %d", ret);
+        return ret;
+    }
+
+    // Set motion threshold (0.05g)
+    struct sensor_value threshold = {.val1 = 0, .val2 = 50000};
+    ret = sensor_attr_set(lis2dh, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_TH, &threshold);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set LIS2DH motion threshold: %d", ret);
+        return ret;
+    }
+
+    // Set motion duration (minimum 1 sample)
+    struct sensor_value duration = {.val1 = 1, .val2 = 0};
+    ret = sensor_attr_set(lis2dh, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_DUR, &duration);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set LIS2DH motion duration: %d", ret);
+        return ret;
+    }
+
+    // Set up trigger for motion detection on INT1
+    struct sensor_trigger trig = {
+        .type = SENSOR_TRIG_DELTA,
+        .chan = SENSOR_CHAN_ACCEL_XYZ};
+    ret = sensor_trigger_set(lis2dh, &trig, lis2dh_trigger_handler);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set LIS2DH trigger: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("✅ LIS2DH motion detection configured (ODR=10Hz, scale=2g, threshold=0.05g, duration=1)");
+    return 0;
+}
+
+static void check_lis2dh(void)
+{
+    const struct device *accel = DEVICE_DT_GET_ANY(st_lis2dh);
+
+    if (!accel || !device_is_ready(accel))
+    {
+        LOG_ERR("❌ LIS2DH device not ready");
+        return;
+    }
+
+    int rc = sensor_sample_fetch(accel);
+    if (rc)
+    {
+        LOG_ERR("❌ LIS2DH sample fetch failed: %d", rc);
+        return;
+    }
+
+    struct sensor_value accel_xyz[3];
+    rc = sensor_channel_get(accel, SENSOR_CHAN_ACCEL_XYZ, accel_xyz);
+    if (rc == 0)
+    {
+        LOG_INF("✅ LIS2DH: X=%d.%06d, Y=%d.%06d, Z=%d.%06d",
+                accel_xyz[0].val1, accel_xyz[0].val2,
+                accel_xyz[1].val1, accel_xyz[1].val2,
+                accel_xyz[2].val1, accel_xyz[2].val2);
+    }
+    else
+    {
+        LOG_ERR("❌ LIS2DH read failed: %d", rc);
+    }
+}
+
+/**
+ * @brief Quick FRAM test to verify basic functionality
+ */
+static void test_fram_functionality(void)
+{
+    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
+    if (!spi_dev || !device_is_ready(spi_dev))
+    {
+        LOG_ERR("❌ SPI0 device not ready");
+        return;
+    }
+
+    static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
+    if (!device_is_ready(fram_cs.port))
+    {
+        LOG_ERR("❌ FRAM CS not ready");
+        return;
+    }
+
+    struct juxta_fram_device fram_dev;
+    int ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ FRAM init failed: %d", ret);
+        return;
+    }
+
+    struct juxta_fram_id id;
+    ret = juxta_fram_read_id(&fram_dev, &id);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ FRAM ID read failed: %d", ret);
+        return;
+    }
+
+    LOG_INF("✅ FRAM: ID=0x%02X%02X%02X%02X",
+            id.manufacturer_id, id.continuation_code, id.product_id_1, id.product_id_2);
 }
 
 #define BLE_MIN_INTER_BURST_DELAY_MS 100
-
-LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 static struct juxta_vitals_ctx vitals_ctx;
 static struct juxta_framfs_context framfs_ctx;
@@ -204,7 +321,9 @@ __no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uin
 static bool motion_active(void)
 {
 #if CONFIG_JUXTA_BLE_MOTION_GATING
-    return true;
+    // Consider motion active if we've detected any motion in the last few minutes
+    // This provides a simple motion gating mechanism
+    return (motion_count > 0);
 #else
     return true;
 #endif
@@ -416,6 +535,14 @@ static void state_work_handler(struct k_work *work)
     if (current_minute != last_logged_minute)
     {
         juxta_scan_table_print_and_clear();
+
+        // Report and clear motion count
+        if (motion_count > 0)
+        {
+            LOG_INF("🏃 Motion events in last minute: %d", motion_count);
+            motion_count = 0;
+        }
+
         last_logged_minute = current_minute;
         LOG_INF("🕐 Minute of day changed to: %u", current_minute);
     }
@@ -830,10 +957,11 @@ static int juxta_start_connectable_advertising(void)
     return ret;
 }
 
-// Magnet sensor and LED definitions using Zephyr device tree
-static const struct gpio_dt_spec magnet_sensor = GPIO_DT_SPEC_GET(DT_PATH(gpio_keys, magnet_sensor), gpios);
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
+// Magnet sensor and LED definitions using Zephyr device tree (currently unused)
+static const struct gpio_dt_spec magnet_sensor __unused = GPIO_DT_SPEC_GET(DT_PATH(gpio_keys, magnet_sensor), gpios);
+static const struct gpio_dt_spec led __unused = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
 
+static void blink_led_three_times(void) __unused;
 static void blink_led_three_times(void)
 {
     LOG_INF("💡 Blinking LED three times to indicate wake-up");
@@ -848,6 +976,7 @@ static void blink_led_three_times(void)
     LOG_INF("✅ LED blink sequence completed");
 }
 
+static void wait_for_magnet_sensor(void) __unused;
 static void wait_for_magnet_sensor(void)
 {
     LOG_INF("🧲 Waiting for magnet sensor to go high (active)...");
@@ -886,75 +1015,14 @@ static void wait_for_magnet_sensor(void)
     blink_led_three_times();
 }
 
-static void check_lis2dh(void)
+static void ten_minute_timeout(struct k_timer *timer)
 {
-    const struct device *accel = DEVICE_DT_GET_ANY(st_lis2dh);
+    printk("🕐 10-minute timer: clearing gateway advertise flag and logging low-frequency data\n");
+    doGatewayAdvertise = false;
 
-    if (!accel || !device_is_ready(accel))
-    {
-        LOG_ERR("❌ LIS2DH device not ready");
-        return;
-    }
-
-    int rc = sensor_sample_fetch(accel);
-    if (rc)
-    {
-        LOG_ERR("❌ LIS2DH sample fetch failed: %d", rc);
-        return;
-    }
-
-    struct sensor_value accel_xyz[3];
-    rc = sensor_channel_get(accel, SENSOR_CHAN_ACCEL_XYZ, accel_xyz);
-    if (rc == 0)
-    {
-        LOG_INF("✅ LIS2DH: X=%d.%06d, Y=%d.%06d, Z=%d.%06d",
-                accel_xyz[0].val1, accel_xyz[0].val2,
-                accel_xyz[1].val1, accel_xyz[1].val2,
-                accel_xyz[2].val1, accel_xyz[2].val2);
-    }
-    else
-    {
-        LOG_ERR("❌ LIS2DH read failed: %d", rc);
-    }
-}
-
-/**
- * @brief Quick FRAM test to verify basic functionality
- */
-static void test_fram_functionality(void)
-{
-    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
-    if (!spi_dev || !device_is_ready(spi_dev))
-    {
-        LOG_ERR("❌ SPI0 device not ready");
-        return;
-    }
-
-    static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
-    if (!device_is_ready(fram_cs.port))
-    {
-        LOG_ERR("❌ FRAM CS not ready");
-        return;
-    }
-
-    struct juxta_fram_device fram_dev;
-    int ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
-    if (ret < 0)
-    {
-        LOG_ERR("❌ FRAM init failed: %d", ret);
-        return;
-    }
-
-    struct juxta_fram_id id;
-    ret = juxta_fram_read_id(&fram_dev, &id);
-    if (ret < 0)
-    {
-        LOG_ERR("❌ FRAM ID read failed: %d", ret);
-        return;
-    }
-
-    LOG_INF("✅ FRAM: ID=0x%02X%02X%02X%02X",
-            id.manufacturer_id, id.continuation_code, id.product_id_1, id.product_id_2);
+    // TODO: Add low-frequency data logging here (battery, temperature, etc.)
+    // For now, just log that this function is working
+    printk("📊 Low-frequency data logging placeholder (battery, temperature, etc.)\n");
 }
 
 int main(void)
@@ -1063,6 +1131,14 @@ int main(void)
     LOG_INF("🔧 Hardware verification...");
     test_fram_functionality();
     check_lis2dh();
+
+    // Configure LIS2DH motion detection
+    ret = configure_lis2dh_motion_detection();
+    if (ret < 0)
+    {
+        LOG_WRN("⚠️ LIS2DH motion detection configuration failed, continuing without motion detection");
+    }
+
     LOG_INF("✅ Hardware verification complete");
 
     LOG_INF("✅ JUXTA BLE Application started successfully");
