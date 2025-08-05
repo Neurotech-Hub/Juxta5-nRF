@@ -12,7 +12,7 @@ project(juxta_ble LANGUAGES C)
 target_sources(app PRIVATE
     src/main.c
     src/ble_service.c
-    src/lis2dh12_zephyr.c
+    src/lis2dh12.c
 )
 
 # Add include directories for our libraries

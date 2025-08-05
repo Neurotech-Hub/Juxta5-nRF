@@ -5,14 +5,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "lis2dh12_zephyr.h"
+#include "lis2dh12.h"
 #include <zephyr/sys/util.h>
 #include <string.h>
 
-LOG_MODULE_REGISTER(lis2dh12_zephyr, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(lis2dh12, LOG_LEVEL_INF);
 
 /* Global context for platform functions */
-static struct lis2dh12_zephyr_dev *g_lis2dh12_dev = NULL;
+static struct lis2dh12_dev *g_lis2dh12_dev = NULL;
 
 /**
  * @brief Platform-specific SPI read function for STMicroelectronics library
@@ -128,7 +128,7 @@ int32_t lis2dh12_platform_write(void *handle, uint8_t reg, const uint8_t *data, 
     return 0;
 }
 
-int lis2dh12_zephyr_init(struct lis2dh12_zephyr_dev *dev)
+int lis2dh12_init(struct lis2dh12_dev *dev)
 {
     if (!dev)
     {
@@ -179,16 +179,10 @@ int lis2dh12_zephyr_init(struct lis2dh12_zephyr_dev *dev)
     g_lis2dh12_dev = dev;
     dev->initialized = true;
 
-    /* Initialize LIS2DH12 context */
-    dev->ctx.handle = dev;
-    dev->ctx.write_reg = (stmdev_write_ptr)lis2dh12_platform_write;
-    dev->ctx.read_reg = (stmdev_read_ptr)lis2dh12_platform_read;
-    dev->ctx.mdelay = NULL; // Not needed for SPI
-
     /* Read device ID to verify communication */
     uint8_t device_id;
     LOG_INF("LIS2DH: Attempting to read device ID...");
-    ret = lis2dh12_device_id_get(&dev->ctx, &device_id);
+    ret = lis2dh12_platform_read(NULL, 0x0F, &device_id, 1); // WHO_AM_I register
     if (ret < 0)
     {
         LOG_ERR("Failed to read device ID: %d", ret);
@@ -205,33 +199,45 @@ int lis2dh12_zephyr_init(struct lis2dh12_zephyr_dev *dev)
 
     LOG_INF("LIS2DH12 device ID: 0x%02X", device_id);
 
-    /* Configure basic settings */
-    ret = lis2dh12_operating_mode_set(&dev->ctx, LIS2DH12_HR_12bit);
+    /* Configure basic settings using direct register writes */
+
+    /* Set data rate to 10Hz and enable XYZ axes (CTRL_REG1 = 0x20) */
+    /* ODR = 10Hz (0x2), XYZ enabled (0x07) */
+    uint8_t ctrl_reg1 = 0x27;                                 // 0b00100111: ODR=10Hz, XYZ enabled
+    ret = lis2dh12_platform_write(NULL, 0x20, &ctrl_reg1, 1); // CTRL_REG1
     if (ret < 0)
     {
-        LOG_ERR("Failed to set power mode: %d", ret);
+        LOG_ERR("Failed to set CTRL_REG1: %d", ret);
         return ret;
     }
+    LOG_INF("LIS2DH: CTRL_REG1 set to 0x%02X (ODR=10Hz, XYZ enabled)", ctrl_reg1);
 
-    ret = lis2dh12_data_rate_set(&dev->ctx, LIS2DH12_ODR_10Hz);
+    /* Set scale to 2g and high resolution mode (CTRL_REG4 = 0x23) */
+    /* 2g scale (0x00), high resolution mode (0x08), BDU enabled (0x80) */
+    uint8_t ctrl_reg4 = 0x88;                                 // 0b10001000: BDU=1, HR=1, FS=00 (2g)
+    ret = lis2dh12_platform_write(NULL, 0x23, &ctrl_reg4, 1); // CTRL_REG4
     if (ret < 0)
     {
-        LOG_ERR("Failed to set data rate: %d", ret);
+        LOG_ERR("Failed to set CTRL_REG4: %d", ret);
         return ret;
     }
+    LOG_INF("LIS2DH: CTRL_REG4 set to 0x%02X (2g scale, HR mode, BDU enabled)", ctrl_reg4);
 
-    ret = lis2dh12_full_scale_set(&dev->ctx, LIS2DH12_2g);
-    if (ret < 0)
+    /* Small delay to allow accelerometer to start producing data */
+    k_sleep(K_MSEC(50));
+
+    /* Verify configuration by reading back registers */
+    uint8_t ctrl_reg1_read, ctrl_reg4_read;
+    ret = lis2dh12_platform_read(NULL, 0x20, &ctrl_reg1_read, 1);
+    if (ret == 0)
     {
-        LOG_ERR("Failed to set full scale: %d", ret);
-        return ret;
+        LOG_INF("LIS2DH: CTRL_REG1 readback: 0x%02X", ctrl_reg1_read);
     }
 
-    ret = lis2dh12_block_data_update_set(&dev->ctx, 1);
-    if (ret < 0)
+    ret = lis2dh12_platform_read(NULL, 0x23, &ctrl_reg4_read, 1);
+    if (ret == 0)
     {
-        LOG_ERR("Failed to set block data update: %d", ret);
-        return ret;
+        LOG_INF("LIS2DH: CTRL_REG4 readback: 0x%02X", ctrl_reg4_read);
     }
 
     dev->initialized = true;
@@ -240,31 +246,57 @@ int lis2dh12_zephyr_init(struct lis2dh12_zephyr_dev *dev)
     return 0;
 }
 
-int lis2dh12_zephyr_read_accel(struct lis2dh12_zephyr_dev *dev, float *x, float *y, float *z)
+int lis2dh12_read_accel(struct lis2dh12_dev *dev, float *x, float *y, float *z)
 {
     if (!dev || !dev->initialized || !x || !y || !z)
     {
+        LOG_ERR("LIS2DH read_accel: invalid parameters");
         return -EINVAL;
     }
 
-    int16_t raw_data[3];
-    int ret = lis2dh12_acceleration_raw_get(&dev->ctx, raw_data);
+    LOG_INF("LIS2DH read_accel: starting read...");
+
+    /* Check if data is ready */
+    uint8_t status_reg;
+    int ret = lis2dh12_platform_read(NULL, 0x27, &status_reg, 1); // STATUS_REG
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: STATUS_REG = 0x%02X (ZYXDA=%d)", status_reg, (status_reg & 0x08) ? 1 : 0);
+    }
+
+    /* Read raw acceleration data directly using our SPI functions */
+    uint8_t data[6];                                   // 3 axes * 2 bytes each
+    ret = lis2dh12_platform_read(NULL, 0x28, data, 6); // OUT_X_L register
     if (ret < 0)
     {
-        LOG_ERR("Failed to read acceleration: %d", ret);
+        LOG_ERR("Failed to read acceleration data: %d", ret);
         return ret;
     }
 
-    /* Convert to mg using the library function */
-    *x = lis2dh12_from_fs2_hr_to_mg(raw_data[0]);
-    *y = lis2dh12_from_fs2_hr_to_mg(raw_data[1]);
-    *z = lis2dh12_from_fs2_hr_to_mg(raw_data[2]);
+    LOG_INF("LIS2DH read_accel: raw data[0]=0x%02X, data[1]=0x%02X, data[2]=0x%02X, data[3]=0x%02X, data[4]=0x%02X, data[5]=0x%02X",
+            data[0], data[1], data[2], data[3], data[4], data[5]);
+
+    /* Convert to 16-bit values (little endian) */
+    int16_t raw_x = (int16_t)(data[1] << 8 | data[0]); // OUT_X_H << 8 | OUT_X_L
+    int16_t raw_y = (int16_t)(data[3] << 8 | data[2]); // OUT_Y_H << 8 | OUT_Y_L
+    int16_t raw_z = (int16_t)(data[5] << 8 | data[4]); // OUT_Z_H << 8 | OUT_Z_L
+
+    LOG_INF("LIS2DH read_accel: raw values: x=%d, y=%d, z=%d", raw_x, raw_y, raw_z);
+
+    /* Convert to mg (2g scale, high resolution mode) */
+    /* 2g scale in HR mode: 1 LSB = 1mg */
+    /* For 2g scale: 1 LSB = 1mg (16-bit resolution) */
+    *x = (float)raw_x;
+    *y = (float)raw_y;
+    *z = (float)raw_z;
+
+    LOG_INF("LIS2DH read_accel: final values: x=%d mg, y=%d mg, z=%d mg", (int)*x, (int)*y, (int)*z);
 
     return 0;
 }
 
-int lis2dh12_zephyr_configure_motion_detection(struct lis2dh12_zephyr_dev *dev,
-                                               uint8_t threshold, uint8_t duration)
+int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
+                                        uint8_t threshold, uint8_t duration)
 {
     if (!dev || !dev->initialized)
     {
@@ -273,62 +305,122 @@ int lis2dh12_zephyr_configure_motion_detection(struct lis2dh12_zephyr_dev *dev,
 
     int ret;
 
-    /* Configure INT1 for motion detection */
-    lis2dh12_int1_cfg_t int1_cfg = {0};
-    int1_cfg.xhie = 1; // Enable X high interrupt
-    int1_cfg.yhie = 1; // Enable Y high interrupt
-    int1_cfg.zhie = 1; // Enable Z high interrupt
-    int1_cfg.aoi = 0;  // OR combination (any axis)
+    /* Configure INT1 for motion detection - direct register writes */
 
-    ret = lis2dh12_int1_gen_conf_set(&dev->ctx, &int1_cfg);
+    /* Set INT1 configuration (0x30): enable X, Y, Z high interrupts, OR combination */
+    /* 0x2A = 0b00101010: xhie=1, yhie=1, zhie=1, aoi=0 (OR combination) */
+    uint8_t int1_cfg = 0x2A; // Enable X, Y, Z high interrupts with OR combination
+    ret = lis2dh12_platform_write(NULL, 0x30, &int1_cfg, 1);
     if (ret < 0)
     {
         LOG_ERR("Failed to configure INT1: %d", ret);
         return ret;
     }
+    LOG_INF("LIS2DH: INT1_CFG set to 0x%02X", int1_cfg);
 
-    /* Set motion threshold */
-    ret = lis2dh12_int1_gen_threshold_set(&dev->ctx, threshold);
+    /* Set motion threshold (0x32) - threshold in LSB units */
+    /* For 2g scale: 1 LSB = 1mg, so threshold=5 means 5mg */
+    ret = lis2dh12_platform_write(NULL, 0x32, &threshold, 1);
     if (ret < 0)
     {
         LOG_ERR("Failed to set motion threshold: %d", ret);
         return ret;
     }
+    LOG_INF("LIS2DH: INT1_THS set to 0x%02X (%d mg)", threshold, threshold);
 
-    /* Set motion duration */
-    ret = lis2dh12_int1_gen_duration_set(&dev->ctx, duration);
+    /* Set motion duration (0x33) - duration in samples */
+    /* duration=1 means 1 sample at ODR=10Hz = 100ms */
+    ret = lis2dh12_platform_write(NULL, 0x33, &duration, 1);
     if (ret < 0)
     {
         LOG_ERR("Failed to set motion duration: %d", ret);
         return ret;
     }
+    LOG_INF("LIS2DH: INT1_DURATION set to 0x%02X (%d samples)", duration, duration);
 
-    /* Configure INT1 pin */
-    lis2dh12_ctrl_reg3_t ctrl_reg3 = {0};
-    ctrl_reg3.i1_ia1 = 1; // Route INT1 interrupt to INT1 pin
-
-    ret = lis2dh12_pin_int1_config_set(&dev->ctx, &ctrl_reg3);
+    /* Configure INT1 pin to output interrupt (CTRL_REG3 = 0x22) */
+    /* 0x40 = 0b01000000: i1_ia1=1 (route INT1 interrupt to INT1 pin) */
+    uint8_t ctrl_reg3 = 0x40; // Route INT1 interrupt to INT1 pin
+    ret = lis2dh12_platform_write(NULL, 0x22, &ctrl_reg3, 1);
     if (ret < 0)
     {
         LOG_ERR("Failed to configure INT1 pin: %d", ret);
         return ret;
     }
+    LOG_INF("LIS2DH: CTRL_REG3 set to 0x%02X (INT1 routed to pin)", ctrl_reg3);
+
+    /* Verify motion detection configuration by reading back registers */
+    uint8_t int1_cfg_read, int1_ths_read, int1_duration_read, ctrl_reg3_read;
+
+    ret = lis2dh12_platform_read(NULL, 0x30, &int1_cfg_read, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: INT1_CFG readback: 0x%02X", int1_cfg_read);
+    }
+
+    ret = lis2dh12_platform_read(NULL, 0x32, &int1_ths_read, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: INT1_THS readback: 0x%02X", int1_ths_read);
+    }
+
+    ret = lis2dh12_platform_read(NULL, 0x33, &int1_duration_read, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: INT1_DURATION readback: 0x%02X", int1_duration_read);
+    }
+
+    ret = lis2dh12_platform_read(NULL, 0x22, &ctrl_reg3_read, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: CTRL_REG3 readback: 0x%02X", ctrl_reg3_read);
+    }
 
     LOG_INF("Motion detection configured: threshold=%d, duration=%d", threshold, duration);
+    
+    /* Clear any pending interrupts by reading INT1_SRC register */
+    uint8_t int1_src_clear;
+    ret = lis2dh12_platform_read(NULL, 0x31, &int1_src_clear, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: Cleared pending interrupt, INT1_SRC=0x%02X", int1_src_clear);
+    }
+    
     return 0;
 }
 
-int lis2dh12_zephyr_read_device_id(struct lis2dh12_zephyr_dev *dev, uint8_t *id)
+int lis2dh12_read_device_id(struct lis2dh12_dev *dev, uint8_t *id)
 {
     if (!dev || !dev->initialized || !id)
     {
         return -EINVAL;
     }
 
-    return lis2dh12_device_id_get(&dev->ctx, id);
+    return lis2dh12_platform_read(NULL, 0x0F, id, 1); // WHO_AM_I register
 }
 
-bool lis2dh12_zephyr_is_ready(struct lis2dh12_zephyr_dev *dev)
+bool lis2dh12_is_ready(struct lis2dh12_dev *dev)
 {
     return dev && dev->initialized;
+}
+
+int lis2dh12_read_int1_source(struct lis2dh12_dev *dev, uint8_t *source)
+{
+    if (!dev || !dev->initialized || !source)
+    {
+        return -EINVAL;
+    }
+
+    return lis2dh12_platform_read(NULL, 0x31, source, 1); // INT1_SRC register
+}
+
+int lis2dh12_clear_int1_interrupt(struct lis2dh12_dev *dev)
+{
+    if (!dev || !dev->initialized)
+    {
+        return -EINVAL;
+    }
+
+    uint8_t int1_src;
+    return lis2dh12_platform_read(NULL, 0x31, &int1_src, 1); // Read to clear INT1_SRC register
 }

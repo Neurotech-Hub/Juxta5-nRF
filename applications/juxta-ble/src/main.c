@@ -22,8 +22,7 @@
 #include "ble_service.h"
 #include <stdio.h>
 #include <time.h>
-#include <zephyr/drivers/sensor.h>
-#include "lis2dh12_zephyr.h"
+#include "lis2dh12.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -45,7 +44,7 @@ static bool ble_connected = false; // Track connection state
 
 // LIS2DH motion detection
 static uint8_t motion_count = 0;
-static struct lis2dh12_zephyr_dev lis2dh_dev;
+static struct lis2dh12_dev lis2dh_dev;
 
 // GPIO interrupt callback for LIS2DH motion detection
 static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -70,7 +69,7 @@ static int configure_lis2dh_motion_detection(void)
     lis2dh_dev.int_gpio.pin = DT_GPIO_PIN(DT_PATH(gpio_keys, accel_int), gpios);
     lis2dh_dev.int_gpio.dt_flags = DT_GPIO_FLAGS(DT_PATH(gpio_keys, accel_int), gpios);
 
-    int ret = lis2dh12_zephyr_init(&lis2dh_dev);
+    int ret = lis2dh12_init(&lis2dh_dev);
     if (ret < 0)
     {
         LOG_ERR("Failed to initialize LIS2DH: %d", ret);
@@ -78,7 +77,7 @@ static int configure_lis2dh_motion_detection(void)
     }
 
     // Configure motion detection with low threshold (0.05g = ~5 in LIS2DH units)
-    ret = lis2dh12_zephyr_configure_motion_detection(&lis2dh_dev, 5, 1);
+    ret = lis2dh12_configure_motion_detection(&lis2dh_dev, 5, 1);
     if (ret < 0)
     {
         LOG_ERR("Failed to configure LIS2DH motion detection: %d", ret);
@@ -120,21 +119,35 @@ static int configure_lis2dh_motion_detection(void)
 
 static void check_lis2dh(void)
 {
-    if (!lis2dh12_zephyr_is_ready(&lis2dh_dev))
+    LOG_INF("check_lis2dh: starting...");
+
+    if (!lis2dh12_is_ready(&lis2dh_dev))
     {
         LOG_ERR("❌ LIS2DH device not ready");
         return;
     }
 
+    LOG_INF("check_lis2dh: device is ready, calling read_accel...");
+
     float x, y, z;
-    int rc = lis2dh12_zephyr_read_accel(&lis2dh_dev, &x, &y, &z);
+    int rc = lis2dh12_read_accel(&lis2dh_dev, &x, &y, &z);
+    LOG_INF("check_lis2dh: read_accel returned %d", rc);
+
     if (rc == 0)
     {
-        LOG_INF("✅ LIS2DH: X=%.3f mg, Y=%.3f mg, Z=%.3f mg", (double)x, (double)y, (double)z);
+        LOG_INF("✅ LIS2DH: X=%d mg, Y=%d mg, Z=%d mg", (int)x, (int)y, (int)z);
     }
     else
     {
         LOG_ERR("❌ LIS2DH read failed: %d", rc);
+    }
+
+    // Check INT1 source register to see if interrupts are being generated
+    uint8_t int1_source;
+    rc = lis2dh12_read_int1_source(&lis2dh_dev, &int1_source);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: INT1_SRC = 0x%02X (IA=%d)", int1_source, (int1_source & 0x40) ? 1 : 0);
     }
 }
 
@@ -1158,6 +1171,19 @@ int main(void)
         heartbeat_counter++;
         LOG_INF("💓 System heartbeat: %u (uptime: %u seconds)",
                 heartbeat_counter, heartbeat_counter * 10);
+
+        // Check LIS2DH interrupt status periodically
+        if (lis2dh12_is_ready(&lis2dh_dev))
+        {
+            uint8_t int1_source;
+            int rc = lis2dh12_read_int1_source(&lis2dh_dev, &int1_source);
+            if (rc == 0 && (int1_source & 0x40)) // Check if IA bit is set
+            {
+                LOG_INF("🔔 LIS2DH interrupt detected! INT1_SRC=0x%02X, motion_count=%d", int1_source, motion_count);
+                // Clear the interrupt so we can detect new ones
+                lis2dh12_clear_int1_interrupt(&lis2dh_dev);
+            }
+        }
     }
 
     return 0;
