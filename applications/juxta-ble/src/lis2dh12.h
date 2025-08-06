@@ -34,5 +34,12 @@ int lis2dh12_read_device_id(struct lis2dh12_dev *dev, uint8_t *id);
 bool lis2dh12_is_ready(struct lis2dh12_dev *dev);
 int lis2dh12_read_int1_source(struct lis2dh12_dev *dev, uint8_t *source);
 int lis2dh12_clear_int1_interrupt(struct lis2dh12_dev *dev);
+int lis2dh12_reset_motion_detection(struct lis2dh12_dev *dev);
+int lis2dh12_test_interrupt_clearing(struct lis2dh12_dev *dev);
+int lis2dh12_analyze_interrupt_trigger(struct lis2dh12_dev *dev);
+
+/* Platform functions for direct register access */
+int32_t lis2dh12_platform_read(void *handle, uint8_t reg, uint8_t *data, uint16_t len);
+int32_t lis2dh12_platform_write(void *handle, uint8_t reg, const uint8_t *data, uint16_t len);
 
 #endif /* LIS2DH12_H */

@@ -8,6 +8,7 @@
 #include "lis2dh12.h"
 #include <zephyr/sys/util.h>
 #include <string.h>
+#include <stdlib.h>
 
 LOG_MODULE_REGISTER(lis2dh12, LOG_LEVEL_INF);
 
@@ -305,79 +306,139 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
 
     int ret;
 
-    /* Configure INT1 for motion detection - direct register writes */
+    /* Configure motion detection using high-pass filter - following ST AN5005 section 6.3.3 */
+    LOG_INF("LIS2DH: Configuring high-pass filtered motion detection...");
 
-    /* Set INT1 configuration (0x30): enable X, Y, Z high interrupts, OR combination */
-    /* 0x2A = 0b00101010: xhie=1, yhie=1, zhie=1, aoi=0 (OR combination) */
-    uint8_t int1_cfg = 0x2A; // Enable X, Y, Z high interrupts with OR combination
-    ret = lis2dh12_platform_write(NULL, 0x30, &int1_cfg, 1);
+    /* Step 1: Write 57h into CTRL_REG1 - Turn on sensor, enable X, Y, Z, ODR = 100 Hz */
+    uint8_t ctrl_reg1 = 0x57; // 0b01010111: ODR=100Hz, XYZ enabled
+    ret = lis2dh12_platform_write(NULL, 0x20, &ctrl_reg1, 1);
     if (ret < 0)
     {
-        LOG_ERR("Failed to configure INT1: %d", ret);
+        LOG_ERR("Failed to configure CTRL_REG1: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: INT1_CFG set to 0x%02X", int1_cfg);
+    LOG_INF("LIS2DH: CTRL_REG1 set to 0x%02X (ODR=100Hz, XYZ enabled)", ctrl_reg1);
 
-    /* Set motion threshold (0x32) - threshold in LSB units */
-    /* For 2g scale: 1 LSB = 1mg, so threshold=5 means 5mg */
+    /* Step 2: Write 09h into CTRL_REG2 - High-pass filter enabled on interrupt activity 1 */
+    uint8_t ctrl_reg2 = 0x09; // 0b00001001: HP filter enabled on INT1
+    ret = lis2dh12_platform_write(NULL, 0x21, &ctrl_reg2, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure CTRL_REG2: %d", ret);
+        return ret;
+    }
+    LOG_INF("LIS2DH: CTRL_REG2 set to 0x%02X (HP filter on INT1)", ctrl_reg2);
+
+    /* Step 3: Write 40h into CTRL_REG3 - Interrupt activity 1 driven to INT1 pin */
+    uint8_t ctrl_reg3 = 0x40; // 0b01000000: INT1 activity routed to INT1 pin
+    ret = lis2dh12_platform_write(NULL, 0x22, &ctrl_reg3, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure CTRL_REG3: %d", ret);
+        return ret;
+    }
+    LOG_INF("LIS2DH: CTRL_REG3 set to 0x%02X (INT1 activity to pin)", ctrl_reg3);
+
+    /* Step 4: Write 00h into CTRL_REG4 - FS = ±2 g */
+    uint8_t ctrl_reg4 = 0x00; // 0b00000000: ±2g scale
+    ret = lis2dh12_platform_write(NULL, 0x23, &ctrl_reg4, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure CTRL_REG4: %d", ret);
+        return ret;
+    }
+    LOG_INF("LIS2DH: CTRL_REG4 set to 0x%02X (±2g scale)", ctrl_reg4);
+
+    /* Step 5: Write 08h into CTRL_REG5 - Interrupt 1 pin latched */
+    uint8_t ctrl_reg5 = 0x08; // 0b00001000: INT1 latched
+    ret = lis2dh12_platform_write(NULL, 0x24, &ctrl_reg5, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure CTRL_REG5: %d", ret);
+        return ret;
+    }
+    LOG_INF("LIS2DH: CTRL_REG5 set to 0x%02X (INT1 latched)", ctrl_reg5);
+
+    /* Step 6: Write threshold into INT1_THS - Threshold in mg */
     ret = lis2dh12_platform_write(NULL, 0x32, &threshold, 1);
     if (ret < 0)
     {
-        LOG_ERR("Failed to set motion threshold: %d", ret);
+        LOG_ERR("Failed to set INT1 threshold: %d", ret);
         return ret;
     }
     LOG_INF("LIS2DH: INT1_THS set to 0x%02X (%d mg)", threshold, threshold);
 
-    /* Set motion duration (0x33) - duration in samples */
-    /* duration=1 means 1 sample at ODR=10Hz = 100ms */
+    /* Step 7: Write duration into INT1_DURATION - Duration in samples */
     ret = lis2dh12_platform_write(NULL, 0x33, &duration, 1);
     if (ret < 0)
     {
-        LOG_ERR("Failed to set motion duration: %d", ret);
+        LOG_ERR("Failed to set INT1 duration: %d", ret);
         return ret;
     }
     LOG_INF("LIS2DH: INT1_DURATION set to 0x%02X (%d samples)", duration, duration);
 
-    /* Configure INT1 pin to output interrupt (CTRL_REG3 = 0x22) */
-    /* 0x40 = 0b01000000: i1_ia1=1 (route INT1 interrupt to INT1 pin) */
-    uint8_t ctrl_reg3 = 0x40; // Route INT1 interrupt to INT1 pin
-    ret = lis2dh12_platform_write(NULL, 0x22, &ctrl_reg3, 1);
-    if (ret < 0)
+    /* Step 8: Read REFERENCE - Dummy read to force HP filter to current acceleration value */
+    uint8_t reference;
+    ret = lis2dh12_platform_read(NULL, 0x26, &reference, 1);
+    if (ret == 0)
     {
-        LOG_ERR("Failed to configure INT1 pin: %d", ret);
+        LOG_INF("LIS2DH: REFERENCE read: 0x%02X (HP filter reference set)", reference);
+    }
+    else
+    {
+        LOG_ERR("Failed to read REFERENCE: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG3 set to 0x%02X (INT1 routed to pin)", ctrl_reg3);
 
-    /* Verify motion detection configuration by reading back registers */
-    uint8_t int1_cfg_read, int1_ths_read, int1_duration_read, ctrl_reg3_read;
-
-    ret = lis2dh12_platform_read(NULL, 0x30, &int1_cfg_read, 1);
-    if (ret == 0)
+    /* Step 9: Write 2Ah into INT1_CFG - Configure desired wake-up event */
+    uint8_t int1_cfg = 0x2A; // 0b00101010: X, Y, Z high interrupts, OR combination
+    ret = lis2dh12_platform_write(NULL, 0x30, &int1_cfg, 1);
+    if (ret < 0)
     {
-        LOG_INF("LIS2DH: INT1_CFG readback: 0x%02X", int1_cfg_read);
+        LOG_ERR("Failed to configure INT1_CFG: %d", ret);
+        return ret;
     }
+    LOG_INF("LIS2DH: INT1_CFG set to 0x%02X (XYZ high interrupts, OR)", int1_cfg);
 
-    ret = lis2dh12_platform_read(NULL, 0x32, &int1_ths_read, 1);
-    if (ret == 0)
-    {
-        LOG_INF("LIS2DH: INT1_THS readback: 0x%02X", int1_ths_read);
-    }
+    /* Verify configuration by reading back registers */
+    uint8_t ctrl_reg1_read, ctrl_reg2_read, ctrl_reg3_read, ctrl_reg4_read, ctrl_reg5_read;
+    uint8_t int1_cfg_read, int1_ths_read, int1_duration_read;
 
-    ret = lis2dh12_platform_read(NULL, 0x33, &int1_duration_read, 1);
+    ret = lis2dh12_platform_read(NULL, 0x20, &ctrl_reg1_read, 1);
     if (ret == 0)
-    {
-        LOG_INF("LIS2DH: INT1_DURATION readback: 0x%02X", int1_duration_read);
-    }
+        LOG_INF("LIS2DH: CTRL_REG1 readback: 0x%02X", ctrl_reg1_read);
+
+    ret = lis2dh12_platform_read(NULL, 0x21, &ctrl_reg2_read, 1);
+    if (ret == 0)
+        LOG_INF("LIS2DH: CTRL_REG2 readback: 0x%02X", ctrl_reg2_read);
 
     ret = lis2dh12_platform_read(NULL, 0x22, &ctrl_reg3_read, 1);
     if (ret == 0)
-    {
         LOG_INF("LIS2DH: CTRL_REG3 readback: 0x%02X", ctrl_reg3_read);
-    }
 
-    LOG_INF("Motion detection configured: threshold=%d, duration=%d", threshold, duration);
-    
+    ret = lis2dh12_platform_read(NULL, 0x23, &ctrl_reg4_read, 1);
+    if (ret == 0)
+        LOG_INF("LIS2DH: CTRL_REG4 readback: 0x%02X", ctrl_reg4_read);
+
+    ret = lis2dh12_platform_read(NULL, 0x24, &ctrl_reg5_read, 1);
+    if (ret == 0)
+        LOG_INF("LIS2DH: CTRL_REG5 readback: 0x%02X", ctrl_reg5_read);
+
+    ret = lis2dh12_platform_read(NULL, 0x30, &int1_cfg_read, 1);
+    if (ret == 0)
+        LOG_INF("LIS2DH: INT1_CFG readback: 0x%02X", int1_cfg_read);
+
+    ret = lis2dh12_platform_read(NULL, 0x32, &int1_ths_read, 1);
+    if (ret == 0)
+        LOG_INF("LIS2DH: INT1_THS readback: 0x%02X", int1_ths_read);
+
+    ret = lis2dh12_platform_read(NULL, 0x33, &int1_duration_read, 1);
+    if (ret == 0)
+        LOG_INF("LIS2DH: INT1_DURATION readback: 0x%02X", int1_duration_read);
+
+    LOG_INF("LIS2DH: High-pass filtered motion detection configured: threshold=%d mg, duration=%d samples",
+            threshold, duration);
+
     /* Clear any pending interrupts by reading INT1_SRC register */
     uint8_t int1_src_clear;
     ret = lis2dh12_platform_read(NULL, 0x31, &int1_src_clear, 1);
@@ -385,7 +446,7 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
     {
         LOG_INF("LIS2DH: Cleared pending interrupt, INT1_SRC=0x%02X", int1_src_clear);
     }
-    
+
     return 0;
 }
 
@@ -422,5 +483,207 @@ int lis2dh12_clear_int1_interrupt(struct lis2dh12_dev *dev)
     }
 
     uint8_t int1_src;
-    return lis2dh12_platform_read(NULL, 0x31, &int1_src, 1); // Read to clear INT1_SRC register
+    int ret;
+
+    // Read INT1_SRC register to clear the interrupt (per ST datasheet)
+    ret = lis2dh12_platform_read(NULL, 0x31, &int1_src, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: Cleared INT1 interrupt, INT1_SRC=0x%02X (IA=%d)", int1_src, (int1_src & 0x40) ? 1 : 0);
+    }
+
+    return ret;
+}
+
+int lis2dh12_reset_motion_detection(struct lis2dh12_dev *dev)
+{
+    if (!dev || !dev->initialized)
+    {
+        return -EINVAL;
+    }
+
+    LOG_INF("LIS2DH: Resetting motion detection...");
+    int ret;
+
+    /* Step 1: Disable INT1 interrupt generation temporarily */
+    uint8_t int1_cfg_disable = 0x00; // Disable all interrupts
+    ret = lis2dh12_platform_write(NULL, 0x30, &int1_cfg_disable, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to disable INT1: %d", ret);
+        return ret;
+    }
+    LOG_INF("LIS2DH: INT1 interrupts disabled");
+
+    /* Step 2: Clear any pending interrupts */
+    uint8_t int1_src;
+    ret = lis2dh12_platform_read(NULL, 0x31, &int1_src, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: Cleared pending interrupt, INT1_SRC=0x%02X", int1_src);
+    }
+
+    /* Step 3: Wait a moment for the interrupt condition to settle */
+    k_sleep(K_MSEC(100));
+    LOG_INF("LIS2DH: Waited 100ms for interrupt condition to settle");
+
+    /* Step 4: Re-enable INT1 with proper configuration */
+    uint8_t int1_cfg_enable = 0x2A; // Enable X, Y, Z high interrupts with OR combination (HP filtered)
+    ret = lis2dh12_platform_write(NULL, 0x30, &int1_cfg_enable, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to re-enable INT1: %d", ret);
+        return ret;
+    }
+    LOG_INF("LIS2DH: INT1 interrupts re-enabled");
+
+    /* Step 5: Verify the interrupt is not immediately active */
+    k_sleep(K_MSEC(50));
+    ret = lis2dh12_platform_read(NULL, 0x31, &int1_src, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: INT1_SRC after reset: 0x%02X (IA=%d)", int1_src, (int1_src & 0x40) ? 1 : 0);
+        if (int1_src & 0x40)
+        {
+            LOG_WRN("LIS2DH: ⚠️ Interrupt still active after reset - threshold may be too low");
+        }
+        else
+        {
+            LOG_INF("LIS2DH: ✅ Motion detection reset successful - no active interrupt");
+        }
+    }
+
+    LOG_INF("LIS2DH: Motion detection reset completed");
+    return 0;
+}
+
+int lis2dh12_test_interrupt_clearing(struct lis2dh12_dev *dev)
+{
+    if (!dev || !dev->initialized)
+    {
+        return -EINVAL;
+    }
+
+    LOG_INF("LIS2DH: Testing interrupt clearing functionality...");
+
+    uint8_t int1_src;
+    int ret;
+
+    // Read current interrupt status
+    ret = lis2dh12_platform_read(NULL, 0x31, &int1_src, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: Current INT1_SRC: 0x%02X (IA=%d)", int1_src, (int1_src & 0x40) ? 1 : 0);
+    }
+
+    // Test clearing the interrupt
+    LOG_INF("LIS2DH: Testing interrupt clear...");
+    ret = lis2dh12_clear_int1_interrupt(dev);
+
+    // Read again to verify clear (after a delay to let HP filter settle)
+    k_sleep(K_MSEC(50));
+    ret = lis2dh12_platform_read(NULL, 0x31, &int1_src, 1);
+    if (ret == 0)
+    {
+        LOG_INF("LIS2DH: INT1_SRC after clear test: 0x%02X (IA=%d)", int1_src, (int1_src & 0x40) ? 1 : 0);
+
+        if (int1_src & 0x40)
+        {
+            LOG_WRN("LIS2DH: ⚠️ Interrupt still active - condition still met");
+            return -1;
+        }
+        else
+        {
+            LOG_INF("LIS2DH: ✅ Interrupt clear test successful");
+            return 0;
+        }
+    }
+
+    return ret;
+}
+
+int lis2dh12_analyze_interrupt_trigger(struct lis2dh12_dev *dev)
+{
+    if (!dev || !dev->initialized)
+    {
+        return -EINVAL;
+    }
+
+    LOG_INF("LIS2DH: Analyzing interrupt trigger...");
+
+    // Read current acceleration values
+    float x, y, z;
+    int ret = lis2dh12_read_accel(dev, &x, &y, &z);
+    if (ret != 0)
+    {
+        LOG_ERR("Failed to read acceleration: %d", ret);
+        return ret;
+    }
+
+    // Read current threshold
+    uint8_t threshold;
+    ret = lis2dh12_platform_read(NULL, 0x32, &threshold, 1);
+    if (ret != 0)
+    {
+        LOG_ERR("Failed to read threshold: %d", ret);
+        return ret;
+    }
+
+    // Read INT1_CFG to see which axes are enabled
+    uint8_t int1_cfg;
+    ret = lis2dh12_platform_read(NULL, 0x30, &int1_cfg, 1);
+    if (ret != 0)
+    {
+        LOG_ERR("Failed to read INT1_CFG: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("LIS2DH: Current acceleration: X=%d mg, Y=%d mg, Z=%d mg", (int)x, (int)y, (int)z);
+    LOG_INF("LIS2DH: Threshold: %d mg", threshold);
+    LOG_INF("LIS2DH: INT1_CFG: 0x%02X", int1_cfg);
+
+    // Check which axes are enabled for high interrupt
+    bool xhie = (int1_cfg & 0x01) != 0;
+    bool yhie = (int1_cfg & 0x02) != 0;
+    bool zhie = (int1_cfg & 0x04) != 0;
+    bool aoi = (int1_cfg & 0x40) != 0;
+
+    LOG_INF("LIS2DH: X high interrupt enabled: %s", xhie ? "YES" : "NO");
+    LOG_INF("LIS2DH: Y high interrupt enabled: %s", yhie ? "YES" : "NO");
+    LOG_INF("LIS2DH: Z high interrupt enabled: %s", zhie ? "YES" : "NO");
+    LOG_INF("LIS2DH: AOI (AND/OR): %s", aoi ? "AND" : "OR");
+
+    // For HP filtered motion detection, we check if any axis exceeds threshold
+    // The HP filter removes DC component, so we look at absolute values
+    bool x_high = (abs((int)x) > threshold);
+    bool y_high = (abs((int)y) > threshold);
+    bool z_high = (abs((int)z) > threshold);
+
+    LOG_INF("LIS2DH: |X| exceeds threshold (%d > %d): %s", abs((int)x), threshold, x_high ? "YES" : "NO");
+    LOG_INF("LIS2DH: |Y| exceeds threshold (%d > %d): %s", abs((int)y), threshold, y_high ? "YES" : "NO");
+    LOG_INF("LIS2DH: |Z| exceeds threshold (%d > %d): %s", abs((int)z), threshold, z_high ? "YES" : "NO");
+
+    // Determine if interrupt should be triggered
+    bool should_trigger = false;
+    if (aoi) // AND combination
+    {
+        should_trigger = (xhie && x_high) && (yhie && y_high) && (zhie && z_high);
+    }
+    else // OR combination
+    {
+        should_trigger = (xhie && x_high) || (yhie && y_high) || (zhie && z_high);
+    }
+
+    LOG_INF("LIS2DH: Interrupt should be triggered: %s", should_trigger ? "YES" : "NO");
+
+    if (should_trigger)
+    {
+        LOG_WRN("LIS2DH: ⚠️ Current HP filtered acceleration exceeds threshold - interrupt is expected");
+        return 1; // Interrupt is expected
+    }
+    else
+    {
+        LOG_INF("LIS2DH: ✅ Current HP filtered acceleration is below threshold");
+        return 0; // Interrupt is not expected
+    }
 }

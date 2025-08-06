@@ -44,13 +44,15 @@ static bool ble_connected = false; // Track connection state
 
 // LIS2DH motion detection
 static uint8_t motion_count = 0;
+static volatile bool lis2dh_interrupt_pending = false;
 static struct lis2dh12_dev lis2dh_dev;
 
 // GPIO interrupt callback for LIS2DH motion detection
 static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
     motion_count++;
-    printk("🏃 Motion detected! Count: %d\n", motion_count);
+    lis2dh_interrupt_pending = true;
+    printk("🏃 Motion detected via GPIO! Count: %d\n", motion_count);
 }
 
 static struct gpio_callback lis2dh_int_cb;
@@ -76,8 +78,8 @@ static int configure_lis2dh_motion_detection(void)
         return ret;
     }
 
-    // Configure motion detection with low threshold (0.05g = ~5 in LIS2DH units)
-    ret = lis2dh12_configure_motion_detection(&lis2dh_dev, 5, 1);
+    // Configure motion detection with high-pass filter for mouse collar sensitivity (0.01g = ~10 in LIS2DH units)
+    ret = lis2dh12_configure_motion_detection(&lis2dh_dev, 10, 0);
     if (ret < 0)
     {
         LOG_ERR("Failed to configure LIS2DH motion detection: %d", ret);
@@ -113,7 +115,12 @@ static int configure_lis2dh_motion_detection(void)
         return ret;
     }
 
-    LOG_INF("✅ LIS2DH motion detection configured (ODR=10Hz, scale=2g, threshold=0.05g, duration=1)");
+    LOG_INF("✅ LIS2DH motion detection configured (ODR=100Hz, HP filtered, threshold=0.01g, duration=0)");
+
+    // Test GPIO interrupt setup
+    int gpio_state = gpio_pin_get(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin);
+    LOG_INF("LIS2DH INT GPIO initial state: %d", gpio_state);
+
     return 0;
 }
 
@@ -148,6 +155,60 @@ static void check_lis2dh(void)
     if (rc == 0)
     {
         LOG_INF("LIS2DH: INT1_SRC = 0x%02X (IA=%d)", int1_source, (int1_source & 0x40) ? 1 : 0);
+    }
+
+    // Test motion detection configuration
+    LOG_INF("🔧 Testing motion detection configuration...");
+
+    // Read back configuration registers to verify setup
+    uint8_t int1_cfg, int1_ths, int1_duration, ctrl_reg3, ctrl_reg5, ctrl_reg2, ctrl_reg1;
+
+    rc = lis2dh12_platform_read(NULL, 0x30, &int1_cfg, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: INT1_CFG = 0x%02X (expected 0x2A)", int1_cfg);
+    }
+
+    rc = lis2dh12_platform_read(NULL, 0x20, &ctrl_reg1, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: CTRL_REG1 = 0x%02X (expected 0x57)", ctrl_reg1);
+    }
+
+    rc = lis2dh12_platform_read(NULL, 0x21, &ctrl_reg2, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: CTRL_REG2 = 0x%02X (expected 0x09)", ctrl_reg2);
+    }
+
+    rc = lis2dh12_platform_read(NULL, 0x32, &int1_ths, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: INT1_THS = 0x%02X (%d mg)", int1_ths, int1_ths);
+    }
+
+    rc = lis2dh12_platform_read(NULL, 0x33, &int1_duration, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: INT1_DURATION = 0x%02X (%d samples)", int1_duration, int1_duration);
+    }
+
+    rc = lis2dh12_platform_read(NULL, 0x22, &ctrl_reg3, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: CTRL_REG3 = 0x%02X (expected 0x40)", ctrl_reg3);
+    }
+
+    rc = lis2dh12_platform_read(NULL, 0x24, &ctrl_reg5, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: CTRL_REG5 = 0x%02X (expected 0x08)", ctrl_reg5);
+    }
+
+    rc = lis2dh12_platform_read(NULL, 0x21, &ctrl_reg2, 1);
+    if (rc == 0)
+    {
+        LOG_INF("LIS2DH: CTRL_REG2 = 0x%02X (expected 0x10)", ctrl_reg2);
     }
 }
 
@@ -219,12 +280,12 @@ static void juxta_scan_table_reset(void)
 
 static void juxta_scan_table_print_and_clear(void)
 {
-    LOG_INF("==== JUXTA SCAN TABLE (simulated write) ====");
+    LOG_INF("\n=== JUXTA SCAN TABLE ===");
     for (uint8_t i = 0; i < juxta_scan_count && i < MAX_JUXTA_DEVICES; i++)
     {
-        LOG_INF("  MAC: %06X, RSSI: %d", juxta_scan_table[i].mac_id, juxta_scan_table[i].rssi);
+        LOG_INF("MAC: %06X, RSSI: %d", juxta_scan_table[i].mac_id, juxta_scan_table[i].rssi);
     }
-    LOG_INF("==== END OF TABLE ====");
+    LOG_INF("=== END SCAN TABLE ===\n");
     juxta_scan_count = 0;
     memset(juxta_scan_table, 0, sizeof(juxta_scan_table));
 }
@@ -556,12 +617,12 @@ static void state_work_handler(struct k_work *work)
         // Report and clear motion count
         if (motion_count > 0)
         {
-            LOG_INF("🏃 Motion events in last minute: %d", motion_count);
+            LOG_INF("Motion events in last minute: %d", motion_count);
             motion_count = 0;
         }
 
         last_logged_minute = current_minute;
-        LOG_INF("🕐 Minute of day changed to: %u", current_minute);
+        LOG_INF("Minute of day: %u", current_minute);
     }
 
     // Pause state machine if connected
@@ -576,19 +637,18 @@ static void state_work_handler(struct k_work *work)
     {
         state_event = EVENT_NONE;
 
-        LOG_INF("State work handler: current_time=%u, ble_state=%d, doGatewayAdvertise=%s",
+        LOG_DBG("State work handler: current_time=%u, ble_state=%d, doGatewayAdvertise=%s",
                 current_time, ble_state, doGatewayAdvertise ? "true" : "false");
 
         // Handle gateway advertising state
         if (ble_state == BLE_STATE_GATEWAY_ADVERTISING)
         {
-            LOG_INF("Ending gateway advertising burst...");
             int err = juxta_stop_advertising();
             if (err == 0)
             {
                 ble_state = BLE_STATE_WAITING;
                 last_adv_timestamp = current_time;
-                LOG_INF("🔔 Gateway advertising burst completed at timestamp %u", last_adv_timestamp);
+                LOG_INF("Gateway advertising burst completed at timestamp %u", last_adv_timestamp);
                 k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
             }
             else
@@ -600,13 +660,12 @@ static void state_work_handler(struct k_work *work)
 
         if (ble_state == BLE_STATE_SCANNING)
         {
-            LOG_INF("Ending scan burst...");
             int err = juxta_stop_scanning();
             if (err == 0)
             {
                 ble_state = BLE_STATE_WAITING;
                 last_scan_timestamp = current_time;
-                LOG_INF("🔍 Scan burst completed at timestamp %u", last_scan_timestamp);
+                LOG_INF("Scan burst completed at timestamp %u", last_scan_timestamp);
                 k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
             }
             else
@@ -617,13 +676,12 @@ static void state_work_handler(struct k_work *work)
         }
         if (ble_state == BLE_STATE_ADVERTISING)
         {
-            LOG_INF("Ending advertising burst...");
             int err = juxta_stop_advertising();
             if (err == 0)
             {
                 ble_state = BLE_STATE_WAITING;
                 last_adv_timestamp = current_time;
-                LOG_INF("📡 Advertising burst completed at timestamp %u", last_adv_timestamp);
+                LOG_INF("Advertising burst completed at timestamp %u", last_adv_timestamp);
                 k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
             }
             else
@@ -636,18 +694,17 @@ static void state_work_handler(struct k_work *work)
         bool scan_due = is_time_to_scan();
         bool adv_due = is_time_to_advertise();
 
-        LOG_INF("Checking for new bursts: scan_due=%d, adv_due=%d, doGatewayAdvertise=%s",
+        LOG_DBG("Checking for new bursts: scan_due=%d, adv_due=%d, doGatewayAdvertise=%s",
                 scan_due, adv_due, doGatewayAdvertise ? "true" : "false");
 
         if (scan_due && ble_state == BLE_STATE_IDLE)
         {
-            LOG_INF("Starting scan burst...");
             juxta_scan_table_reset();
             ble_state = BLE_STATE_SCANNING;
             int err = juxta_start_scanning();
             if (err == 0)
             {
-                LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
+                LOG_INF("Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
                 k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
             }
             else
@@ -662,12 +719,11 @@ static void state_work_handler(struct k_work *work)
         // Check for gateway advertising first (higher priority)
         if (adv_due && ble_state == BLE_STATE_IDLE && doGatewayAdvertise)
         {
-            LOG_INF("Starting gateway advertising burst (30s connectable)...");
             ble_state = BLE_STATE_GATEWAY_ADVERTISING;
             int err = juxta_start_connectable_advertising();
             if (err == 0)
             {
-                LOG_INF("🔔 Starting gateway advertising burst (30s connectable)");
+                LOG_INF("Starting gateway advertising burst (30s connectable)");
                 k_timer_start(&state_timer, K_SECONDS(30), K_NO_WAIT); // Changed from 10s to 30s
             }
             else
@@ -681,12 +737,11 @@ static void state_work_handler(struct k_work *work)
 
         if (adv_due && ble_state == BLE_STATE_IDLE)
         {
-            LOG_INF("Starting advertising burst...");
             ble_state = BLE_STATE_ADVERTISING;
             int err = juxta_start_advertising();
             if (err == 0)
             {
-                LOG_INF("📡 Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
+                LOG_INF("Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
                 k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS), K_NO_WAIT);
             }
             else
@@ -699,7 +754,7 @@ static void state_work_handler(struct k_work *work)
         }
         if (ble_state == BLE_STATE_WAITING)
         {
-            LOG_INF("Transitioning from WAITING to IDLE");
+            LOG_DBG("Transitioning from WAITING to IDLE");
             ble_state = BLE_STATE_IDLE;
         }
 
@@ -718,12 +773,12 @@ static void state_work_handler(struct k_work *work)
         uint32_t next_delay_ms = MIN(time_until_adv, time_until_scan) * 1000;
         /* Add minimum delay to prevent rapid start/stop cycles */
         next_delay_ms = MAX(next_delay_ms, 100);
-        LOG_INF("Sleeping for %u ms until next action", next_delay_ms);
+        LOG_DBG("Sleeping for %u ms until next action", next_delay_ms);
         k_timer_start(&state_timer, K_MSEC(next_delay_ms), K_NO_WAIT);
 
         uint32_t ts = juxta_vitals_get_timestamp(&vitals_ctx);
         uint32_t uptime = k_uptime_get_32();
-        LOG_INF("Timestamp: %u, Uptime(ms): %u", ts, uptime);
+        LOG_DBG("Timestamp: %u, Uptime(ms): %u", ts, uptime);
     }
 }
 
@@ -1158,6 +1213,22 @@ int main(void)
     {
         // Only check LIS2DH if initialization was successful
         check_lis2dh();
+
+        // Test interrupt clearing functionality
+        LOG_INF("🧪 Testing interrupt clearing...");
+        int clear_test_result = lis2dh12_test_interrupt_clearing(&lis2dh_dev);
+        if (clear_test_result == 0)
+        {
+            LOG_INF("✅ Interrupt clearing test passed");
+        }
+        else
+        {
+            LOG_WRN("⚠️ Interrupt clearing test failed - may need threshold adjustment");
+        }
+
+        // Note: HP filtered motion detection analyzes high-frequency components only
+        // Raw acceleration values (including DC/gravity) are not relevant for interrupt triggering
+        LOG_INF("HP filtered motion detection configured - interrupts trigger on high-frequency motion only");
     }
 
     LOG_INF("✅ Hardware verification complete");
@@ -1169,19 +1240,39 @@ int main(void)
     {
         k_sleep(K_SECONDS(10));
         heartbeat_counter++;
-        LOG_INF("💓 System heartbeat: %u (uptime: %u seconds)",
+        LOG_INF("System heartbeat: %u (uptime: %u seconds)",
                 heartbeat_counter, heartbeat_counter * 10);
 
-        // Check LIS2DH interrupt status periodically
-        if (lis2dh12_is_ready(&lis2dh_dev))
+        // Handle LIS2DH interrupt in non-ISR context
+        if (lis2dh_interrupt_pending)
+        {
+            lis2dh_interrupt_pending = false;
+
+            // Clear the interrupt so we can detect new ones
+            lis2dh12_clear_int1_interrupt(&lis2dh_dev);
+
+            LOG_INF("🏃 Motion interrupt cleared and processed (total count: %d)", motion_count);
+        }
+
+        // Check LIS2DH interrupt status periodically (backup method)
+        static uint32_t last_interrupt_time = 0;
+        uint32_t current_time = k_uptime_get();
+
+        if (lis2dh12_is_ready(&lis2dh_dev) && (current_time - last_interrupt_time) > 1000) // Only check every 1 second
         {
             uint8_t int1_source;
             int rc = lis2dh12_read_int1_source(&lis2dh_dev, &int1_source);
             if (rc == 0 && (int1_source & 0x40)) // Check if IA bit is set
             {
-                LOG_INF("🔔 LIS2DH interrupt detected! INT1_SRC=0x%02X, motion_count=%d", int1_source, motion_count);
+                // Increment motion count for LIS2DH detected motion
+                motion_count++;
+                LOG_INF("🔔 LIS2DH interrupt detected via polling! INT1_SRC=0x%02X, motion_count=%d", int1_source, motion_count);
+
                 // Clear the interrupt so we can detect new ones
                 lis2dh12_clear_int1_interrupt(&lis2dh_dev);
+
+                // Update last interrupt time to prevent rapid re-detection
+                last_interrupt_time = current_time;
             }
         }
     }
