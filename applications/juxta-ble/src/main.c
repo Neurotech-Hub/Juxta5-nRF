@@ -100,7 +100,7 @@ static int configure_lis2dh_motion_detection(void)
         return ret;
     }
 
-    ret = gpio_pin_interrupt_configure(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin, GPIO_INT_EDGE_FALLING);
+    ret = gpio_pin_interrupt_configure(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin, GPIO_INT_EDGE_RISING);
     if (ret < 0)
     {
         LOG_ERR("Failed to configure LIS2DH INT interrupt: %d", ret);
