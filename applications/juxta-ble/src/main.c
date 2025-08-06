@@ -46,6 +46,28 @@ static bool ble_connected = false; // Track connection state
 static uint8_t motion_count = 0;
 static volatile bool lis2dh_interrupt_pending = false;
 static struct lis2dh12_dev lis2dh_dev;
+static struct k_work motion_work;
+static struct k_timer motion_timer;
+
+// Motion work handler - runs in work queue context (safe for longer operations)
+static void motion_work_handler(struct k_work *work)
+{
+    if (lis2dh_interrupt_pending)
+    {
+        lis2dh_interrupt_pending = false;
+
+        // Clear the interrupt so we can detect new ones
+        lis2dh12_clear_int1_interrupt(&lis2dh_dev);
+
+        LOG_INF("🏃 Motion interrupt cleared and processed (total count: %d)", motion_count);
+    }
+}
+
+// Motion timer callback - starts work queue after 1 second delay
+static void motion_timer_callback(struct k_timer *timer)
+{
+    k_work_submit(&motion_work);
+}
 
 // GPIO interrupt callback for LIS2DH motion detection
 static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -53,6 +75,9 @@ static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *
     motion_count++;
     lis2dh_interrupt_pending = true;
     printk("🏃 Motion detected via GPIO! Count: %d\n", motion_count);
+
+    // Start 1-second timer to process interrupt (self-limiting to 60 events/minute)
+    k_timer_start(&motion_timer, K_SECONDS(1), K_NO_WAIT);
 }
 
 static struct gpio_callback lis2dh_int_cb;
@@ -126,20 +151,15 @@ static int configure_lis2dh_motion_detection(void)
 
 static void check_lis2dh(void)
 {
-    LOG_INF("check_lis2dh: starting...");
-
     if (!lis2dh12_is_ready(&lis2dh_dev))
     {
         LOG_ERR("❌ LIS2DH device not ready");
         return;
     }
 
-    LOG_INF("check_lis2dh: device is ready, calling read_accel...");
-
+    // Quick verification that LIS2DH is responding
     float x, y, z;
     int rc = lis2dh12_read_accel(&lis2dh_dev, &x, &y, &z);
-    LOG_INF("check_lis2dh: read_accel returned %d", rc);
-
     if (rc == 0)
     {
         LOG_INF("✅ LIS2DH: X=%d mg, Y=%d mg, Z=%d mg", (int)x, (int)y, (int)z);
@@ -147,68 +167,6 @@ static void check_lis2dh(void)
     else
     {
         LOG_ERR("❌ LIS2DH read failed: %d", rc);
-    }
-
-    // Check INT1 source register to see if interrupts are being generated
-    uint8_t int1_source;
-    rc = lis2dh12_read_int1_source(&lis2dh_dev, &int1_source);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: INT1_SRC = 0x%02X (IA=%d)", int1_source, (int1_source & 0x40) ? 1 : 0);
-    }
-
-    // Test motion detection configuration
-    LOG_INF("🔧 Testing motion detection configuration...");
-
-    // Read back configuration registers to verify setup
-    uint8_t int1_cfg, int1_ths, int1_duration, ctrl_reg3, ctrl_reg5, ctrl_reg2, ctrl_reg1;
-
-    rc = lis2dh12_platform_read(NULL, 0x30, &int1_cfg, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: INT1_CFG = 0x%02X (expected 0x2A)", int1_cfg);
-    }
-
-    rc = lis2dh12_platform_read(NULL, 0x20, &ctrl_reg1, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: CTRL_REG1 = 0x%02X (expected 0x57)", ctrl_reg1);
-    }
-
-    rc = lis2dh12_platform_read(NULL, 0x21, &ctrl_reg2, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: CTRL_REG2 = 0x%02X (expected 0x09)", ctrl_reg2);
-    }
-
-    rc = lis2dh12_platform_read(NULL, 0x32, &int1_ths, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: INT1_THS = 0x%02X (%d mg)", int1_ths, int1_ths);
-    }
-
-    rc = lis2dh12_platform_read(NULL, 0x33, &int1_duration, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: INT1_DURATION = 0x%02X (%d samples)", int1_duration, int1_duration);
-    }
-
-    rc = lis2dh12_platform_read(NULL, 0x22, &ctrl_reg3, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: CTRL_REG3 = 0x%02X (expected 0x40)", ctrl_reg3);
-    }
-
-    rc = lis2dh12_platform_read(NULL, 0x24, &ctrl_reg5, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: CTRL_REG5 = 0x%02X (expected 0x08)", ctrl_reg5);
-    }
-
-    rc = lis2dh12_platform_read(NULL, 0x21, &ctrl_reg2, 1);
-    if (rc == 0)
-    {
-        LOG_INF("LIS2DH: CTRL_REG2 = 0x%02X (expected 0x10)", ctrl_reg2);
     }
 }
 
@@ -1187,6 +1145,10 @@ int main(void)
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
 
+    // Initialize motion processing work and timer
+    k_work_init(&motion_work, motion_work_handler);
+    k_timer_init(&motion_timer, motion_timer_callback, NULL);
+
     // Initialize 10-minute timer
     k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
     k_timer_start(&ten_minute_timer, K_MINUTES(10), K_MINUTES(10)); // every 10 minutes
@@ -1201,9 +1163,11 @@ int main(void)
 
     // Quick hardware verification
     LOG_INF("🔧 Hardware verification...");
+
+    // Test FRAM functionality
     test_fram_functionality();
 
-    // Configure LIS2DH motion detection first
+    // Configure LIS2DH motion detection
     ret = configure_lis2dh_motion_detection();
     if (ret < 0)
     {
@@ -1213,25 +1177,9 @@ int main(void)
     {
         // Only check LIS2DH if initialization was successful
         check_lis2dh();
-
-        // Test interrupt clearing functionality
-        LOG_INF("🧪 Testing interrupt clearing...");
-        int clear_test_result = lis2dh12_test_interrupt_clearing(&lis2dh_dev);
-        if (clear_test_result == 0)
-        {
-            LOG_INF("✅ Interrupt clearing test passed");
-        }
-        else
-        {
-            LOG_WRN("⚠️ Interrupt clearing test failed - may need threshold adjustment");
-        }
-
-        // Note: HP filtered motion detection analyzes high-frequency components only
-        // Raw acceleration values (including DC/gravity) are not relevant for interrupt triggering
-        LOG_INF("HP filtered motion detection configured - interrupts trigger on high-frequency motion only");
     }
 
-    LOG_INF("✅ Hardware verification complete");
+    LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH)");
 
     LOG_INF("✅ JUXTA BLE Application started successfully");
 
@@ -1242,39 +1190,6 @@ int main(void)
         heartbeat_counter++;
         LOG_INF("System heartbeat: %u (uptime: %u seconds)",
                 heartbeat_counter, heartbeat_counter * 10);
-
-        // Handle LIS2DH interrupt in non-ISR context
-        if (lis2dh_interrupt_pending)
-        {
-            lis2dh_interrupt_pending = false;
-
-            // Clear the interrupt so we can detect new ones
-            lis2dh12_clear_int1_interrupt(&lis2dh_dev);
-
-            LOG_INF("🏃 Motion interrupt cleared and processed (total count: %d)", motion_count);
-        }
-
-        // Check LIS2DH interrupt status periodically (backup method)
-        static uint32_t last_interrupt_time = 0;
-        uint32_t current_time = k_uptime_get();
-
-        if (lis2dh12_is_ready(&lis2dh_dev) && (current_time - last_interrupt_time) > 1000) // Only check every 1 second
-        {
-            uint8_t int1_source;
-            int rc = lis2dh12_read_int1_source(&lis2dh_dev, &int1_source);
-            if (rc == 0 && (int1_source & 0x40)) // Check if IA bit is set
-            {
-                // Increment motion count for LIS2DH detected motion
-                motion_count++;
-                LOG_INF("🔔 LIS2DH interrupt detected via polling! INT1_SRC=0x%02X, motion_count=%d", int1_source, motion_count);
-
-                // Clear the interrupt so we can detect new ones
-                lis2dh12_clear_int1_interrupt(&lis2dh_dev);
-
-                // Update last interrupt time to prevent rapid re-detection
-                last_interrupt_time = current_time;
-            }
-        }
     }
 
     return 0;

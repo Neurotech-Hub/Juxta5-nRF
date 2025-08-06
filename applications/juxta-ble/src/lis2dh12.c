@@ -136,15 +136,12 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         return -EINVAL;
     }
 
-    LOG_INF("LIS2DH: Starting initialization...");
-
     /* Initialize SPI device */
     if (!device_is_ready(dev->spi_dev))
     {
         LOG_ERR("SPI device not ready");
         return -ENODEV;
     }
-    LOG_INF("LIS2DH: SPI device ready");
 
     /* Initialize CS GPIO */
     if (!device_is_ready(dev->cs_gpio.port))
@@ -152,7 +149,6 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         LOG_ERR("CS GPIO not ready");
         return -ENODEV;
     }
-    LOG_INF("LIS2DH: CS GPIO ready (port=%p, pin=%d)", dev->cs_gpio.port, dev->cs_gpio.pin);
 
     /* Configure CS as output - since device tree shows GPIO_ACTIVE_LOW, we need to set it HIGH to deselect */
     int ret = gpio_pin_configure(dev->cs_gpio.port, dev->cs_gpio.pin, GPIO_OUTPUT);
@@ -161,20 +157,15 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         LOG_ERR("Failed to configure CS GPIO: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CS GPIO configured");
 
     /* Set CS high initially (deselect device since CS is active low) */
     gpio_pin_set(dev->cs_gpio.port, dev->cs_gpio.pin, 1);
-    LOG_INF("LIS2DH: CS set high initially (deselected)");
 
     /* Configure SPI for LIS2DH12 */
     dev->spi_cfg.frequency = 8000000;                            /* 8MHz max for LIS2DH12 */
     dev->spi_cfg.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB; /* Mode 0 (CPOL=0, CPHA=0) */
     dev->spi_cfg.slave = 1;                                      /* Use slave 1 (accel@1 in device tree) */
     dev->spi_cfg.cs.delay = 0;
-    LOG_INF("LIS2DH: SPI configured: freq=%d Hz, slave=%d, mode=0 (CPOL=0,CPHA=0)",
-            dev->spi_cfg.frequency, dev->spi_cfg.slave);
-    LOG_DBG("LIS2DH: SPI operation=0x%08X", dev->spi_cfg.operation);
 
     /* Set global context for platform functions */
     g_lis2dh12_dev = dev;
@@ -182,7 +173,6 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
 
     /* Read device ID to verify communication */
     uint8_t device_id;
-    LOG_INF("LIS2DH: Attempting to read device ID...");
     ret = lis2dh12_platform_read(NULL, 0x0F, &device_id, 1); // WHO_AM_I register
     if (ret < 0)
     {
@@ -190,15 +180,13 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         return ret;
     }
 
-    LOG_INF("LIS2DH: Raw device ID read: 0x%02X", device_id);
-
     if (device_id != 0x33)
     { // LIS2DH12 device ID
         LOG_ERR("Invalid device ID: 0x%02X (expected 0x33)", device_id);
         return -ENODEV;
     }
 
-    LOG_INF("LIS2DH12 device ID: 0x%02X", device_id);
+    LOG_INF("LIS2DH12 initialized (ID: 0x%02X)", device_id);
 
     /* Configure basic settings using direct register writes */
 
@@ -211,7 +199,6 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         LOG_ERR("Failed to set CTRL_REG1: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG1 set to 0x%02X (ODR=10Hz, XYZ enabled)", ctrl_reg1);
 
     /* Set scale to 2g and high resolution mode (CTRL_REG4 = 0x23) */
     /* 2g scale (0x00), high resolution mode (0x08), BDU enabled (0x80) */
@@ -222,27 +209,9 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         LOG_ERR("Failed to set CTRL_REG4: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG4 set to 0x%02X (2g scale, HR mode, BDU enabled)", ctrl_reg4);
 
     /* Small delay to allow accelerometer to start producing data */
     k_sleep(K_MSEC(50));
-
-    /* Verify configuration by reading back registers */
-    uint8_t ctrl_reg1_read, ctrl_reg4_read;
-    ret = lis2dh12_platform_read(NULL, 0x20, &ctrl_reg1_read, 1);
-    if (ret == 0)
-    {
-        LOG_INF("LIS2DH: CTRL_REG1 readback: 0x%02X", ctrl_reg1_read);
-    }
-
-    ret = lis2dh12_platform_read(NULL, 0x23, &ctrl_reg4_read, 1);
-    if (ret == 0)
-    {
-        LOG_INF("LIS2DH: CTRL_REG4 readback: 0x%02X", ctrl_reg4_read);
-    }
-
-    dev->initialized = true;
-    LOG_INF("LIS2DH12 initialized successfully");
 
     return 0;
 }
@@ -255,43 +224,25 @@ int lis2dh12_read_accel(struct lis2dh12_dev *dev, float *x, float *y, float *z)
         return -EINVAL;
     }
 
-    LOG_INF("LIS2DH read_accel: starting read...");
-
-    /* Check if data is ready */
-    uint8_t status_reg;
-    int ret = lis2dh12_platform_read(NULL, 0x27, &status_reg, 1); // STATUS_REG
-    if (ret == 0)
-    {
-        LOG_INF("LIS2DH: STATUS_REG = 0x%02X (ZYXDA=%d)", status_reg, (status_reg & 0x08) ? 1 : 0);
-    }
-
     /* Read raw acceleration data directly using our SPI functions */
-    uint8_t data[6];                                   // 3 axes * 2 bytes each
-    ret = lis2dh12_platform_read(NULL, 0x28, data, 6); // OUT_X_L register
+    uint8_t data[6];                                       // 3 axes * 2 bytes each
+    int ret = lis2dh12_platform_read(NULL, 0x28, data, 6); // OUT_X_L register
     if (ret < 0)
     {
         LOG_ERR("Failed to read acceleration data: %d", ret);
         return ret;
     }
 
-    LOG_INF("LIS2DH read_accel: raw data[0]=0x%02X, data[1]=0x%02X, data[2]=0x%02X, data[3]=0x%02X, data[4]=0x%02X, data[5]=0x%02X",
-            data[0], data[1], data[2], data[3], data[4], data[5]);
-
     /* Convert to 16-bit values (little endian) */
     int16_t raw_x = (int16_t)(data[1] << 8 | data[0]); // OUT_X_H << 8 | OUT_X_L
     int16_t raw_y = (int16_t)(data[3] << 8 | data[2]); // OUT_Y_H << 8 | OUT_Y_L
     int16_t raw_z = (int16_t)(data[5] << 8 | data[4]); // OUT_Z_H << 8 | OUT_Z_L
 
-    LOG_INF("LIS2DH read_accel: raw values: x=%d, y=%d, z=%d", raw_x, raw_y, raw_z);
-
     /* Convert to mg (2g scale, high resolution mode) */
     /* 2g scale in HR mode: 1 LSB = 1mg */
-    /* For 2g scale: 1 LSB = 1mg (16-bit resolution) */
     *x = (float)raw_x;
     *y = (float)raw_y;
     *z = (float)raw_z;
-
-    LOG_INF("LIS2DH read_accel: final values: x=%d mg, y=%d mg, z=%d mg", (int)*x, (int)*y, (int)*z);
 
     return 0;
 }
@@ -307,7 +258,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
     int ret;
 
     /* Configure motion detection using high-pass filter - following ST AN5005 section 6.3.3 */
-    LOG_INF("LIS2DH: Configuring high-pass filtered motion detection...");
 
     /* Step 1: Write 57h into CTRL_REG1 - Turn on sensor, enable X, Y, Z, ODR = 100 Hz */
     uint8_t ctrl_reg1 = 0x57; // 0b01010111: ODR=100Hz, XYZ enabled
@@ -317,7 +267,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to configure CTRL_REG1: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG1 set to 0x%02X (ODR=100Hz, XYZ enabled)", ctrl_reg1);
 
     /* Step 2: Write 09h into CTRL_REG2 - High-pass filter enabled on interrupt activity 1 */
     uint8_t ctrl_reg2 = 0x09; // 0b00001001: HP filter enabled on INT1
@@ -327,7 +276,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to configure CTRL_REG2: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG2 set to 0x%02X (HP filter on INT1)", ctrl_reg2);
 
     /* Step 3: Write 40h into CTRL_REG3 - Interrupt activity 1 driven to INT1 pin */
     uint8_t ctrl_reg3 = 0x40; // 0b01000000: INT1 activity routed to INT1 pin
@@ -337,7 +285,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to configure CTRL_REG3: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG3 set to 0x%02X (INT1 activity to pin)", ctrl_reg3);
 
     /* Step 4: Write 00h into CTRL_REG4 - FS = ±2 g */
     uint8_t ctrl_reg4 = 0x00; // 0b00000000: ±2g scale
@@ -347,7 +294,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to configure CTRL_REG4: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG4 set to 0x%02X (±2g scale)", ctrl_reg4);
 
     /* Step 5: Write 08h into CTRL_REG5 - Interrupt 1 pin latched */
     uint8_t ctrl_reg5 = 0x08; // 0b00001000: INT1 latched
@@ -357,7 +303,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to configure CTRL_REG5: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: CTRL_REG5 set to 0x%02X (INT1 latched)", ctrl_reg5);
 
     /* Step 6: Write threshold into INT1_THS - Threshold in mg */
     ret = lis2dh12_platform_write(NULL, 0x32, &threshold, 1);
@@ -366,7 +311,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to set INT1 threshold: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: INT1_THS set to 0x%02X (%d mg)", threshold, threshold);
 
     /* Step 7: Write duration into INT1_DURATION - Duration in samples */
     ret = lis2dh12_platform_write(NULL, 0x33, &duration, 1);
@@ -375,16 +319,11 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to set INT1 duration: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: INT1_DURATION set to 0x%02X (%d samples)", duration, duration);
 
     /* Step 8: Read REFERENCE - Dummy read to force HP filter to current acceleration value */
     uint8_t reference;
     ret = lis2dh12_platform_read(NULL, 0x26, &reference, 1);
-    if (ret == 0)
-    {
-        LOG_INF("LIS2DH: REFERENCE read: 0x%02X (HP filter reference set)", reference);
-    }
-    else
+    if (ret != 0)
     {
         LOG_ERR("Failed to read REFERENCE: %d", ret);
         return ret;
@@ -398,43 +337,6 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         LOG_ERR("Failed to configure INT1_CFG: %d", ret);
         return ret;
     }
-    LOG_INF("LIS2DH: INT1_CFG set to 0x%02X (XYZ high interrupts, OR)", int1_cfg);
-
-    /* Verify configuration by reading back registers */
-    uint8_t ctrl_reg1_read, ctrl_reg2_read, ctrl_reg3_read, ctrl_reg4_read, ctrl_reg5_read;
-    uint8_t int1_cfg_read, int1_ths_read, int1_duration_read;
-
-    ret = lis2dh12_platform_read(NULL, 0x20, &ctrl_reg1_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: CTRL_REG1 readback: 0x%02X", ctrl_reg1_read);
-
-    ret = lis2dh12_platform_read(NULL, 0x21, &ctrl_reg2_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: CTRL_REG2 readback: 0x%02X", ctrl_reg2_read);
-
-    ret = lis2dh12_platform_read(NULL, 0x22, &ctrl_reg3_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: CTRL_REG3 readback: 0x%02X", ctrl_reg3_read);
-
-    ret = lis2dh12_platform_read(NULL, 0x23, &ctrl_reg4_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: CTRL_REG4 readback: 0x%02X", ctrl_reg4_read);
-
-    ret = lis2dh12_platform_read(NULL, 0x24, &ctrl_reg5_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: CTRL_REG5 readback: 0x%02X", ctrl_reg5_read);
-
-    ret = lis2dh12_platform_read(NULL, 0x30, &int1_cfg_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: INT1_CFG readback: 0x%02X", int1_cfg_read);
-
-    ret = lis2dh12_platform_read(NULL, 0x32, &int1_ths_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: INT1_THS readback: 0x%02X", int1_ths_read);
-
-    ret = lis2dh12_platform_read(NULL, 0x33, &int1_duration_read, 1);
-    if (ret == 0)
-        LOG_INF("LIS2DH: INT1_DURATION readback: 0x%02X", int1_duration_read);
 
     LOG_INF("LIS2DH: High-pass filtered motion detection configured: threshold=%d mg, duration=%d samples",
             threshold, duration);
@@ -442,9 +344,10 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
     /* Clear any pending interrupts by reading INT1_SRC register */
     uint8_t int1_src_clear;
     ret = lis2dh12_platform_read(NULL, 0x31, &int1_src_clear, 1);
-    if (ret == 0)
+    if (ret != 0)
     {
-        LOG_INF("LIS2DH: Cleared pending interrupt, INT1_SRC=0x%02X", int1_src_clear);
+        LOG_ERR("Failed to clear pending interrupt: %d", ret);
+        return ret;
     }
 
     return 0;
@@ -487,12 +390,13 @@ int lis2dh12_clear_int1_interrupt(struct lis2dh12_dev *dev)
 
     // Read INT1_SRC register to clear the interrupt (per ST datasheet)
     ret = lis2dh12_platform_read(NULL, 0x31, &int1_src, 1);
-    if (ret == 0)
+    if (ret != 0)
     {
-        LOG_INF("LIS2DH: Cleared INT1 interrupt, INT1_SRC=0x%02X (IA=%d)", int1_src, (int1_src & 0x40) ? 1 : 0);
+        LOG_ERR("Failed to clear INT1 interrupt: %d", ret);
+        return ret;
     }
 
-    return ret;
+    return 0;
 }
 
 int lis2dh12_reset_motion_detection(struct lis2dh12_dev *dev)
