@@ -251,10 +251,10 @@ static void juxta_scan_table_print_and_clear(void)
 static struct k_work state_work;
 static struct k_timer state_timer;
 
-#define ADV_BURST_DURATION_MS 250
-#define SCAN_BURST_DURATION_MS 500 /* Reduced from 1000ms to 500ms for testing */
+#define ADV_BURST_DURATION_MS 100
+#define SCAN_BURST_DURATION_MS 500
 #define ADV_INTERVAL_SECONDS 5
-#define SCAN_INTERVAL_SECONDS 15
+#define SCAN_INTERVAL_SECONDS 30
 
 static uint32_t boot_delay_ms = 0;
 
@@ -452,13 +452,7 @@ void juxta_ble_timing_update_trigger(void)
 
 static void init_randomization(void)
 {
-#if CONFIG_JUXTA_BLE_RANDOMIZATION
-    boot_delay_ms = sys_rand32_get() % 1000;
-    LOG_INF("🎲 Random boot delay: %u ms", boot_delay_ms);
-#else
-    boot_delay_ms = 0;
-    LOG_INF("🎲 Randomization disabled");
-#endif
+    LOG_INF("🎲 Randomization enabled for state machine timing");
 }
 
 static uint32_t get_rtc_timestamp(void)
@@ -731,7 +725,13 @@ static void state_work_handler(struct k_work *work)
         uint32_t next_delay_ms = MIN(time_until_adv, time_until_scan) * 1000;
         /* Add minimum delay to prevent rapid start/stop cycles */
         next_delay_ms = MAX(next_delay_ms, 100);
-        LOG_DBG("Sleeping for %u ms until next action", next_delay_ms);
+
+        /* Add small random offset (0-1000ms) to prevent device synchronization */
+        uint32_t random_offset = sys_rand32_get() % 1000;
+        next_delay_ms += random_offset;
+
+        LOG_DBG("Sleeping for %u ms until next action (including %u ms random offset)",
+                next_delay_ms, random_offset);
         k_timer_start(&state_timer, K_MSEC(next_delay_ms), K_NO_WAIT);
 
         uint32_t ts = juxta_vitals_get_timestamp(&vitals_ctx);
@@ -743,12 +743,6 @@ static void state_work_handler(struct k_work *work)
 static int juxta_start_advertising(void)
 {
     LOG_INF("📢 Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
-
-    if (boot_delay_ms > 0)
-    {
-        k_sleep(K_MSEC(boot_delay_ms));
-        boot_delay_ms = 0;
-    }
 
     // Use non-connectable advertising for energy efficiency
     struct bt_le_adv_param adv_param = {
@@ -1077,7 +1071,7 @@ int main(void)
     LOG_INF("📢 Advertising: %d ms burst every %d seconds", ADV_BURST_DURATION_MS, ADV_INTERVAL_SECONDS);
     LOG_INF("🔍 Scanning: %d ms burst every %d seconds", SCAN_BURST_DURATION_MS, SCAN_INTERVAL_SECONDS);
     LOG_INF("⏰ Power-efficient k_timer-based timing for device discovery");
-    LOG_INF("🎲 Randomization: %s", CONFIG_JUXTA_BLE_RANDOMIZATION ? "enabled" : "disabled");
+    LOG_INF("🎲 Randomization: enabled for state machine timing");
     LOG_INF("🏃 Motion gating: %s", CONFIG_JUXTA_BLE_MOTION_GATING ? "enabled" : "disabled");
 
     LOG_INF("💡 LED support removed - using Hublink BLE service");
