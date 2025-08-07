@@ -48,6 +48,7 @@ static volatile bool lis2dh_interrupt_pending = false;
 static struct lis2dh12_dev lis2dh_dev;
 static struct k_work motion_work;
 static struct k_timer motion_timer;
+static bool motion_based_intervals = false; // Flag for extended intervals when no motion
 
 // Motion work handler - runs in work queue context (safe for longer operations)
 static void motion_work_handler(struct k_work *work)
@@ -59,7 +60,9 @@ static void motion_work_handler(struct k_work *work)
         // Clear the interrupt so we can detect new ones
         lis2dh12_clear_int1_interrupt(&lis2dh_dev);
 
-        LOG_INF("🏃 Motion interrupt cleared and processed (total count: %d)", motion_count);
+        // Reset to default intervals when motion is detected
+        motion_based_intervals = false;
+        LOG_INF("🏃 Motion interrupt cleared and processed (total count: %d) - resetting to default intervals", motion_count);
     }
 }
 
@@ -254,9 +257,7 @@ static struct k_timer state_timer;
 #define ADV_BURST_DURATION_MS 100
 #define SCAN_BURST_DURATION_MS 500
 #define ADV_INTERVAL_SECONDS 5
-#define SCAN_INTERVAL_SECONDS 30
-
-static uint32_t boot_delay_ms = 0;
+#define SCAN_INTERVAL_SECONDS 20
 
 /* Dynamic advertising name based on MAC address */
 static char adv_name[12] = "JX_000000"; /* Initialized placeholder */
@@ -354,17 +355,6 @@ __no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uin
     }
 }
 
-static bool motion_active(void)
-{
-#if CONFIG_JUXTA_BLE_MOTION_GATING
-    // Consider motion active if we've detected any motion in the last few minutes
-    // This provides a simple motion gating mechanism
-    return (motion_count > 0);
-#else
-    return true;
-#endif
-}
-
 static uint32_t get_adv_interval(void)
 {
     uint8_t adv_interval = ADV_INTERVAL_SECONDS; /* Default fallback */
@@ -388,11 +378,11 @@ static uint32_t get_adv_interval(void)
         adv_interval = ADV_INTERVAL_SECONDS;
     }
 
-    /* Apply motion gating if enabled */
-    if (!motion_active())
+    /* Apply motion-based interval adjustment */
+    if (motion_based_intervals)
     {
-        adv_interval *= 3; /* Triple the interval when no motion */
-        LOG_DBG("📡 Motion inactive, adjusted adv_interval: %d", adv_interval);
+        adv_interval *= 2; /* Double the interval when no motion detected */
+        LOG_DBG("📡 No motion detected, using extended adv_interval: %d", adv_interval);
     }
 
     return adv_interval;
@@ -421,11 +411,11 @@ static uint32_t get_scan_interval(void)
         scan_interval = SCAN_INTERVAL_SECONDS;
     }
 
-    /* Apply motion gating if enabled */
-    if (!motion_active())
+    /* Apply motion-based interval adjustment */
+    if (motion_based_intervals)
     {
-        scan_interval *= 2; /* Double the interval when no motion */
-        LOG_DBG("🔍 Motion inactive, adjusted scan_interval: %d", scan_interval);
+        scan_interval *= 2; /* Double the interval when no motion detected */
+        LOG_DBG("🔍 No motion detected, using extended scan_interval: %d", scan_interval);
     }
 
     return scan_interval;
@@ -566,11 +556,17 @@ static void state_work_handler(struct k_work *work)
     {
         juxta_scan_table_print_and_clear();
 
-        // Report and clear motion count
+        // Report and clear motion count, adjust intervals based on activity
         if (motion_count > 0)
         {
             LOG_INF("Motion events in last minute: %d", motion_count);
             motion_count = 0;
+        }
+        else
+        {
+            // No motion detected in the last minute, switch to extended intervals
+            motion_based_intervals = true;
+            LOG_INF("No motion detected in last minute - switching to extended intervals (2x)");
         }
 
         last_logged_minute = current_minute;
