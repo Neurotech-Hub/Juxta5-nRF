@@ -210,6 +210,16 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         return ret;
     }
 
+    /* Enable temperature sensor */
+    /* TEMP_CFG_REG (0x1F): Set TEMP_EN[1:0] bits to enable temperature sensor */
+    uint8_t temp_cfg = 0xC0;                                 // 0b11000000: TEMP_EN[1:0] = 11 (enable temp sensor)
+    ret = lis2dh12_platform_write(NULL, 0x1F, &temp_cfg, 1); // TEMP_CFG_REG
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to enable temperature sensor: %d", ret);
+        return ret;
+    }
+
     /* Small delay to allow accelerometer to start producing data */
     k_sleep(K_MSEC(50));
 
@@ -243,6 +253,47 @@ int lis2dh12_read_accel(struct lis2dh12_dev *dev, float *x, float *y, float *z)
     *x = (float)raw_x;
     *y = (float)raw_y;
     *z = (float)raw_z;
+
+    return 0;
+}
+
+/**
+ * @brief Read temperature from LIS2DH12 sensor (low power mode, 8-bit resolution)
+ *
+ * Temperature sensor characteristics:
+ * - Low power mode (LPen=1): 8-bit resolution, 1 LSB ≈ 1.0°C, ±1.0°C precision
+ * - Data format: 8-bit two's complement
+ * - Operating range: -40°C to +85°C (covers full range with 8-bit: -128°C to +127°C)
+ * - Relative sensor: Only delta-T matters, not absolute temperature
+ * - Efficiency: Reads only 1 byte for minimal SPI transaction
+ *
+ * Requirements:
+ * - Device must be in low power mode (LPen=1 in CTRL_REG1)
+ * - Temperature sensor must be enabled (TEMP_EN[1:0] in TEMP_CFG_REG)
+ *
+ * For high resolution (10-bit) temperature reading, use lis2dh12_read_temperature_highres()
+ * which requires normal mode (LPen=0) and reads 2 bytes for ±0.25°C precision.
+ */
+int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperature)
+{
+    if (!dev || !dev->initialized || !temperature)
+    {
+        LOG_ERR("LIS2DH read_temperature_lowres: invalid parameters");
+        return -EINVAL;
+    }
+
+    /* Read temperature data from OUT_TEMP_L register (0x0C) - 8-bit only */
+    uint8_t temp_data;
+    int ret = lis2dh12_platform_read(NULL, 0x0C, &temp_data, 1);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read temperature data: %d", ret);
+        return ret;
+    }
+
+    /* Convert to signed 8-bit value (two's complement) */
+    /* 1 LSB ≈ 1.0°C for 8-bit resolution in low power mode */
+    *temperature = (int8_t)temp_data;
 
     return 0;
 }

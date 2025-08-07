@@ -171,6 +171,18 @@ static void check_lis2dh(void)
     {
         LOG_ERR("❌ LIS2DH read failed: %d", rc);
     }
+
+    // Read temperature (low power mode, 8-bit resolution)
+    int8_t temperature;
+    rc = lis2dh12_read_temperature_lowres(&lis2dh_dev, &temperature);
+    if (rc == 0)
+    {
+        LOG_INF("🌡️ LIS2DH Temperature: %d°C", temperature);
+    }
+    else
+    {
+        LOG_ERR("❌ LIS2DH temperature read failed: %d", rc);
+    }
 }
 
 /**

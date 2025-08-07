@@ -28,6 +28,7 @@ struct lis2dh12_dev
 /* Function prototypes */
 int lis2dh12_init(struct lis2dh12_dev *dev);
 int lis2dh12_read_accel(struct lis2dh12_dev *dev, float *x, float *y, float *z);
+int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperature);
 int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
                                         uint8_t threshold, uint8_t duration);
 int lis2dh12_read_device_id(struct lis2dh12_dev *dev, uint8_t *id);
