@@ -190,9 +190,9 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
 
     /* Configure basic settings using direct register writes */
 
-    /* Set data rate to 10Hz and enable XYZ axes (CTRL_REG1 = 0x20) */
-    /* ODR = 10Hz (0x2), XYZ enabled (0x07) */
-    uint8_t ctrl_reg1 = 0x27;                                 // 0b00100111: ODR=10Hz, XYZ enabled
+    /* Set data rate to 10Hz and enable XYZ axes in low-power mode (CTRL_REG1 = 0x20) */
+    /* ODR = 10Hz (0x2), XYZ enabled (0x07), LPen = 1 (0x08) for low-power mode */
+    uint8_t ctrl_reg1 = 0x2F;                                 // 0b00101111: ODR=10Hz, XYZ enabled, LPen=1 (low-power)
     ret = lis2dh12_platform_write(NULL, 0x20, &ctrl_reg1, 1); // CTRL_REG1
     if (ret < 0)
     {
@@ -200,9 +200,9 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         return ret;
     }
 
-    /* Set scale to 2g and high resolution mode (CTRL_REG4 = 0x23) */
-    /* 2g scale (0x00), high resolution mode (0x08), BDU enabled (0x80) */
-    uint8_t ctrl_reg4 = 0x88;                                 // 0b10001000: BDU=1, HR=1, FS=00 (2g)
+    /* Set scale to 2g and low-power mode (CTRL_REG4 = 0x23) */
+    /* 2g scale (0x00), low-power mode (HR=0), BDU enabled (0x80) */
+    uint8_t ctrl_reg4 = 0x80;                                 // 0b10000000: BDU=1, HR=0, FS=00 (2g, low-power)
     ret = lis2dh12_platform_write(NULL, 0x23, &ctrl_reg4, 1); // CTRL_REG4
     if (ret < 0)
     {
