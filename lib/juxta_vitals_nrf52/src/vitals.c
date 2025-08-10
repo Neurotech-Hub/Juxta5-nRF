@@ -84,9 +84,9 @@ int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitori
             return JUXTA_VITALS_ERROR_HARDWARE;
         }
 
-        LOG_INF("ADC Device Info:");
-        LOG_INF("  Name: %s", adc_dev->name);
-        LOG_INF("  Status: %s", device_is_ready(adc_dev) ? "Ready" : "Not Ready");
+        LOG_DBG("ADC Device Info:");
+        LOG_DBG("  Name: %s", adc_dev->name);
+        LOG_DBG("  Status: %s", device_is_ready(adc_dev) ? "Ready" : "Not Ready");
 
         /* Configure ADC channel for VDD measurement */
         memset(&adc_cfg, 0, sizeof(adc_cfg));
@@ -116,11 +116,11 @@ int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitori
         adc_seq.oversampling = 8;
         adc_seq.calibrate = true;
 
-        LOG_INF("ADC Configuration Complete:");
-        LOG_INF("  Channel: %d", adc_cfg.channel_id);
-        LOG_INF("  Resolution: %d bits", adc_seq.resolution);
-        LOG_INF("  Oversampling: %d", adc_seq.oversampling);
-        LOG_INF("  Buffer Size: %d bytes", adc_seq.buffer_size);
+        LOG_DBG("ADC Configuration Complete:");
+        LOG_DBG("  Channel: %d", adc_cfg.channel_id);
+        LOG_DBG("  Resolution: %d bits", adc_seq.resolution);
+        LOG_DBG("  Oversampling: %d", adc_seq.oversampling);
+        LOG_DBG("  Buffer Size: %d bytes", adc_seq.buffer_size);
 
         /* Try an initial reading to verify setup */
         ret = juxta_vitals_read_battery_voltage(ctx);
@@ -324,14 +324,14 @@ static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx)
         return JUXTA_VITALS_ERROR_NOT_READY;
     }
 
-    LOG_INF("ADC Configuration:");
-    LOG_INF("  Device: %s", adc_dev->name);
-    LOG_INF("  Channel: %d", adc_cfg.channel_id);
-    LOG_INF("  Gain: %d", adc_cfg.gain);
-    LOG_INF("  Reference: %d", adc_cfg.reference);
-    LOG_INF("  Input Positive: %d", adc_cfg.input_positive);
-    LOG_INF("  Resolution: %d", adc_seq.resolution);
-    LOG_INF("  Oversampling: %d", adc_seq.oversampling);
+    LOG_DBG("ADC Configuration:");
+    LOG_DBG("  Device: %s", adc_dev->name);
+    LOG_DBG("  Channel: %d", adc_cfg.channel_id);
+    LOG_DBG("  Gain: %d", adc_cfg.gain);
+    LOG_DBG("  Reference: %d", adc_cfg.reference);
+    LOG_DBG("  Input Positive: %d", adc_cfg.input_positive);
+    LOG_DBG("  Resolution: %d", adc_seq.resolution);
+    LOG_DBG("  Oversampling: %d", adc_seq.oversampling);
 
     /* Read VDD using ADC */
     int ret = adc_read(adc_dev, &adc_seq);
@@ -341,7 +341,7 @@ static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx)
         return ret;
     }
 
-    LOG_INF("ADC Raw Value: %d", adc_sample_buffer);
+    LOG_DBG("ADC Raw Value: %d", adc_sample_buffer);
 
     /* Convert to millivolts */
     int32_t vdd_mv = adc_sample_buffer;
@@ -355,12 +355,12 @@ static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx)
         return ret;
     }
 
-    LOG_INF("ADC Conversion:");
-    LOG_INF("  Raw Value: %d", adc_sample_buffer);
-    LOG_INF("  Reference (mV): %d", adc_ref_internal(adc_dev));
-    LOG_INF("  Converted (mV): %d", vdd_mv);
-    LOG_INF("  Expected VDD (3V): ~3000 mV");
-    LOG_INF("  Expected ADC reading (1/6 gain): ~500 mV");
+    LOG_DBG("ADC Conversion:");
+    LOG_DBG("  Raw Value: %d", adc_sample_buffer);
+    LOG_DBG("  Reference (mV): %d", adc_ref_internal(adc_dev));
+    LOG_DBG("  Converted (mV): %d", vdd_mv);
+    LOG_DBG("  Expected VDD (3V): ~3000 mV");
+    LOG_DBG("  Expected ADC reading (1/6 gain): ~500 mV");
 
     ctx->battery_mv = vdd_mv;
 

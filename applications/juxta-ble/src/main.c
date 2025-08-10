@@ -262,12 +262,15 @@ static void juxta_scan_table_reset(void)
 
 static void juxta_scan_table_print_and_clear(void)
 {
-    LOG_INF("\n=== JUXTA SCAN TABLE ===");
-    for (uint8_t i = 0; i < juxta_scan_count && i < MAX_JUXTA_DEVICES; i++)
+    if (juxta_scan_count > 0)
     {
-        LOG_INF("MAC: %06X, RSSI: %d", juxta_scan_table[i].mac_id, juxta_scan_table[i].rssi);
+        LOG_INF("=== JUXTA SCAN TABLE ===");
+        for (uint8_t i = 0; i < juxta_scan_count && i < MAX_JUXTA_DEVICES; i++)
+        {
+            LOG_INF("MAC: %06X, RSSI: %d", juxta_scan_table[i].mac_id, juxta_scan_table[i].rssi);
+        }
+        LOG_INF("=== END SCAN TABLE ===");
     }
-    LOG_INF("=== END SCAN TABLE ===\n");
     juxta_scan_count = 0;
     memset(juxta_scan_table, 0, sizeof(juxta_scan_table));
 }
@@ -611,13 +614,21 @@ static void state_work_handler(struct k_work *work)
                     mac_ids[i][2] = juxta_scan_table[i].mac_id & 0xFF;
                     rssi_values[i] = juxta_scan_table[i].rssi;
                 }
-                (void)juxta_framfs_append_device_scan_data(&time_ctx, current_minute, motion_count,
-                                                           mac_ids, rssi_values, device_count);
+                int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, motion_count,
+                                                               mac_ids, rssi_values, device_count);
+                if (ret == 0)
+                {
+                    LOG_INF("📊 FRAMFS minute record: devices=%d, motion=%d", device_count, motion_count);
+                }
             }
             else
             {
-                (void)juxta_framfs_append_simple_record_data(&time_ctx, current_minute,
-                                                             JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY);
+                int ret = juxta_framfs_append_simple_record_data(&time_ctx, current_minute,
+                                                                 JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY);
+                if (ret == 0)
+                {
+                    LOG_INF("📊 FRAMFS minute record: no activity");
+                }
             }
         }
 
@@ -924,8 +935,6 @@ static int test_rtc_functionality(void)
 
     // Set RTC/Unix timestamp for correct minute-of-day tracking
     // Example: 2024-01-20 12:00:00 UTC (1705752000)
-    juxta_vitals_set_timestamp(&vitals_ctx, 1705752000);
-
     uint32_t initial_timestamp = 1705752000;
     ret = juxta_vitals_set_timestamp(&vitals_ctx, initial_timestamp);
     if (ret < 0)
@@ -1002,14 +1011,14 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 // Add the missing connectable advertising function
 static int juxta_start_connectable_advertising(void)
 {
-    // Use explicit connectable advertising parameters for maximum compatibility
+    // Explicit connectable advertising parameters using modern option
     struct bt_le_adv_param adv_param = {
         .id = BT_ID_DEFAULT,
         .sid = 0,
         .secondary_max_skip = 0,
-        .options = 0,                              // Connectable by default (modern approach, no deprecated flag)
-        .interval_min = BT_GAP_ADV_FAST_INT_MIN_1, // Slower intervals for better connection
-        .interval_max = BT_GAP_ADV_FAST_INT_MAX_1, // ~200ms intervals
+        .options = BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
+        .interval_min = BT_GAP_ADV_FAST_INT_MIN_1,
+        .interval_max = BT_GAP_ADV_FAST_INT_MAX_1,
         .peer = NULL,
     };
 
@@ -1110,7 +1119,11 @@ static void lowfreq_work_handler(struct k_work *work)
     uint8_t battery_level = 0;
     if (juxta_vitals_get_validated_battery_level(&vitals_ctx, &battery_level) == 0)
     {
-        (void)juxta_framfs_append_battery_record_data(&time_ctx, minute, battery_level);
+        int ret = juxta_framfs_append_battery_record_data(&time_ctx, minute, battery_level);
+        if (ret == 0)
+        {
+            LOG_INF("📊 FRAMFS 2-min record: battery=%d%%", battery_level);
+        }
     }
 }
 
@@ -1137,16 +1150,10 @@ int main(void)
             timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
 
-    LOG_INF("📋 Board: %s", CONFIG_BOARD);
-    LOG_INF("📟 Device: %s", CONFIG_SOC);
-    LOG_INF("📱 Device will use k_timer-based pulsed advertising and scanning for device discovery");
-    LOG_INF("📢 Advertising: %d ms burst every %d seconds", ADV_BURST_DURATION_MS, ADV_INTERVAL_SECONDS);
-    LOG_INF("🔍 Scanning: %d ms burst every %d seconds", SCAN_BURST_DURATION_MS, SCAN_INTERVAL_SECONDS);
-    LOG_INF("⏰ Power-efficient k_timer-based timing for device discovery");
-    LOG_INF("🎲 Randomization: enabled for state machine timing");
-    LOG_INF("🏃 Motion gating: %s", CONFIG_JUXTA_BLE_MOTION_GATING ? "enabled" : "disabled");
-
-    LOG_INF("💡 LED support removed - using Hublink BLE service");
+    LOG_INF("Board: %s", CONFIG_BOARD);
+    LOG_INF("Device: %s", CONFIG_SOC);
+    LOG_INF("Advertising: %d ms burst every %d seconds", ADV_BURST_DURATION_MS, ADV_INTERVAL_SECONDS);
+    LOG_INF("Scanning: %d ms burst every %d seconds", SCAN_BURST_DURATION_MS, SCAN_INTERVAL_SECONDS);
 
     ret = bt_enable(NULL);
     if (ret)
@@ -1155,7 +1162,7 @@ int main(void)
         return ret;
     }
 
-    LOG_INF("🔵 Bluetooth initialized");
+    LOG_INF("Bluetooth initialized");
 
     // Set up dynamic advertising name for non-connectable advertising only
     setup_dynamic_adv_name();
@@ -1196,7 +1203,6 @@ int main(void)
         return ret;
     }
 
-    LOG_INF("📁 Initializing framfs...");
     ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
     if (ret < 0)
     {
@@ -1223,7 +1229,6 @@ int main(void)
         LOG_ERR("Time-aware framfs init failed: %d", ret);
         return ret;
     }
-    LOG_INF("✅ Time-aware file system initialized");
 
     init_randomization();
     k_work_init(&state_work, state_work_handler);
