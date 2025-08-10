@@ -19,6 +19,7 @@ juxta_framfs_append_data(&ctx, sensor_data, sizeof(sensor_data));
 juxta_framfs_append_device_scan_data(&ctx, minute, motion, mac_ids, rssi, count);
 juxta_framfs_append_simple_record_data(&ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
 juxta_framfs_append_battery_record_data(&ctx, minute, battery_level);
+juxta_framfs_append_temperature_record_data(&ctx, minute, temperature);
 ```
 
 ## API Overview
@@ -29,6 +30,7 @@ juxta_framfs_append_battery_record_data(&ctx, minute, battery_level);
 - **`juxta_framfs_append_device_scan_data()`** - Log device scan with MAC indexing
 - **`juxta_framfs_append_simple_record_data()`** - Log system events (boot, connected, etc.)
 - **`juxta_framfs_append_battery_record_data()`** - Log battery level
+- **`juxta_framfs_append_temperature_record_data()`** - Log temperature
 
 ### User Settings API
 - **`juxta_framfs_get_adv_interval()`** / **`juxta_framfs_set_adv_interval()`** - Get/set advertising interval (0-255)
@@ -58,6 +60,7 @@ Files use **YYMMDD** format:
 #define JUXTA_FRAMFS_RECORD_TYPE_CONNECTED 0xF2
 #define JUXTA_FRAMFS_RECORD_TYPE_SETTINGS 0xF3
 #define JUXTA_FRAMFS_RECORD_TYPE_BATTERY 0xF4
+#define JUXTA_FRAMFS_RECORD_TYPE_TEMPERATURE 0xF6
 #define JUXTA_FRAMFS_RECORD_TYPE_ERROR 0xF5
 
 /* Device scans (1-128 devices) */
@@ -70,6 +73,14 @@ Files use **YYMMDD** format:
 Uses 3-byte packed MAC IDs to save memory:
 ```c
 uint8_t mac_id[3] = {0x55, 0x66, 0x77}; // Last 3 bytes of MAC address
+```
+
+## Temperature Records
+
+Temperature records store 8-bit signed temperature values in degrees Celsius:
+```c
+int8_t temperature = 23; // 23°C
+int8_t temperature = -5; // -5°C
 ```
 
 ## User Settings

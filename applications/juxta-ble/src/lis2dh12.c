@@ -282,9 +282,9 @@ int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperatu
         return -EINVAL;
     }
 
-    /* Read temperature data from OUT_TEMP_L register (0x0C) - 8-bit only */
+    /* Read temperature data from OUT_TEMP_H register (0x0D) - 8-bit only */
     uint8_t temp_data;
-    int ret = lis2dh12_platform_read(NULL, 0x0C, &temp_data, 1);
+    int ret = lis2dh12_platform_read(NULL, 0x0D, &temp_data, 1);
     if (ret < 0)
     {
         LOG_ERR("Failed to read temperature data: %d", ret);

@@ -482,7 +482,7 @@ static uint32_t get_rtc_timestamp(void)
 /* Definition: simple record logger (BOOT/CONNECTED/NO_ACTIVITY/ERROR) */
 static void juxta_log_simple(uint8_t type)
 {
-    if (!hardware_verified || !framfs_ctx.initialized)
+    if (!hardware_verified || !framfs_ctx.initialized || ble_connected)
     {
         return;
     }
@@ -599,7 +599,7 @@ static void state_work_handler(struct k_work *work)
     if (current_minute != last_logged_minute)
     {
         /* Minimal minute logging to FRAMFS (devices + motion or no-activity) */
-        if (hardware_verified && framfs_ctx.initialized)
+        if (hardware_verified && framfs_ctx.initialized && !ble_connected)
         {
             if (juxta_scan_count > 0)
             {
@@ -630,6 +630,10 @@ static void state_work_handler(struct k_work *work)
                     LOG_INF("📊 FRAMFS minute record: no activity");
                 }
             }
+        }
+        else if (ble_connected)
+        {
+            LOG_DBG("⏸️ FRAMFS minute logging paused during BLE connection");
         }
 
         /* Print and clear after logging to preserve contents */
@@ -907,7 +911,6 @@ static int juxta_stop_scanning(void)
         return -1;
     }
 
-    LOG_INF("🔍 Stopping BLE scanning...");
     int ret = bt_le_scan_stop();
     if (ret < 0)
     {
@@ -916,7 +919,7 @@ static int juxta_stop_scanning(void)
     }
 
     ble_state = BLE_STATE_WAITING;
-    LOG_INF("✅ Scanning stopped successfully");
+    LOG_INF("Scanning stopped successfully");
     return 0;
 }
 
@@ -980,8 +983,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
     /* Notify BLE service of connection */
     juxta_ble_connection_established(conn);
 
-    /* Log CONNECTED event */
+    /* Log CONNECTED event (before pausing FRAMFS operations) */
     juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_CONNECTED);
+
+    LOG_INF("⏸️ FRAMFS logging operations paused during BLE connection");
 
     LOG_INF("📤 Hublink gateway connected - ready for data exchange");
     LOG_INF("⏸️ State machine paused - will resume after disconnection");
@@ -999,6 +1004,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
     last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();
 
+    LOG_INF("▶️ FRAMFS logging operations resumed");
     LOG_INF("▶️ State machine resumed - resuming normal operation");
     k_work_submit(&state_work);
 }
@@ -1113,17 +1119,46 @@ static void lowfreq_work_handler(struct k_work *work)
         return;
     }
 
-    /* Update vitals and log battery every 10 minutes */
+    /* Update vitals and log battery/temperature every 2 minutes (dev) */
     (void)juxta_vitals_update(&vitals_ctx);
     uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
     uint8_t battery_level = 0;
     if (juxta_vitals_get_validated_battery_level(&vitals_ctx, &battery_level) == 0)
     {
-        int ret = juxta_framfs_append_battery_record_data(&time_ctx, minute, battery_level);
-        if (ret == 0)
+        if (!ble_connected)
         {
-            LOG_INF("📊 FRAMFS 2-min record: battery=%d%%", battery_level);
+            int ret = juxta_framfs_append_battery_record_data(&time_ctx, minute, battery_level);
+            if (ret == 0)
+            {
+                LOG_INF("📊 FRAMFS 2-min record: battery=%d%%", battery_level);
+            }
         }
+        else
+        {
+            LOG_DBG("⏸️ FRAMFS battery logging paused during BLE connection (battery=%d%%)", battery_level);
+        }
+    }
+
+    /* Read and log temperature from LIS2DH */
+    int8_t temperature = 0;
+    if (lis2dh12_read_temperature_lowres(&lis2dh_dev, &temperature) == 0)
+    {
+        if (!ble_connected)
+        {
+            int ret = juxta_framfs_append_temperature_record_data(&time_ctx, minute, temperature);
+            if (ret == 0)
+            {
+                LOG_INF("📊 FRAMFS 2-min record: temperature=%d°C", temperature);
+            }
+        }
+        else
+        {
+            LOG_DBG("⏸️ FRAMFS temperature logging paused during BLE connection (temperature=%d°C)", temperature);
+        }
+    }
+    else
+    {
+        LOG_WRN("Failed to read temperature from LIS2DH");
     }
 }
 

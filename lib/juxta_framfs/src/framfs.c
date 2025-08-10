@@ -1307,6 +1307,37 @@ int juxta_framfs_decode_battery_record(const uint8_t *buffer,
     return 4; /* 4 bytes */
 }
 
+int juxta_framfs_encode_temperature_record(const struct juxta_framfs_temperature_record *record,
+                                           uint8_t *buffer)
+{
+    if (!record || !buffer)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    buffer[0] = (record->minute >> 8) & 0xFF; /* minute high byte */
+    buffer[1] = record->minute & 0xFF;        /* minute low byte */
+    buffer[2] = record->type;                 /* record type (0xF6) */
+    buffer[3] = (uint8_t)record->temperature; /* temperature (signed) */
+
+    return 4; /* 4 bytes */
+}
+
+int juxta_framfs_decode_temperature_record(const uint8_t *buffer,
+                                           struct juxta_framfs_temperature_record *record)
+{
+    if (!buffer || !record)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    record->minute = (buffer[0] << 8) | buffer[1]; /* minute */
+    record->type = buffer[2];                      /* record type */
+    record->temperature = (int8_t)buffer[3];       /* temperature (signed) */
+
+    return 4; /* 4 bytes */
+}
+
 int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
                                     uint16_t minute,
                                     uint8_t motion_count,
@@ -1423,6 +1454,34 @@ int juxta_framfs_append_battery_record(struct juxta_framfs_context *ctx,
     if (ret < 0)
     {
         LOG_ERR("Failed to encode battery record: %d", ret);
+        return ret;
+    }
+
+    /* Append to active file */
+    return juxta_framfs_append(ctx, buffer, 4);
+}
+
+int juxta_framfs_append_temperature_record(struct juxta_framfs_context *ctx,
+                                           uint16_t minute,
+                                           int8_t temperature)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Prepare temperature record */
+    struct juxta_framfs_temperature_record record;
+    record.minute = minute;
+    record.type = JUXTA_FRAMFS_RECORD_TYPE_TEMPERATURE;
+    record.temperature = temperature;
+
+    /* Encode record */
+    uint8_t buffer[4];
+    int ret = juxta_framfs_encode_temperature_record(&record, buffer);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to encode temperature record: %d", ret);
         return ret;
     }
 
@@ -1633,6 +1692,26 @@ int juxta_framfs_append_battery_record_data(struct juxta_framfs_ctx *ctx,
 
     /* Append battery record to active file */
     return juxta_framfs_append_battery_record(ctx->fs_ctx, minute, level);
+}
+
+int juxta_framfs_append_temperature_record_data(struct juxta_framfs_ctx *ctx,
+                                                uint16_t minute,
+                                                int8_t temperature)
+{
+    if (!ctx)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Ensure correct file is active */
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Append temperature record to active file */
+    return juxta_framfs_append_temperature_record(ctx->fs_ctx, minute, temperature);
 }
 
 int juxta_framfs_get_current_filename(struct juxta_framfs_ctx *ctx,
