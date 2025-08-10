@@ -50,7 +50,9 @@ static struct lis2dh12_dev lis2dh_dev;
 static struct juxta_fram_device fram_dev; /* Global FRAM device for framfs */
 static struct k_work motion_work;
 static struct k_timer motion_timer;
+static struct k_work lowfreq_work;          // 10-minute low-frequency logging in thread context
 static bool motion_based_intervals = false; // Flag for extended intervals when no motion
+static bool hardware_verified = false;      // Set true after LIS2DH + FRAM verification
 
 // Watchdog timer
 static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
@@ -68,7 +70,7 @@ static void motion_work_handler(struct k_work *work)
 
         // Reset to default intervals when motion is detected
         motion_based_intervals = false;
-        LOG_INF("🏃 Motion interrupt cleared and processed (total count: %d) - resetting to default intervals", motion_count);
+        LOG_INF("🏃 Motion interrupt cleared (count: %d) - reset to default intervals", motion_count);
     }
 }
 
@@ -290,6 +292,7 @@ static int juxta_start_scanning(void);
 static int juxta_stop_scanning(void);
 static uint32_t get_rtc_timestamp(void);
 static int juxta_start_connectable_advertising(void);
+static void juxta_log_simple(uint8_t type);
 
 /* Dynamic advertising name setup */
 static void setup_dynamic_adv_name(void);
@@ -473,6 +476,17 @@ static uint32_t get_rtc_timestamp(void)
     return timestamp;
 }
 
+/* Definition: simple record logger (BOOT/CONNECTED/NO_ACTIVITY/ERROR) */
+static void juxta_log_simple(uint8_t type)
+{
+    if (!hardware_verified || !framfs_ctx.initialized)
+    {
+        return;
+    }
+    uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
+    (void)juxta_framfs_append_simple_record_data(&time_ctx, minute, type);
+}
+
 /* Wrapper to provide YYMMDD date for framfs time API using vitals */
 static uint32_t juxta_vitals_get_file_date_wrapper(void)
 {
@@ -581,6 +595,33 @@ static void state_work_handler(struct k_work *work)
     uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
     if (current_minute != last_logged_minute)
     {
+        /* Minimal minute logging to FRAMFS (devices + motion or no-activity) */
+        if (hardware_verified && framfs_ctx.initialized)
+        {
+            if (juxta_scan_count > 0)
+            {
+                /* Convert scan table to FRAMFS packed format */
+                uint8_t mac_ids[MAX_JUXTA_DEVICES][3];
+                int8_t rssi_values[MAX_JUXTA_DEVICES];
+                uint8_t device_count = MIN(juxta_scan_count, (uint8_t)MAX_JUXTA_DEVICES);
+                for (uint8_t i = 0; i < device_count; i++)
+                {
+                    mac_ids[i][0] = (juxta_scan_table[i].mac_id >> 16) & 0xFF;
+                    mac_ids[i][1] = (juxta_scan_table[i].mac_id >> 8) & 0xFF;
+                    mac_ids[i][2] = juxta_scan_table[i].mac_id & 0xFF;
+                    rssi_values[i] = juxta_scan_table[i].rssi;
+                }
+                (void)juxta_framfs_append_device_scan_data(&time_ctx, current_minute, motion_count,
+                                                           mac_ids, rssi_values, device_count);
+            }
+            else
+            {
+                (void)juxta_framfs_append_simple_record_data(&time_ctx, current_minute,
+                                                             JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY);
+            }
+        }
+
+        /* Print and clear after logging to preserve contents */
         juxta_scan_table_print_and_clear();
 
         // Report and clear motion count, adjust intervals based on activity
@@ -623,7 +664,7 @@ static void state_work_handler(struct k_work *work)
             {
                 ble_state = BLE_STATE_WAITING;
                 last_adv_timestamp = current_time;
-                LOG_INF("Gateway advertising burst completed at timestamp %u", last_adv_timestamp);
+                // LOG_INF("Gateway advertising burst completed at timestamp %u", last_adv_timestamp);
                 k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
             }
             else
@@ -640,7 +681,7 @@ static void state_work_handler(struct k_work *work)
             {
                 ble_state = BLE_STATE_WAITING;
                 last_scan_timestamp = current_time;
-                LOG_INF("Scan burst completed at timestamp %u", last_scan_timestamp);
+                // LOG_INF("Scan burst completed at timestamp %u", last_scan_timestamp);
                 k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
             }
             else
@@ -656,7 +697,7 @@ static void state_work_handler(struct k_work *work)
             {
                 ble_state = BLE_STATE_WAITING;
                 last_adv_timestamp = current_time;
-                LOG_INF("Advertising burst completed at timestamp %u", last_adv_timestamp);
+                // LOG_INF("Advertising burst completed at timestamp %u", last_adv_timestamp);
                 k_timer_start(&state_timer, K_MSEC(BLE_MIN_INTER_BURST_DELAY_MS), K_NO_WAIT);
             }
             else
@@ -792,7 +833,7 @@ static int juxta_start_advertising(void)
         return ret;
     }
 
-    LOG_INF("📢 BLE advertising started as '%s' (non-connectable burst)", adv_name);
+    LOG_INF("BLE advertising started as '%s' (non-connectable burst)", adv_name);
     return 0;
 }
 
@@ -804,7 +845,6 @@ static int juxta_stop_advertising(void)
         return -1;
     }
 
-    LOG_INF("📡 Stopping BLE advertising...");
     int ret = bt_le_adv_stop();
     if (ret < 0)
     {
@@ -813,7 +853,6 @@ static int juxta_stop_advertising(void)
     }
 
     ble_state = BLE_STATE_WAITING;
-    LOG_INF("✅ Advertising stopped successfully");
     return 0;
 }
 
@@ -876,7 +915,7 @@ static int test_rtc_functionality(void)
 
     LOG_INF("🧪 Testing RTC functionality...");
 
-    ret = juxta_vitals_init(&vitals_ctx, false);
+    ret = juxta_vitals_init(&vitals_ctx, true); // Enable battery monitoring
     if (ret < 0)
     {
         LOG_ERR("Failed to initialize vitals library: %d", ret);
@@ -931,6 +970,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     /* Notify BLE service of connection */
     juxta_ble_connection_established(conn);
+
+    /* Log CONNECTED event */
+    juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_CONNECTED);
 
     LOG_INF("📤 Hublink gateway connected - ready for data exchange");
     LOG_INF("⏸️ State machine paused - will resume after disconnection");
@@ -1053,14 +1095,30 @@ static void wait_for_magnet_sensor(void)
     blink_led_three_times();
 }
 
+// Low-frequency work handler (runs in system workqueue context)
+static void lowfreq_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (!hardware_verified || !framfs_ctx.initialized)
+    {
+        return;
+    }
+
+    /* Update vitals and log battery every 10 minutes */
+    (void)juxta_vitals_update(&vitals_ctx);
+    uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
+    uint8_t battery_level = 0;
+    if (juxta_vitals_get_validated_battery_level(&vitals_ctx, &battery_level) == 0)
+    {
+        (void)juxta_framfs_append_battery_record_data(&time_ctx, minute, battery_level);
+    }
+}
+
 static void ten_minute_timeout(struct k_timer *timer)
 {
-    printk("🕐 10-minute timer: clearing gateway advertise flag and logging low-frequency data\n");
     doGatewayAdvertise = false;
-
-    // TODO: Add low-frequency data logging here (battery, temperature, etc.)
-    // For now, just log that this function is working
-    printk("📊 Low-frequency data logging placeholder (battery, temperature, etc.)\n");
+    /* Defer work to thread context to avoid ISR violations */
+    k_work_submit(&lowfreq_work);
 }
 
 int main(void)
@@ -1171,21 +1229,26 @@ int main(void)
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
 
+    /* Quick vitals sanity read in thread context */
+    (void)juxta_vitals_update(&vitals_ctx);
+    uint8_t bl = juxta_vitals_get_battery_percent(&vitals_ctx);
+    int8_t it = juxta_vitals_get_temperature(&vitals_ctx);
+    LOG_DBG("Vitals init: battery=%u%%, temp=%dC", bl, it);
+
     // Initialize motion processing work and timer
     k_work_init(&motion_work, motion_work_handler);
     k_timer_init(&motion_timer, motion_timer_callback, NULL);
 
     // Initialize 10-minute timer
     k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
-    k_timer_start(&ten_minute_timer, K_MINUTES(10), K_MINUTES(10)); // every 10 minutes
+    k_work_init(&lowfreq_work, lowfreq_work_handler);
+    /* TEMP: speed up development by firing every 2 minutes (REVERT to 10 minutes later) */
+    k_timer_start(&ten_minute_timer, K_MINUTES(2), K_MINUTES(2));
 
     uint32_t now = get_rtc_timestamp();
     last_adv_timestamp = now - get_adv_interval();
     last_scan_timestamp = now - get_scan_interval();
     last_logged_minute = 0xFFFF; // Initialize last_logged_minute
-
-    k_work_submit(&state_work);
-    k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
 
     // Quick hardware verification
     LOG_INF("🔧 Hardware verification...");
@@ -1206,6 +1269,14 @@ int main(void)
     }
 
     LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH)");
+    hardware_verified = true;
+
+    /* Log BOOT event now that hardware is verified */
+    juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_BOOT);
+
+    /* Start state machine after hardware is verified to avoid SPI contention */
+    k_work_submit(&state_work);
+    k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
 
     LOG_INF("✅ JUXTA BLE Application started successfully");
 
