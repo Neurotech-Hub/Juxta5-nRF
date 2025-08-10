@@ -270,6 +270,7 @@ static struct k_timer state_timer;
 #define SCAN_BURST_DURATION_MS 500
 #define ADV_INTERVAL_SECONDS 5
 #define SCAN_INTERVAL_SECONDS 20
+#define GATEWAY_ADV_TIMEOUT_SECONDS 30
 
 /* Dynamic advertising name based on MAC address */
 static char adv_name[12] = "JX_000000"; /* Initialized placeholder */
@@ -680,17 +681,20 @@ static void state_work_handler(struct k_work *work)
         if (adv_due && ble_state == BLE_STATE_IDLE && doGatewayAdvertise)
         {
             ble_state = BLE_STATE_GATEWAY_ADVERTISING;
+            // Clear the gateway advertise flag so we don't advertise again
+            doGatewayAdvertise = false;
             int err = juxta_start_connectable_advertising();
             if (err == 0)
             {
-                LOG_INF("Starting gateway advertising burst (30s connectable)");
-                k_timer_start(&state_timer, K_SECONDS(30), K_NO_WAIT); // Changed from 10s to 30s
+                LOG_INF("Starting gateway advertising burst (%ds connectable)", GATEWAY_ADV_TIMEOUT_SECONDS);
+                k_timer_start(&state_timer, K_SECONDS(GATEWAY_ADV_TIMEOUT_SECONDS), K_NO_WAIT);
             }
             else
             {
                 ble_state = BLE_STATE_IDLE;
-                LOG_ERR("Gateway advertising failed, retrying in 1 second");
-                k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
+                LOG_ERR("Gateway advertising failed, continuing with normal operation");
+                // Don't retry - move on to normal state machine operation
+                k_work_submit(&state_work);
             }
             return;
         }
@@ -919,9 +923,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
     juxta_stop_scanning();
     in_adv_burst = false;
     in_scan_burst = false;
-
-    // Clear the gateway advertise flag since we successfully connected
-    doGatewayAdvertise = false;
 
     /* Notify BLE service of connection */
     juxta_ble_connection_established(conn);
