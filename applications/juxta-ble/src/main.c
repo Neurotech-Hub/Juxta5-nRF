@@ -47,6 +47,7 @@ static bool ble_connected = false; // Track connection state
 static uint8_t motion_count = 0;
 static volatile bool lis2dh_interrupt_pending = false;
 static struct lis2dh12_dev lis2dh_dev;
+static struct juxta_fram_device fram_dev; /* Global FRAM device for framfs */
 static struct k_work motion_work;
 static struct k_timer motion_timer;
 static bool motion_based_intervals = false; // Flag for extended intervals when no motion
@@ -233,6 +234,7 @@ static void test_fram_functionality(void)
 
 static struct juxta_vitals_ctx vitals_ctx;
 static struct juxta_framfs_context framfs_ctx;
+static struct juxta_framfs_ctx time_ctx; /* Time-aware file system context */
 
 static bool in_adv_burst = false;
 static bool in_scan_burst = false;
@@ -469,6 +471,12 @@ static uint32_t get_rtc_timestamp(void)
     uint32_t timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
     LOG_DBG("Timestamp: %u", timestamp);
     return timestamp;
+}
+
+/* Wrapper to provide YYMMDD date for framfs time API using vitals */
+static uint32_t juxta_vitals_get_file_date_wrapper(void)
+{
+    return juxta_vitals_get_file_date(&vitals_ctx);
 }
 
 static void setup_dynamic_adv_name(void)
@@ -1107,29 +1115,37 @@ int main(void)
     // Small delay to allow RTT buffer to catch up
     k_sleep(K_MSEC(50));
 
-    /* Initialize FRAM device first */
+    /* Initialize FRAM device and framfs */
     LOG_INF("📁 Initializing FRAM device...");
-    /* TODO: Phase IV - Proper FRAM initialization with device tree */
-    /* For now, skip FRAM init and let framfs handle it */
-    LOG_INF("⚠️ FRAM initialization skipped - framfs will handle it");
+    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
+    if (!spi_dev || !device_is_ready(spi_dev))
+    {
+        LOG_ERR("SPI0 device not ready");
+        return -ENODEV;
+    }
 
-    /* Initialize framfs for user settings */
-    LOG_INF("📁 Initializing framfs for user settings...");
-    /* TODO: Phase IV - Proper FRAM initialization needed for framfs */
-    /* For now, skip framfs initialization */
-    LOG_INF("⚠️ Framfs initialization skipped - FRAM device not initialized");
+    static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
+    if (!device_is_ready(fram_cs.port))
+    {
+        LOG_ERR("FRAM CS not ready");
+        return -ENODEV;
+    }
 
-    /* Initialize framfs context manually for BLE service */
-    memset(&framfs_ctx, 0, sizeof(framfs_ctx));
-    framfs_ctx.initialized = true; /* Mark as initialized for BLE service */
+    ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
+    if (ret < 0)
+    {
+        LOG_ERR("FRAM init failed: %d", ret);
+        return ret;
+    }
 
-    /* Set default user settings */
-    framfs_ctx.user_settings.adv_interval = 5;
-    framfs_ctx.user_settings.scan_interval = 15;
-    strcpy(framfs_ctx.user_settings.subject_id, "");
-    strcpy(framfs_ctx.user_settings.upload_path, "/TEST");
-
-    LOG_INF("✅ Framfs context initialized with defaults");
+    LOG_INF("📁 Initializing framfs...");
+    ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
+    if (ret < 0)
+    {
+        LOG_ERR("Framfs init failed: %d", ret);
+        return ret;
+    }
+    LOG_INF("✅ Framfs initialized");
 
     /* Link framfs context to BLE service */
     juxta_ble_set_framfs_context(&framfs_ctx);
@@ -1140,6 +1156,16 @@ int main(void)
         LOG_ERR("RTC test failed (err %d)", ret);
         return ret;
     }
+
+    /* Initialize time-aware file system after vitals are ready */
+    LOG_INF("📁 Initializing time-aware file system...");
+    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
+    if (ret < 0)
+    {
+        LOG_ERR("Time-aware framfs init failed: %d", ret);
+        return ret;
+    }
+    LOG_INF("✅ Time-aware file system initialized");
 
     init_randomization();
     k_work_init(&state_work, state_work_handler);
