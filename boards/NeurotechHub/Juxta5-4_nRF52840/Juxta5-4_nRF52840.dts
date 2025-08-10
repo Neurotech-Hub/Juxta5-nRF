@@ -63,6 +63,10 @@
 	status = "okay";
 };
 
+&wdt0 {
+	status = "okay";
+};
+
 &temp {
 	status = "okay";
 	label = "TEMP_0";

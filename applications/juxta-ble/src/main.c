@@ -16,6 +16,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/random/random.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/watchdog.h>
 #include "juxta_vitals_nrf52/vitals.h"
 #include "juxta_framfs/framfs.h"
 #include "juxta_fram/fram.h"
@@ -49,6 +50,10 @@ static struct lis2dh12_dev lis2dh_dev;
 static struct k_work motion_work;
 static struct k_timer motion_timer;
 static bool motion_based_intervals = false; // Flag for extended intervals when no motion
+
+// Watchdog timer
+static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
+static int wdt_channel_id;
 
 // Motion work handler - runs in work queue context (safe for longer operations)
 static void motion_work_handler(struct k_work *work)
@@ -271,6 +276,7 @@ static struct k_timer state_timer;
 #define ADV_INTERVAL_SECONDS 5
 #define SCAN_INTERVAL_SECONDS 20
 #define GATEWAY_ADV_TIMEOUT_SECONDS 30
+#define WDT_TIMEOUT_MS 30000
 
 /* Dynamic advertising name based on MAC address */
 static char adv_name[12] = "JX_000000"; /* Initialized placeholder */
@@ -1186,6 +1192,38 @@ int main(void)
 
     LOG_INF("✅ JUXTA BLE Application started successfully");
 
+    // Initialize watchdog timer
+    if (!device_is_ready(wdt))
+    {
+        LOG_ERR("Watchdog device not ready");
+        return -ENODEV;
+    }
+
+    struct wdt_timeout_cfg wdt_cfg = {
+        .window = {
+            .min = 0,
+            .max = WDT_TIMEOUT_MS,
+        },
+        .callback = NULL,
+        .flags = WDT_FLAG_RESET_SOC,
+    };
+
+    wdt_channel_id = wdt_install_timeout(wdt, &wdt_cfg);
+    if (wdt_channel_id < 0)
+    {
+        LOG_ERR("Failed to install watchdog timeout: %d", wdt_channel_id);
+        return wdt_channel_id;
+    }
+
+    int err = wdt_setup(wdt, 0);
+    if (err < 0)
+    {
+        LOG_ERR("Failed to setup watchdog: %d", err);
+        return err;
+    }
+
+    LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
+
     uint32_t heartbeat_counter = 0;
     while (1)
     {
@@ -1193,6 +1231,13 @@ int main(void)
         heartbeat_counter++;
         LOG_INF("System heartbeat: %u (uptime: %u seconds)",
                 heartbeat_counter, heartbeat_counter * 10);
+
+        // Feed the watchdog timer
+        err = wdt_feed(wdt, wdt_channel_id);
+        if (err < 0)
+        {
+            LOG_ERR("Failed to feed watchdog: %d", err);
+        }
     }
 
     return 0;
