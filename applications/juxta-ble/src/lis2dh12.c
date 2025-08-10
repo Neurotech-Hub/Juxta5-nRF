@@ -274,6 +274,7 @@ int lis2dh12_read_accel(struct lis2dh12_dev *dev, float *x, float *y, float *z)
  * For high resolution (10-bit) temperature reading, use lis2dh12_read_temperature_highres()
  * which requires normal mode (LPen=0) and reads 2 bytes for ±0.25°C precision.
  */
+
 int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperature)
 {
     if (!dev || !dev->initialized || !temperature)
@@ -282,18 +283,34 @@ int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperatu
         return -EINVAL;
     }
 
-    /* Read temperature data from OUT_TEMP_H register (0x0D) - 8-bit only */
-    uint8_t temp_data;
-    int ret = lis2dh12_platform_read(NULL, 0x0D, &temp_data, 1);
+    /* Read both temperature registers */
+    uint8_t temp_l, temp_h;
+    int ret = lis2dh12_platform_read(NULL, 0x0C, &temp_l, 1); // OUT_TEMP_L
     if (ret < 0)
     {
-        LOG_ERR("Failed to read temperature data: %d", ret);
+        LOG_ERR("Failed to read OUT_TEMP_L: %d", ret);
+        return ret;
+    }
+    ret = lis2dh12_platform_read(NULL, 0x0D, &temp_h, 1); // OUT_TEMP_H
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read OUT_TEMP_H: %d", ret);
         return ret;
     }
 
-    /* Convert to signed 8-bit value (two's complement) */
-    /* 1 LSB ≈ 1.0°C for 8-bit resolution in low power mode */
-    *temperature = (int8_t)temp_data;
+    /* Combine into 16-bit LSB value */
+    int16_t lsb = ((int16_t)temp_h << 8) | temp_l;
+
+    /* Debug output */
+    LOG_INF("TEMP DEBUG: OUT_TEMP_L=0x%02X, OUT_TEMP_H=0x%02X, LSB=0x%04X", temp_l, temp_h, lsb);
+
+    /* Convert using low-power mode formula */
+    float_t temp_celsius = lis2dh12_from_lsb_lp_to_celsius(lsb);
+
+    /* Convert to 8-bit signed for compatibility */
+    *temperature = (int8_t)temp_celsius;
+
+    LOG_INF("TEMP CONVERSION: LSB=%d, Celsius=%.1f°C, 8bit=%d°C", lsb, (double)temp_celsius, *temperature);
 
     return 0;
 }
