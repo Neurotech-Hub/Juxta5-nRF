@@ -50,9 +50,9 @@ static struct lis2dh12_dev lis2dh_dev;
 static struct juxta_fram_device fram_dev; /* Global FRAM device for framfs */
 static struct k_work motion_work;
 static struct k_timer motion_timer;
-static struct k_work lowfreq_work;          // 10-minute low-frequency logging in thread context
 static bool motion_based_intervals = false; // Flag for extended intervals when no motion
-static bool hardware_verified = false;      // Set true after LIS2DH + FRAM verification
+static bool hardware_verified = false;
+static bool watchdog_reset_detected = false; // Set true after LIS2DH + FRAM verification
 
 // Watchdog timer
 static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
@@ -598,9 +598,24 @@ static void state_work_handler(struct k_work *work)
     uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
     if (current_minute != last_logged_minute)
     {
-        /* Minimal minute logging to FRAMFS (devices + motion or no-activity) */
+        /* Consolidated minute logging to FRAMFS (devices + motion + battery + temperature) */
         if (hardware_verified && framfs_ctx.initialized && !ble_connected)
         {
+            /* Get battery level */
+            uint8_t battery_level = 0;
+            (void)juxta_vitals_update(&vitals_ctx);
+            if (juxta_vitals_get_validated_battery_level(&vitals_ctx, &battery_level) != 0)
+            {
+                battery_level = 0; // Default if read fails
+            }
+
+            /* Get temperature from LIS2DH */
+            int8_t temperature = 0;
+            if (lis2dh12_read_temperature_lowres(&lis2dh_dev, &temperature) != 0)
+            {
+                temperature = 0; // Default if read fails
+            }
+
             if (juxta_scan_count > 0)
             {
                 /* Convert scan table to FRAMFS packed format */
@@ -615,19 +630,24 @@ static void state_work_handler(struct k_work *work)
                     rssi_values[i] = juxta_scan_table[i].rssi;
                 }
                 int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, motion_count,
+                                                               battery_level, temperature,
                                                                mac_ids, rssi_values, device_count);
                 if (ret == 0)
                 {
-                    LOG_INF("📊 FRAMFS minute record: devices=%d, motion=%d", device_count, motion_count);
+                    LOG_INF("📊 FRAMFS minute record: devices=%d, motion=%d, battery=%d%%, temp=%d°C",
+                            device_count, motion_count, battery_level, temperature);
                 }
             }
             else
             {
-                int ret = juxta_framfs_append_simple_record_data(&time_ctx, current_minute,
-                                                                 JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY);
+                /* No devices found - use NO_ACTIVITY type but still include battery/temperature */
+                int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, motion_count,
+                                                               battery_level, temperature,
+                                                               NULL, NULL, 0);
                 if (ret == 0)
                 {
-                    LOG_INF("📊 FRAMFS minute record: no activity");
+                    LOG_INF("📊 FRAMFS minute record: no activity, battery=%d%%, temp=%d°C",
+                            battery_level, temperature);
                 }
             }
         }
@@ -1110,63 +1130,9 @@ static void wait_for_magnet_sensor(void)
     blink_led_three_times();
 }
 
-// Low-frequency work handler (runs in system workqueue context)
-static void lowfreq_work_handler(struct k_work *work)
-{
-    ARG_UNUSED(work);
-    if (!hardware_verified || !framfs_ctx.initialized)
-    {
-        return;
-    }
-
-    /* Update vitals and log battery/temperature every 2 minutes (dev) */
-    (void)juxta_vitals_update(&vitals_ctx);
-    uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
-    uint8_t battery_level = 0;
-    if (juxta_vitals_get_validated_battery_level(&vitals_ctx, &battery_level) == 0)
-    {
-        if (!ble_connected)
-        {
-            int ret = juxta_framfs_append_battery_record_data(&time_ctx, minute, battery_level);
-            if (ret == 0)
-            {
-                LOG_INF("📊 FRAMFS 2-min record: battery=%d%%", battery_level);
-            }
-        }
-        else
-        {
-            LOG_DBG("⏸️ FRAMFS battery logging paused during BLE connection (battery=%d%%)", battery_level);
-        }
-    }
-
-    /* Read and log temperature from LIS2DH */
-    int8_t temperature = 0;
-    if (lis2dh12_read_temperature_lowres(&lis2dh_dev, &temperature) == 0)
-    {
-        if (!ble_connected)
-        {
-            int ret = juxta_framfs_append_temperature_record_data(&time_ctx, minute, temperature);
-            if (ret == 0)
-            {
-                LOG_INF("📊 FRAMFS 2-min record: temperature=%d°C", temperature);
-            }
-        }
-        else
-        {
-            LOG_DBG("⏸️ FRAMFS temperature logging paused during BLE connection (temperature=%d°C)", temperature);
-        }
-    }
-    else
-    {
-        LOG_WRN("Failed to read temperature from LIS2DH");
-    }
-}
-
 static void ten_minute_timeout(struct k_timer *timer)
 {
     doGatewayAdvertise = false;
-    /* Defer work to thread context to avoid ISR violations */
-    k_work_submit(&lowfreq_work);
 }
 
 int main(void)
@@ -1174,6 +1140,21 @@ int main(void)
     int ret;
 
     LOG_INF("🚀 Starting JUXTA BLE Application");
+
+    /* Check for watchdog reset */
+    uint32_t reset_reason = NRF_POWER->RESETREAS;
+    if (reset_reason & POWER_RESETREAS_DOG_Msk)
+    {
+        watchdog_reset_detected = true;
+        LOG_INF("🔍 Watchdog reset detected (RESETREAS: 0x%08X)", reset_reason);
+    }
+    else
+    {
+        LOG_INF("🔍 Normal boot (RESETREAS: 0x%08X)", reset_reason);
+    }
+
+    /* Clear reset reason register */
+    NRF_POWER->RESETREAS = reset_reason;
 
     // Wait for magnet sensor activation before starting BLE
     // wait_for_magnet_sensor(); // COMMENTED OUT FOR SPI TESTING
@@ -1279,11 +1260,8 @@ int main(void)
     k_work_init(&motion_work, motion_work_handler);
     k_timer_init(&motion_timer, motion_timer_callback, NULL);
 
-    // Initialize 10-minute timer
+    // Initialize 10-minute timer (now only for gateway advertising timeout)
     k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
-    k_work_init(&lowfreq_work, lowfreq_work_handler);
-    /* TEMP: speed up development by firing every 2 minutes (REVERT to 10 minutes later) */
-    k_timer_start(&ten_minute_timer, K_MINUTES(2), K_MINUTES(2));
 
     uint32_t now = get_rtc_timestamp();
     last_adv_timestamp = now - get_adv_interval();

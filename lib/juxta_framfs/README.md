@@ -1,127 +1,105 @@
 # JUXTA FRAM File System Library
 
-A lightweight, append-only file system for FRAM storage on embedded systems. Built on top of the `juxta_fram` library.
+A lightweight, append-only file system for FRAM storage with automatic daily file management and consolidated data logging.
 
-## Quick Start
+## Purpose
 
+This library provides persistent storage for time-series data with automatic daily file creation, MAC address indexing, and consolidated record formats that include device scan data, motion events, battery levels, and temperature readings in a single efficient structure.
+
+## Board Overview
+
+The library is designed for nRF52-based devices with FRAM storage, providing efficient data logging for IoT applications that need to track device interactions, environmental conditions, and system vitals over extended periods.
+
+## Main Program Flow
+
+The library operates on a minute-by-minute cycle:
+
+1. **Time Management**: Uses RTC timestamp to determine current minute of day (0-1439)
+2. **File Management**: Automatically creates new daily files (YYMMDD format) when date changes
+3. **Data Consolidation**: Every minute, collects all sensor data into a single record:
+   - Device scan results (MAC addresses, RSSI values)
+   - Motion event count
+   - Battery level reading
+   - Temperature reading
+4. **Storage**: Appends consolidated record to current daily file
+5. **MAC Indexing**: Maintains global MAC address table to minimize storage overhead
+
+## Pin Assignments
+
+| Pin | Function | Direction | Notes |
+|-----|----------|-----------|-------|
+| P0.20 | FRAM CS | Output | SPI0 CS0 |
+| P0.21 | LIS2DH CS | Output | SPI0 CS1 |
+| P0.22 | LIS2DH INT | Input | Motion detection interrupt |
+| P0.24 | SPI0 SCK | Output | SPI clock |
+| P0.25 | SPI0 MOSI | Output | SPI data out |
+| P0.26 | SPI0 MISO | Input | SPI data in |
+
+## Essential Usage Examples
+
+### Basic Initialization
 ```c
-/* Initialize file system with automatic time management */
 struct juxta_framfs_context fs_ctx;
 struct juxta_framfs_ctx ctx;
 
 juxta_framfs_init(&fs_ctx, &fram_dev);
 juxta_framfs_init_with_time(&ctx, &fs_ctx, get_rtc_date, true);
+```
 
-/* Write data - automatically goes to correct daily file */
-juxta_framfs_append_data(&ctx, sensor_data, sizeof(sensor_data));
+### Minute-by-Minute Data Logging
+```c
+/* Every minute, log consolidated data */
+uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
+uint8_t battery_level = juxta_vitals_get_battery_percent(&vitals_ctx);
+int8_t temperature = juxta_vitals_get_temperature(&vitals_ctx);
 
-/* Record types with automatic file management */
-juxta_framfs_append_device_scan_data(&ctx, minute, motion, mac_ids, rssi, count);
+if (device_count > 0) {
+    /* Log device scan with sensor data */
+    juxta_framfs_append_device_scan_data(&ctx, minute, motion_count,
+                                         battery_level, temperature,
+                                         mac_ids, rssi_values, device_count);
+} else {
+    /* Log no activity with sensor data */
+    juxta_framfs_append_device_scan_data(&ctx, minute, motion_count,
+                                         battery_level, temperature,
+                                         NULL, NULL, 0);
+}
+```
+
+### System Event Logging
+```c
+/* Log system events */
 juxta_framfs_append_simple_record_data(&ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_BOOT);
-juxta_framfs_append_battery_record_data(&ctx, minute, battery_level);
-juxta_framfs_append_temperature_record_data(&ctx, minute, temperature);
+juxta_framfs_append_simple_record_data(&ctx, minute, JUXTA_FRAMFS_RECORD_TYPE_CONNECTED);
 ```
 
-## API Overview
-
-### Primary API (Recommended)
-- **`juxta_framfs_init_with_time()`** - Initialize with automatic daily file management
-- **`juxta_framfs_append_data()`** - Write raw data to current daily file
-- **`juxta_framfs_append_device_scan_data()`** - Log device scan with MAC indexing
-- **`juxta_framfs_append_simple_record_data()`** - Log system events (boot, connected, etc.)
-- **`juxta_framfs_append_battery_record_data()`** - Log battery level
-- **`juxta_framfs_append_temperature_record_data()`** - Log temperature
-
-### User Settings API
-- **`juxta_framfs_get_adv_interval()`** / **`juxta_framfs_set_adv_interval()`** - Get/set advertising interval (0-255)
-- **`juxta_framfs_get_scan_interval()`** / **`juxta_framfs_set_scan_interval()`** - Get/set scanning interval (0-255)
-- **`juxta_framfs_get_subject_id()`** / **`juxta_framfs_set_subject_id()`** - Get/set subject ID (up to 16 chars)
-- **`juxta_framfs_get_upload_path()`** / **`juxta_framfs_set_upload_path()`** - Get/set upload path (up to 16 chars)
-- **`juxta_framfs_get_user_settings()`** / **`juxta_framfs_set_user_settings()`** - Get/set all settings at once
-- **`juxta_framfs_clear_user_settings()`** - Reset settings to defaults
-
-### Low-Level API (Advanced)
-- **`juxta_framfs_create_active()`** - Create new file manually
-- **`juxta_framfs_append()`** - Write to active file
-- **`juxta_framfs_seal_active()`** - Mark file as read-only
-- **`juxta_framfs_read()`** - Read from file by name
-
-## Filename Format
-
-Files use **YYMMDD** format:
-- `240120` for January 20, 2024
-- `241231` for December 31, 2024
-
-## Record Types
-
+### User Settings Management
 ```c
-/* System events */
-#define JUXTA_FRAMFS_RECORD_TYPE_BOOT 0xF1
-#define JUXTA_FRAMFS_RECORD_TYPE_CONNECTED 0xF2
-#define JUXTA_FRAMFS_RECORD_TYPE_SETTINGS 0xF3
-#define JUXTA_FRAMFS_RECORD_TYPE_BATTERY 0xF4
-#define JUXTA_FRAMFS_RECORD_TYPE_TEMPERATURE 0xF6
-#define JUXTA_FRAMFS_RECORD_TYPE_ERROR 0xF5
-
-/* Device scans (1-128 devices) */
-#define JUXTA_FRAMFS_RECORD_TYPE_DEVICE_MIN 0x01
-#define JUXTA_FRAMFS_RECORD_TYPE_DEVICE_MAX 0x80
-```
-
-## MAC ID Format
-
-Uses 3-byte packed MAC IDs to save memory:
-```c
-uint8_t mac_id[3] = {0x55, 0x66, 0x77}; // Last 3 bytes of MAC address
-```
-
-## Temperature Records
-
-Temperature records store 8-bit signed temperature values in degrees Celsius:
-```c
-int8_t temperature = 23; // 23°C
-int8_t temperature = -5; // -5°C
-```
-
-## User Settings
-
-Persistent user configuration stored in FRAM:
-```c
-/* Get/set individual settings */
+/* Get/set advertising interval */
 uint8_t adv_interval;
 juxta_framfs_get_adv_interval(&ctx, &adv_interval);
 juxta_framfs_set_adv_interval(&ctx, 5);
 
+/* Get/set subject ID */
 char subject_id[16];
 juxta_framfs_get_subject_id(&ctx, subject_id);
 juxta_framfs_set_subject_id(&ctx, "vole001");
-
-/* Get/set all settings at once */
-struct juxta_framfs_user_settings settings;
-juxta_framfs_get_user_settings(&ctx, &settings);
-settings.adv_interval = 5;
-settings.scan_interval = 15;
-strcpy(settings.subject_id, "vole001");
-strcpy(settings.upload_path, "/TEST");
-juxta_framfs_set_user_settings(&ctx, &settings);
 ```
 
-**Default Values:**
-- `adv_interval`: 5 (advertising every 5 seconds)
-- `scan_interval`: 15 (scanning every 15 seconds)
-- `subject_id`: "" (empty)
-- `upload_path`: "/TEST"
+## Record Structure
 
-## Error Codes
+The consolidated record format includes all sensor data:
 
 ```c
-#define JUXTA_FRAMFS_OK 0
-#define JUXTA_FRAMFS_ERROR -1
-#define JUXTA_FRAMFS_ERROR_NOT_FOUND -4
-#define JUXTA_FRAMFS_ERROR_FULL -5
-#define JUXTA_FRAMFS_ERROR_EXISTS -6
-#define JUXTA_FRAMFS_ERROR_NO_ACTIVE -7
-#define JUXTA_FRAMFS_ERROR_SIZE -9
+struct juxta_framfs_device_record {
+    uint16_t minute;          /* 0-1439 for full day */
+    uint8_t type;             /* Number of devices (0-128) */
+    uint8_t motion_count;     /* Motion events this minute */
+    uint8_t battery_level;    /* Battery level (0-100) */
+    int8_t temperature;       /* Temperature in degrees Celsius */
+    uint8_t mac_indices[128]; /* MAC address indices (0-127) */
+    int8_t rssi_values[128];  /* RSSI values for each device */
+} __packed;
 ```
 
 ## Memory Layout
@@ -132,21 +110,4 @@ juxta_framfs_set_user_settings(&ctx, &settings);
 0x050D: Global MAC Index (772 bytes)
 0x07C9: User Settings (36 bytes)
 0x07ED: File data starts here
-```
-
-## Performance
-
-- **Write Speed**: 200-250 KB/s
-- **Read Speed**: 250-300 KB/s
-- **Metadata Overhead**: 1.1% of FRAM
-- **File Limit**: 64 files maximum
-- **Filename Length**: 8 characters maximum
-- **User Settings**: 36 bytes persistent storage
-
-## Thread Safety
-
-The library is **not thread-safe**. Use appropriate synchronization if accessing from multiple threads.
-
-## License
-
-Apache-2.0 License - see LICENSE file for details. 
+``` 

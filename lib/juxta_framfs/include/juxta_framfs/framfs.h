@@ -64,8 +64,6 @@ extern "C"
 #define JUXTA_FRAMFS_RECORD_TYPE_BOOT 0xF1
 #define JUXTA_FRAMFS_RECORD_TYPE_CONNECTED 0xF2
 #define JUXTA_FRAMFS_RECORD_TYPE_SETTINGS 0xF3
-#define JUXTA_FRAMFS_RECORD_TYPE_BATTERY 0xF4
-#define JUXTA_FRAMFS_RECORD_TYPE_TEMPERATURE 0xF6
 #define JUXTA_FRAMFS_RECORD_TYPE_ERROR 0xF5
 
 /* Error types */
@@ -152,14 +150,16 @@ extern "C"
     /**
      * @brief Device scan record structure (variable length)
      *
-     * Used for type 0x01-0x80 records (1-128 devices)
-     * Total size: 4 + (2 * device_count) bytes
+     * Used for type 0x00-0x80 records (0-128 devices)
+     * Total size: 6 + (2 * device_count) bytes
      */
     struct juxta_framfs_device_record
     {
         uint16_t minute;          /* 0-1439 for full day */
-        uint8_t type;             /* Number of devices (1-128) */
+        uint8_t type;             /* Number of devices (0-128) */
         uint8_t motion_count;     /* Motion events this minute */
+        uint8_t battery_level;    /* Battery level (0-100) */
+        int8_t temperature;       /* Temperature in degrees Celsius */
         uint8_t mac_indices[128]; /* MAC address indices (0-127) */
         int8_t rssi_values[128];  /* RSSI values for each device */
     } __packed;
@@ -173,30 +173,6 @@ extern "C"
     {
         uint16_t minute; /* 0-1439 for full day */
         uint8_t type;    /* Record type */
-    } __packed;
-
-    /**
-     * @brief Battery record structure (4 bytes)
-     *
-     * Used for type 0xF4 records
-     */
-    struct juxta_framfs_battery_record
-    {
-        uint16_t minute; /* 0-1439 for full day */
-        uint8_t type;    /* Record type (0xF4) */
-        uint8_t level;   /* Battery level (0-100) */
-    } __packed;
-
-    /**
-     * @brief Temperature record structure (4 bytes)
-     *
-     * Used for type 0xF6 records
-     */
-    struct juxta_framfs_temperature_record
-    {
-        uint16_t minute;    /* 0-1439 for full day */
-        uint8_t type;       /* Record type (0xF6) */
-        int8_t temperature; /* Temperature in degrees Celsius */
     } __packed;
 
     /**
@@ -577,59 +553,23 @@ extern "C"
                                           struct juxta_framfs_simple_record *record);
 
     /**
-     * @brief Encode battery record into buffer
-     *
-     * @param record Battery record structure to encode
-     * @param buffer Buffer to store encoded data (4 bytes)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_encode_battery_record(const struct juxta_framfs_battery_record *record,
-                                           uint8_t *buffer);
-
-    /**
-     * @brief Decode battery record from buffer
-     *
-     * @param buffer Buffer containing encoded data (4 bytes)
-     * @param record Battery record structure to populate
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_decode_battery_record(const uint8_t *buffer,
-                                           struct juxta_framfs_battery_record *record);
-
-    /**
-     * @brief Encode temperature record into buffer
-     *
-     * @param record Temperature record structure to encode
-     * @param buffer Buffer to store encoded data (4 bytes)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_encode_temperature_record(const struct juxta_framfs_temperature_record *record,
-                                               uint8_t *buffer);
-
-    /**
-     * @brief Decode temperature record from buffer
-     *
-     * @param buffer Buffer containing encoded data (4 bytes)
-     * @param record Temperature record structure to populate
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_decode_temperature_record(const uint8_t *buffer,
-                                               struct juxta_framfs_temperature_record *record);
-
-    /**
      * @brief Append device scan record to active file with MAC indexing
      *
      * @param ctx File system context
      * @param minute Minute of day (0-1439)
      * @param motion_count Motion events this minute
+     * @param battery_level Battery level (0-100)
+     * @param temperature Temperature in degrees Celsius
      * @param mac_ids Array of MAC IDs (3 bytes each)
      * @param rssi_values Array of RSSI values
-     * @param device_count Number of devices (1-128)
+     * @param device_count Number of devices (0-128)
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
                                         uint16_t minute,
                                         uint8_t motion_count,
+                                        uint8_t battery_level,
+                                        int8_t temperature,
                                         const uint8_t (*mac_ids)[3],
                                         const int8_t *rssi_values,
                                         uint8_t device_count);
@@ -645,30 +585,6 @@ extern "C"
     int juxta_framfs_append_simple_record(struct juxta_framfs_context *ctx,
                                           uint16_t minute,
                                           uint8_t type);
-
-    /**
-     * @brief Append battery record to active file
-     *
-     * @param ctx File system context
-     * @param minute Minute of day (0-1439)
-     * @param level Battery level (0-100)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_append_battery_record(struct juxta_framfs_context *ctx,
-                                           uint16_t minute,
-                                           uint8_t level);
-
-    /**
-     * @brief Append temperature record to active file
-     *
-     * @param ctx File system context
-     * @param minute Minute of day (0-1439)
-     * @param temperature Temperature in degrees Celsius
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_append_temperature_record(struct juxta_framfs_context *ctx,
-                                               uint16_t minute,
-                                               int8_t temperature);
 
     /* ========================================================================
      * Primary File System API (Time-Aware)
@@ -739,14 +655,18 @@ extern "C"
      * @param ctx File system context
      * @param minute Minute of day (0-1439)
      * @param motion_count Motion events this minute
+     * @param battery_level Battery level (0-100)
+     * @param temperature Temperature in degrees Celsius
      * @param mac_ids Array of MAC IDs (3 bytes each)
      * @param rssi_values Array of RSSI values
-     * @param device_count Number of devices
+     * @param device_count Number of devices (0-128)
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
                                              uint16_t minute,
                                              uint8_t motion_count,
+                                             uint8_t battery_level,
+                                             int8_t temperature,
                                              const uint8_t (*mac_ids)[3],
                                              const int8_t *rssi_values,
                                              uint8_t device_count);
@@ -762,30 +682,6 @@ extern "C"
     int juxta_framfs_append_simple_record_data(struct juxta_framfs_ctx *ctx,
                                                uint16_t minute,
                                                uint8_t type);
-
-    /**
-     * @brief Append battery record with automatic file management (PRIMARY API)
-     *
-     * @param ctx File system context
-     * @param minute Minute of day (0-1439)
-     * @param level Battery level (0-100)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_append_battery_record_data(struct juxta_framfs_ctx *ctx,
-                                                uint16_t minute,
-                                                uint8_t level);
-
-    /**
-     * @brief Append temperature record with automatic file management (PRIMARY API)
-     *
-     * @param ctx File system context
-     * @param minute Minute of day (0-1439)
-     * @param temperature Temperature in degrees Celsius
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_append_temperature_record_data(struct juxta_framfs_ctx *ctx,
-                                                    uint16_t minute,
-                                                    int8_t temperature);
 
     /**
      * @brief Get current active filename

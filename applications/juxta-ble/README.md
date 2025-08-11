@@ -1,330 +1,207 @@
 # JUXTA BLE Application
 
-A power-efficient BLE application for the JUXTA device with LED control via Bluetooth Low Energy characteristics and pulsed advertising/scanning for reliable device discovery between multiple devices.
+A power-efficient BLE application for the JUXTA device with consolidated data logging, motion detection, and pulsed advertising/scanning for reliable device discovery.
 
-## Overview
+## Purpose
 
-This application demonstrates:
-- **Pulsed BLE advertising** with configurable intervals (1s, 5s, 10s) - brief 500ms bursts
-- **Pulsed device scanning** every 15 seconds for 500ms bursts
-- **Reliable device discovery** between multiple devices with synchronized timing
-- BLE advertising and connection handling
-- Custom GATT service with LED control characteristic
-- Device scanning and discovery with RSSI reporting using observer architecture
-- Foundation for OTA firmware upgrades (future feature)
-- Minimal resource usage optimized for nRF52805
+This application provides a complete IoT data logging solution with BLE connectivity, automatic daily file management, motion-based power optimization, and consolidated sensor data recording for long-term environmental monitoring.
 
-## Power Management Features
+## Board Overview
 
-- 🔋 **Pulsed Advertising**: 500ms bursts every 5 seconds (10% duty cycle)
-- 🔍 **Pulsed Scanning**: 500ms bursts every 15 seconds (3% duty cycle)
-- ⚡ **Ultra-Low Power**: 87% of time in sleep mode
-- 📱 **Connection-Aware**: Pauses pulsed activities when connected
-- 🔄 **Device Discovery**: Optimized for multiple devices to find each other
-- ⏰ **Configurable Timing**: Easy to adjust burst intervals and durations
+The application is designed for the Juxta5-1_AXY board with nRF52805, featuring FRAM storage, LIS2DH motion detection, and power-efficient BLE operation for battery-powered IoT deployments.
 
-## Features
+## Main Program Flow
 
-- 🔵 **BLE Advertising**: Advertises as "JUXTA-BLE" for 5 seconds
-- 🔍 **BLE Scanning**: Scans for nearby devices for 10 seconds using observer architecture
-- 📡 **Device Discovery**: Reports discovered devices with RSSI values and device names
-- 🔄 **Automatic Alternation**: Seamlessly switches between advertising and scanning
-- 💡 **LED Control**: Control onboard LED via BLE characteristic
-- 📱 **Mobile Ready**: Compatible with BLE scanner apps and custom mobile apps
-- ⚡ **Low Power**: Optimized for battery operation using observer pattern
+The application operates on a state machine with multiple timing loops:
 
-## Hardware Requirements
+1. **Main State Machine**: Alternates between advertising and scanning bursts
+   - Advertising burst: 100ms every 5 seconds (configurable)
+   - Scanning burst: 500ms every 20 seconds (configurable)
+   - Gateway advertising: 30 seconds when gateway detected
 
-- **Board**: Juxta5-1_AXY
-- **SoC**: nRF52805-CAAA-R
-- **LED**: P0.20 (shared with FRAM CS)
-- **Debug**: SWD interface
+2. **Minute Timer**: Every minute, logs consolidated data to FRAM
+   - Device scan results (MAC addresses, RSSI values)
+   - Motion event count
+   - Battery level reading
+   - Temperature reading
 
-## Building and Flashing
+3. **Motion Detection**: LIS2DH interrupt-driven motion detection
+   - Resets power optimization when motion detected
+   - Extends intervals when no motion for 1+ minutes
 
-### Quick Build
-```bash
-# From nRF root directory
-./applications/juxta-ble/build_ble.sh
-```
+4. **BLE Connection Handling**: Pauses data logging during connections
+   - Stops advertising/scanning when connected
+   - Resumes normal operation when disconnected
 
-### Manual Build
-```bash
-# From nRF root directory
-west build -b Juxta5-1_AXY applications/juxta-ble
-west flash
-```
+## Pin Assignments
 
-## Power Configuration
+| Pin | Function | Direction | Notes |
+|-----|----------|-----------|-------|
+| P0.20 | FRAM CS | Output | SPI0 CS0, shared with LED |
+| P0.21 | LIS2DH CS | Output | SPI0 CS1 |
+| P0.22 | LIS2DH INT | Input | Motion detection interrupt |
+| P0.23 | Magnet Sensor | Input | Optional wake-up source |
+| P0.24 | SPI0 SCK | Output | SPI clock |
+| P0.25 | SPI0 MOSI | Output | SPI data out |
+| P0.26 | SPI0 MISO | Input | SPI data in |
 
-### Adjusting Advertising Intervals
+## Data Logging and File System Integration
 
-The application uses standard BLE fast advertising parameters (`BT_LE_ADV_CONN_FAST_1`) for reliable operation. The advertising interval is controlled by the burst timing rather than BLE parameters:
+The application works in concert with the `juxta_framfs` library to create automatic daily files with consolidated sensor data:
 
+### Daily File Creation
+- **File Naming**: Automatic YYMMDD format (e.g., `240120` for January 20, 2024)
+- **File Switching**: New file created automatically at midnight
+- **Data Consolidation**: Every minute writes a single record containing:
+  - Device scan results (0-128 devices)
+  - Motion event count
+  - Battery level (0-100%)
+  - Temperature reading (°C)
+
+### Record Structure
+Each minute record uses the `juxta_framfs_device_record` structure:
 ```c
-// In src/main.c - Adjust burst timing for different power profiles:
-
-#define ADV_BURST_DURATION_MS 500   // How long to advertise (500ms)
-#define ADV_INTERVAL_MS 5000        // How often to advertise (every 5 seconds)
+struct juxta_framfs_device_record {
+    uint16_t minute;          /* 0-1439 for full day */
+    uint8_t type;             /* Number of devices (0-128) */
+    uint8_t motion_count;     /* Motion events this minute */
+    uint8_t battery_level;    /* Battery level (0-100) */
+    int8_t temperature;       /* Temperature in degrees Celsius */
+    uint8_t mac_indices[128]; /* MAC address indices (0-127) */
+    int8_t rssi_values[128];  /* RSSI values for each device */
+} __packed;
 ```
 
-### Adjusting Scan Intervals
+### FRAM Memory Usage Analysis
 
-To change scanning frequency, modify these parameters in `src/main.c`:
+The 1 Mbit FRAM (128 KB) provides the following storage capacity:
 
+| Scan Rate | Record Size | Daily File Size | Days Until Full | Notes |
+|-----------|-------------|-----------------|-----------------|-------|
+| **1 device/min** | 8 bytes | 11.5 KB | **11.2 days** | Minimal activity |
+| **5 devices/min** | 16 bytes | 23.0 KB | **5.6 days** | Moderate activity |
+| **10 devices/min** | 26 bytes | 37.4 KB | **3.4 days** | High activity |
+| **No activity** | 6 bytes | 8.6 KB | **15.0 days** | Battery/temp only |
+
+**Memory Breakdown:**
+- **Total FRAM**: 131,072 bytes (1 Mbit)
+- **File System Overhead**: ~2,000 bytes (headers, MAC table, settings)
+- **Available for Data**: ~129,072 bytes
+- **Daily Records**: 1,440 minutes per day
+
+**File Size Calculation:**
+- **No devices**: 6 bytes × 1,440 = 8,640 bytes/day
+- **1 device**: 8 bytes × 1,440 = 11,520 bytes/day  
+- **5 devices**: 16 bytes × 1,440 = 23,040 bytes/day
+- **10 devices**: 26 bytes × 1,440 = 37,440 bytes/day
+
+### System Events
+Additional 3-byte records are logged for system events:
+- **BOOT**: Device startup
+- **CONNECTED**: BLE connection established
+- **ERROR**: System errors
+
+## Essential Usage Examples
+
+### Basic Initialization
 ```c
-#define SCAN_BURST_DURATION_MS 500  // How long to scan (500ms)
-#define SCAN_INTERVAL_MS 15000      // How often to scan (every 15 seconds)
+/* Initialize all subsystems */
+struct juxta_vitals_ctx vitals_ctx;
+struct juxta_framfs_context framfs_ctx;
+struct juxta_framfs_ctx time_ctx;
+
+juxta_vitals_init(&vitals_ctx, true);
+juxta_framfs_init(&framfs_ctx, &fram_dev);
+juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, 
+                           juxta_vitals_get_file_date_wrapper, true);
 ```
 
-
-
-## BLE Service Specification
-
-### Service Information
-- **Service UUID**: `0x1234`
-- **Device Name**: `JUXTA-BLE`
-- **Connection Type**: Peripheral (accepts connections)
-
-### LED Control Characteristic
-- **Characteristic UUID**: `0x1235`
-- **Properties**: Read, Write, Write Without Response
-- **Data Format**: 1 byte
-- **Values**:
-  - `0x00` = LED OFF
-  - `0x01` = LED ON
-
-## Device Discovery
-
-The application alternates between two modes:
-
-### Advertising Mode (5 seconds)
-- Device advertises as "JUXTA-BLE"
-- Accepts connections from other devices
-- LED control characteristic available when connected
-
-### Scanning Mode (10 seconds)
-- Scans for nearby BLE devices using observer architecture
-- Reports device addresses, names, and RSSI values
-- Displays results in a formatted table
-
-## Expected Output
-
-```
-🚀 Starting JUXTA BLE Application
-📋 Board: Juxta5-4_nRF52840
-📟 Device: nRF52840
-📱 Device will use pulsed advertising and scanning for device discovery
-📢 Advertising: 500 ms burst every 5 seconds
-🔍 Scanning: 500 ms burst every 15 seconds
-⚡ Power-efficient pulsed operation for device discovery
-💡 LED initialized on pin P0.20
-🔵 Bluetooth initialized
-🔵 JUXTA BLE Service initialized
-📋 Service UUID: 0x1234
-💡 LED Characteristic UUID: 0x1235
-📝 LED Control: Write 0x00 (OFF) or 0x01 (ON)
-✅ All systems initialized successfully
-📱 Ready for BLE connections and device discovery!
-📢 Starting advertising burst (500 ms)
-📢 BLE advertising started as 'JUXTA-BLE' (interval: 5120 ms)
-📢 Ending advertising burst
-🔍 Starting scan burst (500 ms)
-🔍 Starting BLE scanning...
-🔍 Ending scan burst
-📡 Found device: AA:BB:CC:DD:EE:FF, RSSI: -45, Name: iPhone
-```
-
-## Usage with BLE Apps
-
-### Android (nRF Connect)
-1. Install **nRF Connect for Mobile**
-2. Scan for devices
-3. Connect to **JUXTA-BLE**
-4. Navigate to service `0x1234`
-5. Find characteristic `0x1235`
-6. Write `01` to turn LED ON
-7. Write `00` to turn LED OFF
-
-### iOS (LightBlue)
-1. Install **LightBlue Explorer**
-2. Scan and connect to **JUXTA-BLE**
-3. Find service `1234`
-4. Write to characteristic `1235`
-5. Use hex values `01` (ON) or `00` (OFF)
-
-### Custom Mobile App Example
-```javascript
-// React Native BLE example
-const SERVICE_UUID = '1234';
-const LED_CHAR_UUID = '1235';
-
-// Turn LED ON
-await BleManager.write(
-  peripheralId, 
-  SERVICE_UUID, 
-  LED_CHAR_UUID, 
-  [0x01]
-);
-
-// Turn LED OFF
-await BleManager.write(
-  peripheralId, 
-  SERVICE_UUID, 
-  LED_CHAR_UUID, 
-  [0x00]
-);
-```
-
-## Power Consumption
-
-### Current Power-Efficient Implementation
-- **Pulsed Advertising (500ms every 5s)**: ~0.1-0.2mA average (10% duty cycle)
-- **Pulsed Scanning (500ms every 15s)**: ~0.05-0.1mA average (3% duty cycle)
-- **Sleep Mode (87% of time)**: ~5-10µA average
-- **Connected (idle)**: ~0.5-1mA average
-- **LED ON**: +~2mA additional
-
-### Configurable Power Profiles
-- **1-second intervals**: ~0.2-0.3mA (high discoverability)
-- **5-second intervals**: ~0.1-0.2mA (balanced, default)
-- **10-second intervals**: ~0.05-0.1mA (maximum battery life)
-
-### Overall System Power
-- **Average power**: ~0.15-0.3mA (pulsed operation with 87% sleep)
-- **Battery life**: 12-24 months on coin cell (depending on usage)
-- **Device Discovery**: Optimized for multiple devices to find each other reliably
-
-## Architecture Benefits
-
-### Observer Pattern Advantages
-- **Lower Power**: Observer architecture is more power-efficient than traditional scanning
-- **Simpler Code**: Reduced complexity in scanning implementation
-- **Better Performance**: Optimized for device discovery without connection overhead
-- **Memory Efficient**: Minimal memory footprint for scanning operations
-
-## Future Enhancements
-
-### Phase 1 (Current)
-- ✅ Basic BLE advertising
-- ✅ LED control characteristic
-- ✅ Device scanning and discovery using observer architecture
-- ✅ Connection handling
-- ✅ RSSI reporting
-
-### Phase 2 (Planned)
-- [ ] Device Information Service (DIS)
-- [ ] Battery level characteristic
-- [ ] Connection parameters optimization
-- [ ] Security/bonding support
-
-### Phase 3 (OTA Ready)
-- [ ] Device Firmware Update (DFU) service
-- [ ] Secure bootloader integration
-- [ ] Firmware version reporting
-- [ ] OTA update mechanism
-
-### Phase 4 (Sensor Integration)
-- [ ] Merge FRAM functionality from juxta-mvp
-- [ ] Add ADC sensor characteristics
-- [ ] Magnet sensor event notifications
-- [ ] Sensor data logging to FRAM
-
-## Development Notes
-
-### Memory Usage
-- **Flash**: ~75KB (plenty of room for OTA)
-- **RAM**: ~7KB (efficient observer BLE stack usage)
-- **Stack**: Optimized for nRF52805 constraints
-
-### Code Organization
-```
-applications/juxta-ble/
-├── src/
-│   ├── main.c           # Main application with observer state machine
-│   ├── ble_service.c    # BLE GATT service implementation
-│   └── ble_service.h    # BLE service interface
-├── CMakeLists.txt       # Build configuration
-├── prj.conf            # Zephyr project configuration with observer
-├── build_ble.sh        # Build script
-└── README.md           # This file
-```
-
-### Adding New Characteristics
-
-To add a new characteristic:
-
-1. **Define UUID** in `ble_service.h`:
+### Minute-by-Minute Data Logging
 ```c
-#define NEW_CHAR_UUID 0x1236
+/* In state machine work handler - every minute */
+uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
+if (current_minute != last_logged_minute) {
+    /* Get sensor data */
+    uint8_t battery_level = juxta_vitals_get_battery_percent(&vitals_ctx);
+    int8_t temperature = juxta_vitals_get_temperature(&vitals_ctx);
+    
+    if (juxta_scan_count > 0) {
+        /* Log device scan with sensor data */
+        juxta_framfs_append_device_scan_data(&time_ctx, current_minute, 
+                                             motion_count, battery_level, temperature,
+                                             mac_ids, rssi_values, device_count);
+    } else {
+        /* Log no activity with sensor data */
+        juxta_framfs_append_device_scan_data(&time_ctx, current_minute, 
+                                             motion_count, battery_level, temperature,
+                                             NULL, NULL, 0);
+    }
+    last_logged_minute = current_minute;
+}
 ```
 
-2. **Add to service** in `ble_service.c`:
+### Motion-Based Power Optimization
 ```c
-BT_GATT_CHARACTERISTIC(&new_char_uuid,
-                       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
-                       BT_GATT_PERM_READ,
-                       read_new_char, NULL, &new_char_value),
+/* Motion interrupt handler */
+static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
+    motion_count++;
+    motion_based_intervals = false;  /* Reset to default intervals */
+    k_timer_start(&motion_timer, K_SECONDS(1), K_NO_WAIT);
+}
+
+/* In minute timer - check for no motion */
+if (motion_count > 0) {
+    motion_count = 0;
+} else {
+    motion_based_intervals = true;  /* Switch to extended intervals */
+}
 ```
 
-3. **Implement callbacks**:
+### BLE State Machine
 ```c
-static ssize_t read_new_char(struct bt_conn *conn, ...);
+/* Main state machine loop */
+static void state_work_handler(struct k_work *work) {
+    uint32_t current_time = get_rtc_timestamp();
+    
+    /* Check if time for advertising */
+    if (is_time_to_advertise() && ble_state == BLE_STATE_IDLE) {
+        ble_state = BLE_STATE_ADVERTISING;
+        juxta_start_advertising();
+        k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS), K_NO_WAIT);
+    }
+    
+    /* Check if time for scanning */
+    if (is_time_to_scan() && ble_state == BLE_STATE_IDLE) {
+        ble_state = BLE_STATE_SCANNING;
+        juxta_start_scanning();
+        k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
+    }
+}
 ```
 
-## Troubleshooting
-
-### Common Issues
-
-1. **Device not advertising**:
-   - Check BLE is enabled in `prj.conf`
-   - Verify nRF52805 BLE hardware
-   - Check for initialization errors in logs
-
-2. **Cannot connect**:
-   - Ensure device is advertising
-   - Check connection parameters
-   - Verify mobile app BLE permissions
-
-3. **LED not responding**:
-   - Check P0.20 pin configuration
-   - Verify characteristic write format
-   - Check for GPIO conflicts with FRAM
-
-4. **No devices found during scan**:
-   - Ensure other BLE devices are nearby and discoverable
-   - Check RSSI values (should be negative)
-   - Verify observer configuration in `prj.conf`
-
-5. **Build errors**:
-   - Ensure nRF Connect SDK is properly set up
-   - Check Zephyr version compatibility
-   - Verify board definition exists
-
-### Debug Tips
-
-```bash
-# Enable debug logging
-CONFIG_BT_LOG_LEVEL_DBG=y
-CONFIG_LOG_DEFAULT_LEVEL=4
-
-# Monitor RTT output
-JLinkRTTClient
-
-# Check BLE with scanner apps
-# nRF Connect (Android/iOS)
-# LightBlue (iOS)
-# BLE Scanner (Android)
+### Device Scanning and Discovery
+```c
+/* BLE scan callback */
+static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad) {
+    /* Parse device name */
+    if (strncmp(name, "JX_", 3) == 0) {
+        /* JUXTA peripheral device */
+        uint32_t mac_id = extract_mac_id(name);
+        add_to_scan_table(mac_id, rssi);
+    } else if (strncmp(name, "JXGA_", 5) == 0) {
+        /* JUXTA gateway device */
+        doGatewayAdvertise = true;
+    }
+}
 ```
 
-## Integration Path
+## BLE Service
 
-This application is designed to eventually merge with `juxta-mvp` functionality:
+### Service UUID: 0x1234
+- **LED Control**: 0x1235 (Read/Write)
+- **Device Info**: 0x1236 (Read)
+- **Settings**: 0x1237 (Read/Write)
 
-1. **Current**: Basic BLE + LED control + device scanning using observer
-2. **Phase 1**: Add FRAM library integration
-3. **Phase 2**: Add sensor data characteristics
-4. **Phase 3**: Merge with juxta-mvp sensor functionality
-5. **Phase 4**: Add OTA firmware update capability
-
-The modular design allows for gradual feature addition while maintaining a working BLE foundation with efficient device discovery capabilities using the observer architecture. 
+### LED Control Values
+- `0x00`: LED OFF
+- `0x01`: LED ON 

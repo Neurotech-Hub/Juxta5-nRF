@@ -301,16 +301,11 @@ int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperatu
     /* Combine into 16-bit LSB value */
     int16_t lsb = ((int16_t)temp_h << 8) | temp_l;
 
-    /* Debug output */
-    LOG_INF("TEMP DEBUG: OUT_TEMP_L=0x%02X, OUT_TEMP_H=0x%02X, LSB=0x%04X", temp_l, temp_h, lsb);
-
     /* Convert using low-power mode formula */
     float_t temp_celsius = lis2dh12_from_lsb_lp_to_celsius(lsb);
 
     /* Convert to 8-bit signed for compatibility */
     *temperature = (int8_t)temp_celsius;
-
-    LOG_INF("TEMP CONVERSION: LSB=%d, Celsius=%.1f°C, 8bit=%d°C", lsb, (double)temp_celsius, *temperature);
 
     return 0;
 }

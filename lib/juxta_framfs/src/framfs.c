@@ -1176,7 +1176,7 @@ int juxta_framfs_encode_device_record(const struct juxta_framfs_device_record *r
     }
 
     /* Calculate required buffer size */
-    size_t required_size = 4 + (2 * record->type); /* minute + type + motion + mac_indices + rssi_values */
+    size_t required_size = 6 + (2 * record->type); /* minute + type + motion + battery + temp + mac_indices + rssi_values */
     if (buffer_size < required_size)
     {
         LOG_WRN("Buffer too small: %zu < %zu", buffer_size, required_size);
@@ -1184,7 +1184,7 @@ int juxta_framfs_encode_device_record(const struct juxta_framfs_device_record *r
     }
 
     /* Validate device count */
-    if (record->type == 0 || record->type > 128)
+    if (record->type > 128)
     {
         LOG_WRN("Invalid device count: %d", record->type);
         return JUXTA_FRAMFS_ERROR;
@@ -1193,11 +1193,13 @@ int juxta_framfs_encode_device_record(const struct juxta_framfs_device_record *r
     /* Encode fixed fields */
     buffer[0] = (record->minute >> 8) & 0xFF; /* minute high byte */
     buffer[1] = record->minute & 0xFF;        /* minute low byte */
-    buffer[2] = record->type;                 /* device count */
+    buffer[2] = record->type;                 /* device count (0-128) */
     buffer[3] = record->motion_count;         /* motion count */
+    buffer[4] = record->battery_level;        /* battery level */
+    buffer[5] = (uint8_t)record->temperature; /* temperature (signed) */
 
     /* Encode variable fields */
-    size_t offset = 4;
+    size_t offset = 6;
     for (int i = 0; i < record->type; i++)
     {
         buffer[offset + i] = record->mac_indices[i];                /* MAC index */
@@ -1211,7 +1213,7 @@ int juxta_framfs_decode_device_record(const uint8_t *buffer,
                                       size_t buffer_size,
                                       struct juxta_framfs_device_record *record)
 {
-    if (!buffer || !record || buffer_size < 4)
+    if (!buffer || !record || buffer_size < 6)
     {
         return JUXTA_FRAMFS_ERROR;
     }
@@ -1220,16 +1222,18 @@ int juxta_framfs_decode_device_record(const uint8_t *buffer,
     record->minute = (buffer[0] << 8) | buffer[1]; /* minute */
     record->type = buffer[2];                      /* device count */
     record->motion_count = buffer[3];              /* motion count */
+    record->battery_level = buffer[4];             /* battery level */
+    record->temperature = (int8_t)buffer[5];       /* temperature (signed) */
 
     /* Validate device count */
-    if (record->type == 0 || record->type > 128)
+    if (record->type > 128)
     {
         LOG_WRN("Invalid device count: %d", record->type);
         return JUXTA_FRAMFS_ERROR;
     }
 
     /* Calculate required buffer size */
-    size_t required_size = 4 + (2 * record->type);
+    size_t required_size = 6 + (2 * record->type);
     if (buffer_size < required_size)
     {
         LOG_WRN("Buffer too small: %zu < %zu", buffer_size, required_size);
@@ -1237,7 +1241,7 @@ int juxta_framfs_decode_device_record(const uint8_t *buffer,
     }
 
     /* Decode variable fields */
-    size_t offset = 4;
+    size_t offset = 6;
     for (int i = 0; i < record->type; i++)
     {
         record->mac_indices[i] = buffer[offset + i];                        /* MAC index */
@@ -1276,81 +1280,21 @@ int juxta_framfs_decode_simple_record(const uint8_t *buffer,
     return 3; /* 3 bytes */
 }
 
-int juxta_framfs_encode_battery_record(const struct juxta_framfs_battery_record *record,
-                                       uint8_t *buffer)
-{
-    if (!record || !buffer)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    buffer[0] = (record->minute >> 8) & 0xFF; /* minute high byte */
-    buffer[1] = record->minute & 0xFF;        /* minute low byte */
-    buffer[2] = record->type;                 /* record type (0xF4) */
-    buffer[3] = record->level;                /* battery level */
-
-    return 4; /* 4 bytes */
-}
-
-int juxta_framfs_decode_battery_record(const uint8_t *buffer,
-                                       struct juxta_framfs_battery_record *record)
-{
-    if (!buffer || !record)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    record->minute = (buffer[0] << 8) | buffer[1]; /* minute */
-    record->type = buffer[2];                      /* record type */
-    record->level = buffer[3];                     /* battery level */
-
-    return 4; /* 4 bytes */
-}
-
-int juxta_framfs_encode_temperature_record(const struct juxta_framfs_temperature_record *record,
-                                           uint8_t *buffer)
-{
-    if (!record || !buffer)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    buffer[0] = (record->minute >> 8) & 0xFF; /* minute high byte */
-    buffer[1] = record->minute & 0xFF;        /* minute low byte */
-    buffer[2] = record->type;                 /* record type (0xF6) */
-    buffer[3] = (uint8_t)record->temperature; /* temperature (signed) */
-
-    return 4; /* 4 bytes */
-}
-
-int juxta_framfs_decode_temperature_record(const uint8_t *buffer,
-                                           struct juxta_framfs_temperature_record *record)
-{
-    if (!buffer || !record)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    record->minute = (buffer[0] << 8) | buffer[1]; /* minute */
-    record->type = buffer[2];                      /* record type */
-    record->temperature = (int8_t)buffer[3];       /* temperature (signed) */
-
-    return 4; /* 4 bytes */
-}
-
 int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
                                     uint16_t minute,
                                     uint8_t motion_count,
+                                    uint8_t battery_level,
+                                    int8_t temperature,
                                     const uint8_t (*mac_ids)[3],
                                     const int8_t *rssi_values,
                                     uint8_t device_count)
 {
-    if (!ctx || !ctx->initialized || !mac_ids || !rssi_values)
+    if (!ctx || !ctx->initialized)
     {
         return JUXTA_FRAMFS_ERROR;
     }
 
-    if (device_count == 0 || device_count > 128)
+    if (device_count > 128)
     {
         LOG_WRN("Invalid device count: %d", device_count);
         return JUXTA_FRAMFS_ERROR;
@@ -1361,23 +1305,28 @@ int juxta_framfs_append_device_scan(struct juxta_framfs_context *ctx,
     record.minute = minute;
     record.type = device_count;
     record.motion_count = motion_count;
+    record.battery_level = battery_level;
+    record.temperature = temperature;
 
-    /* Process MAC IDs and get indices */
-    for (int i = 0; i < device_count; i++)
+    /* Process MAC IDs and get indices (only if devices found) */
+    if (device_count > 0 && mac_ids && rssi_values)
     {
-        uint8_t mac_index;
-        int ret = juxta_framfs_mac_find_or_add(ctx, mac_ids[i], &mac_index);
-        if (ret < 0)
+        for (int i = 0; i < device_count; i++)
         {
-            LOG_ERR("Failed to process MAC ID %d: %d", i, ret);
-            return ret;
+            uint8_t mac_index;
+            int ret = juxta_framfs_mac_find_or_add(ctx, mac_ids[i], &mac_index);
+            if (ret < 0)
+            {
+                LOG_ERR("Failed to process MAC ID %d: %d", i, ret);
+                return ret;
+            }
+            record.mac_indices[i] = mac_index;
+            record.rssi_values[i] = rssi_values[i];
         }
-        record.mac_indices[i] = mac_index;
-        record.rssi_values[i] = rssi_values[i];
     }
 
     /* Encode record */
-    uint8_t buffer[4 + (2 * 128)]; /* Maximum size for 128 devices */
+    uint8_t buffer[6 + (2 * 128)]; /* Maximum size for 128 devices */
     int encoded_size = juxta_framfs_encode_device_record(&record, buffer, sizeof(buffer));
     if (encoded_size < 0)
     {
@@ -1424,69 +1373,6 @@ int juxta_framfs_append_simple_record(struct juxta_framfs_context *ctx,
 
     /* Append to active file */
     return juxta_framfs_append(ctx, buffer, 3);
-}
-
-int juxta_framfs_append_battery_record(struct juxta_framfs_context *ctx,
-                                       uint16_t minute,
-                                       uint8_t level)
-{
-    if (!ctx || !ctx->initialized)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    /* Validate battery level */
-    if (level > 100)
-    {
-        LOG_WRN("Invalid battery level: %d", level);
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    /* Prepare battery record */
-    struct juxta_framfs_battery_record record;
-    record.minute = minute;
-    record.type = JUXTA_FRAMFS_RECORD_TYPE_BATTERY;
-    record.level = level;
-
-    /* Encode record */
-    uint8_t buffer[4];
-    int ret = juxta_framfs_encode_battery_record(&record, buffer);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to encode battery record: %d", ret);
-        return ret;
-    }
-
-    /* Append to active file */
-    return juxta_framfs_append(ctx, buffer, 4);
-}
-
-int juxta_framfs_append_temperature_record(struct juxta_framfs_context *ctx,
-                                           uint16_t minute,
-                                           int8_t temperature)
-{
-    if (!ctx || !ctx->initialized)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    /* Prepare temperature record */
-    struct juxta_framfs_temperature_record record;
-    record.minute = minute;
-    record.type = JUXTA_FRAMFS_RECORD_TYPE_TEMPERATURE;
-    record.temperature = temperature;
-
-    /* Encode record */
-    uint8_t buffer[4];
-    int ret = juxta_framfs_encode_temperature_record(&record, buffer);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to encode temperature record: %d", ret);
-        return ret;
-    }
-
-    /* Append to active file */
-    return juxta_framfs_append(ctx, buffer, 4);
 }
 
 /* ========================================================================
@@ -1633,6 +1519,8 @@ int juxta_framfs_append_data(struct juxta_framfs_ctx *ctx,
 int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
                                          uint16_t minute,
                                          uint8_t motion_count,
+                                         uint8_t battery_level,
+                                         int8_t temperature,
                                          const uint8_t (*mac_ids)[3],
                                          const int8_t *rssi_values,
                                          uint8_t device_count)
@@ -1651,6 +1539,7 @@ int juxta_framfs_append_device_scan_data(struct juxta_framfs_ctx *ctx,
 
     /* Append device scan to active file */
     return juxta_framfs_append_device_scan(ctx->fs_ctx, minute, motion_count,
+                                           battery_level, temperature,
                                            mac_ids, rssi_values, device_count);
 }
 
@@ -1672,46 +1561,6 @@ int juxta_framfs_append_simple_record_data(struct juxta_framfs_ctx *ctx,
 
     /* Append simple record to active file */
     return juxta_framfs_append_simple_record(ctx->fs_ctx, minute, type);
-}
-
-int juxta_framfs_append_battery_record_data(struct juxta_framfs_ctx *ctx,
-                                            uint16_t minute,
-                                            uint8_t level)
-{
-    if (!ctx)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    /* Ensure correct file is active */
-    int ret = juxta_framfs_ensure_current_file(ctx);
-    if (ret < 0)
-    {
-        return ret;
-    }
-
-    /* Append battery record to active file */
-    return juxta_framfs_append_battery_record(ctx->fs_ctx, minute, level);
-}
-
-int juxta_framfs_append_temperature_record_data(struct juxta_framfs_ctx *ctx,
-                                                uint16_t minute,
-                                                int8_t temperature)
-{
-    if (!ctx)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    /* Ensure correct file is active */
-    int ret = juxta_framfs_ensure_current_file(ctx);
-    if (ret < 0)
-    {
-        return ret;
-    }
-
-    /* Append temperature record to active file */
-    return juxta_framfs_append_temperature_record(ctx->fs_ctx, minute, temperature);
 }
 
 int juxta_framfs_get_current_filename(struct juxta_framfs_ctx *ctx,
