@@ -30,6 +30,19 @@ static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr
 static int handle_timestamp_synchronization(uint32_t timestamp);
 static int handle_memory_clearing(void);
 static bool validate_timestamp(uint32_t timestamp);
+static void filename_indication_confirmed(struct bt_conn *conn, struct bt_gatt_indicate_params *params, uint8_t err);
+static void file_transfer_indication_confirmed(struct bt_conn *conn, struct bt_gatt_indicate_params *params, uint8_t err);
+
+/* File transfer state machine */
+typedef enum
+{
+    FILE_TRANSFER_STATE_IDLE = 0,
+    FILE_TRANSFER_STATE_LISTING_REQUESTED,
+    FILE_TRANSFER_STATE_TRANSFER_REQUESTED,
+    FILE_TRANSFER_STATE_TRANSFERRING,
+    FILE_TRANSFER_STATE_COMPLETE,
+    FILE_TRANSFER_STATE_ERROR
+} file_transfer_state_t;
 
 /* Characteristic values - will be used in later phases */
 static char node_response[JUXTA_NODE_RESPONSE_MAX_SIZE] __unused;
@@ -46,6 +59,11 @@ static struct bt_conn *current_conn = NULL;
 
 /* Service attribute references for indications */
 static const struct bt_gatt_attr *filename_char_attr = NULL;
+static const struct bt_gatt_attr *file_transfer_char_attr = NULL;
+
+/* Persistent indicate params (must live until confirmation callback) */
+static struct bt_gatt_indicate_params filename_ind_params;
+static struct bt_gatt_indicate_params file_transfer_ind_params;
 
 /* External framfs context - will be set during initialization */
 static struct juxta_framfs_context *framfs_ctx = NULL;
@@ -53,11 +71,17 @@ static struct juxta_framfs_context *framfs_ctx = NULL;
 /* External vitals context - will be set during initialization */
 static struct juxta_vitals_ctx *vitals_ctx = NULL;
 
+/* Datetime synchronization callback for production flow */
+static void (*datetime_sync_callback)(void) = NULL;
+
 /* File transfer state */
+static file_transfer_state_t file_transfer_state = FILE_TRANSFER_STATE_IDLE;
 static bool file_transfer_active = false;
 static char current_transfer_filename[JUXTA_FRAMFS_FILENAME_LEN];
 static uint32_t current_transfer_offset = 0;
 static int current_transfer_file_size = -1;
+static bool indication_pending = false;
+static uint32_t indication_timeout = 0;
 
 /* MTU and connection state */
 static uint16_t current_mtu = 23; /* Default BLE MTU */
@@ -82,8 +106,17 @@ void juxta_ble_set_vitals_context(struct juxta_vitals_ctx *ctx)
 }
 
 /**
+ * @brief Set the datetime synchronization callback
+ */
+void juxta_ble_set_datetime_sync_callback(void (*callback)(void))
+{
+    datetime_sync_callback = callback;
+    LOG_INF("⏰ Datetime synchronization callback set");
+}
+
+/**
  * @brief Validate timestamp for reasonable range
- * 
+ *
  * @param timestamp Unix timestamp to validate
  * @return true if timestamp is valid, false otherwise
  */
@@ -92,20 +125,20 @@ static bool validate_timestamp(uint32_t timestamp)
     /* Check for reasonable range: 2020-01-01 to 2030-12-31 */
     const uint32_t MIN_TIMESTAMP = 1577836800; /* 2020-01-01 00:00:00 UTC */
     const uint32_t MAX_TIMESTAMP = 1924992000; /* 2030-12-31 23:59:59 UTC */
-    
+
     if (timestamp < MIN_TIMESTAMP || timestamp > MAX_TIMESTAMP)
     {
-        LOG_WRN("⏰ Timestamp out of valid range: %u (expected %u-%u)", 
+        LOG_WRN("⏰ Timestamp out of valid range: %u (expected %u-%u)",
                 timestamp, MIN_TIMESTAMP, MAX_TIMESTAMP);
         return false;
     }
-    
+
     return true;
 }
 
 /**
  * @brief Handle timestamp synchronization
- * 
+ *
  * @param timestamp Unix timestamp to set
  * @return 0 on success, negative error code on failure
  */
@@ -116,16 +149,16 @@ static int handle_timestamp_synchronization(uint32_t timestamp)
         LOG_ERR("⏰ Vitals context not available for timestamp synchronization");
         return -ENODEV;
     }
-    
+
     if (!validate_timestamp(timestamp))
     {
         LOG_ERR("⏰ Invalid timestamp: %u", timestamp);
         return -EINVAL;
     }
-    
+
     /* Get current timestamp for comparison */
     uint32_t current_timestamp = juxta_vitals_get_timestamp(vitals_ctx);
-    
+
     /* Set the new timestamp */
     int ret = juxta_vitals_set_timestamp(vitals_ctx, timestamp);
     if (ret < 0)
@@ -133,24 +166,33 @@ static int handle_timestamp_synchronization(uint32_t timestamp)
         LOG_ERR("⏰ Failed to set timestamp: %d", ret);
         return ret;
     }
-    
+
     /* Log the timestamp change */
     if (current_timestamp > 0)
     {
-        LOG_INF("⏰ Timestamp synchronized: %u → %u (delta: %d seconds)", 
+        LOG_INF("⏰ Timestamp synchronized: %u → %u (delta: %d seconds)",
                 current_timestamp, timestamp, (int)(timestamp - current_timestamp));
     }
     else
     {
         LOG_INF("⏰ Timestamp set to: %u", timestamp);
     }
-    
+
+    /* Mark datetime as synchronized for production flow */
+    LOG_INF("✅ Datetime synchronization completed");
+
+    /* Call datetime synchronization callback if set */
+    if (datetime_sync_callback)
+    {
+        datetime_sync_callback();
+    }
+
     return 0;
 }
 
 /**
  * @brief Handle memory clearing (file system format)
- * 
+ *
  * @return 0 on success, negative error code on failure
  */
 static int handle_memory_clearing(void)
@@ -160,9 +202,9 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Framfs not available for memory clearing");
         return -ENODEV;
     }
-    
+
     LOG_INF("🧹 Starting memory clearing operation...");
-    
+
     /* Format the file system */
     int ret = juxta_framfs_format(framfs_ctx);
     if (ret < 0)
@@ -170,7 +212,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to format file system: %d", ret);
         return ret;
     }
-    
+
     /* Clear MAC address table */
     ret = juxta_framfs_mac_clear(framfs_ctx);
     if (ret < 0)
@@ -178,7 +220,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to clear MAC table: %d", ret);
         return ret;
     }
-    
+
     /* Clear user settings (reset to defaults) */
     ret = juxta_framfs_clear_user_settings(framfs_ctx);
     if (ret < 0)
@@ -186,7 +228,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to clear user settings: %d", ret);
         return ret;
     }
-    
+
     LOG_INF("✅ Memory clearing completed successfully");
     return 0;
 }
@@ -701,6 +743,7 @@ static void end_file_transfer(void)
     current_transfer_offset = 0;
     current_transfer_file_size = -1;
     memset(current_transfer_filename, 0, sizeof(current_transfer_filename));
+    file_transfer_state = FILE_TRANSFER_STATE_IDLE;
     LOG_INF("📁 File transfer ended");
 }
 
@@ -716,28 +759,135 @@ static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr
         return -ENOTCONN;
     }
 
-    if (!data || len == 0)
+    if (!attr || !data || len == 0)
     {
-        LOG_ERR("📤 Invalid data for indication");
+        LOG_ERR("📤 Invalid params for indication");
         return -EINVAL;
     }
 
-    struct bt_gatt_notify_params params = {
-        .attr = attr,
-        .data = data,
-        .len = len,
-        .func = NULL,
-    };
+    if (indication_pending)
+    {
+        LOG_WRN("📤 Indication already pending");
+        return -EBUSY;
+    }
 
-    int ret = bt_gatt_notify_cb(conn, &params);
+    struct bt_gatt_indicate_params *params = NULL;
+    if (attr == filename_char_attr)
+    {
+        params = &filename_ind_params;
+        params->func = filename_indication_confirmed;
+    }
+    else if (attr == file_transfer_char_attr)
+    {
+        params = &file_transfer_ind_params;
+        params->func = file_transfer_indication_confirmed;
+    }
+    else
+    {
+        /* Default to file transfer callback if unknown */
+        params = &file_transfer_ind_params;
+        params->func = file_transfer_indication_confirmed;
+    }
+
+    params->attr = attr;
+    params->data = data;
+    params->len = len;
+
+    indication_pending = true;
+    indication_timeout = k_uptime_get_32() + 5000; /* 5s */
+
+    int ret = bt_gatt_indicate(conn, params);
     if (ret < 0)
     {
+        indication_pending = false;
         LOG_ERR("📤 Failed to send indication: %d", ret);
         return ret;
     }
 
-    LOG_DBG("📤 Indication sent: %d bytes", len);
+    LOG_DBG("📤 Indication sent: %u bytes", len);
     return 0;
+}
+
+/**
+ * @brief Filename indication confirmation callback
+ */
+static void filename_indication_confirmed(struct bt_conn *conn, struct bt_gatt_indicate_params *params, uint8_t err)
+{
+    indication_pending = false;
+
+    if (err)
+    {
+        LOG_ERR("📤 Filename indication failed: %d", err);
+        file_transfer_state = FILE_TRANSFER_STATE_ERROR;
+    }
+    else
+    {
+        LOG_DBG("📤 Filename indication confirmed");
+        if (file_transfer_state == FILE_TRANSFER_STATE_LISTING_REQUESTED)
+        {
+            file_transfer_state = FILE_TRANSFER_STATE_IDLE;
+        }
+    }
+}
+
+/**
+ * @brief Continue file transfer with next chunk
+ */
+static void continue_file_transfer(void)
+{
+    if (!current_conn || !file_transfer_char_attr || file_transfer_state != FILE_TRANSFER_STATE_TRANSFERRING)
+    {
+        return;
+    }
+
+    /* Get next chunk */
+    size_t bytes_read = 0;
+    int ret = get_file_transfer_chunk(file_transfer_chunk, sizeof(file_transfer_chunk), &bytes_read);
+    if (ret == 0 && bytes_read > 0)
+    {
+        /* Send next chunk */
+        send_indication(current_conn, file_transfer_char_attr, file_transfer_chunk, bytes_read);
+    }
+    else
+    {
+        /* Transfer complete - send EOF */
+        const char *eof = "EOF";
+        send_indication(current_conn, file_transfer_char_attr, eof, strlen(eof));
+        file_transfer_state = FILE_TRANSFER_STATE_COMPLETE;
+        end_file_transfer();
+    }
+}
+
+/**
+ * @brief File transfer indication confirmation callback
+ */
+static void file_transfer_indication_confirmed(struct bt_conn *conn, struct bt_gatt_indicate_params *params, uint8_t err)
+{
+    indication_pending = false;
+
+    if (err)
+    {
+        LOG_ERR("📤 File transfer indication failed: %d", err);
+        file_transfer_state = FILE_TRANSFER_STATE_ERROR;
+    }
+    else
+    {
+        LOG_DBG("📤 File transfer indication confirmed");
+        if (file_transfer_state == FILE_TRANSFER_STATE_TRANSFERRING)
+        {
+            /* Continue with next chunk or complete transfer */
+            if (current_transfer_offset >= current_transfer_file_size)
+            {
+                file_transfer_state = FILE_TRANSFER_STATE_COMPLETE;
+                end_file_transfer();
+            }
+            else
+            {
+                /* Continue with next chunk */
+                continue_file_transfer();
+            }
+        }
+    }
 }
 
 /**
@@ -786,6 +936,8 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
     if (strcmp(filename_request, "LIST") == 0)
     {
         /* File listing request */
+        file_transfer_state = FILE_TRANSFER_STATE_LISTING_REQUESTED;
+
         char file_listing[JUXTA_NODE_RESPONSE_MAX_SIZE];
         int listing_len = generate_file_listing(file_listing, sizeof(file_listing));
 
@@ -810,23 +962,42 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
     else
     {
         /* File transfer request */
+        file_transfer_state = FILE_TRANSFER_STATE_TRANSFER_REQUESTED;
+
         int ret = start_file_transfer(filename_request);
         if (ret == 0)
         {
-            /* Send filename confirmation via indication */
-            if (filename_char_attr && conn)
+            /* Start file transfer immediately - no filename confirmation */
+            file_transfer_state = FILE_TRANSFER_STATE_TRANSFERRING;
+
+            /* Send first chunk via file transfer characteristic */
+            if (file_transfer_char_attr && conn)
             {
-                send_indication(conn, filename_char_attr, filename_request, strlen(filename_request));
+                size_t bytes_read = 0;
+                ret = get_file_transfer_chunk(file_transfer_chunk, sizeof(file_transfer_chunk), &bytes_read);
+                if (ret == 0 && bytes_read > 0)
+                {
+                    send_indication(conn, file_transfer_char_attr, file_transfer_chunk, bytes_read);
+                }
+                else
+                {
+                    /* File is empty or error - send EOF */
+                    const char *eof = "EOF";
+                    send_indication(conn, file_transfer_char_attr, eof, strlen(eof));
+                    file_transfer_state = FILE_TRANSFER_STATE_COMPLETE;
+                    end_file_transfer();
+                }
             }
         }
         else
         {
-            /* Send error response */
+            /* Send error response via filename characteristic */
             if (filename_char_attr && conn)
             {
                 const char *error = "NFF";
                 send_indication(conn, filename_char_attr, error, strlen(error));
             }
+            file_transfer_state = FILE_TRANSFER_STATE_ERROR;
         }
     }
 
@@ -911,6 +1082,10 @@ void juxta_ble_connection_established(struct bt_conn *conn)
     current_mtu = bt_gatt_get_mtu(conn); // Will be 23 unless peer requests larger
     mtu_negotiated = (current_mtu > 23);
     LOG_INF("📏 Current MTU: %d bytes (negotiated=%s)", current_mtu, mtu_negotiated ? "yes" : "no");
+
+    // Reset file transfer state
+    file_transfer_state = FILE_TRANSFER_STATE_IDLE;
+    indication_pending = false;
 }
 
 /**
@@ -921,6 +1096,7 @@ void juxta_ble_connection_terminated(void)
     current_conn = NULL;
     mtu_negotiated = false;
     current_mtu = 23;
+    indication_pending = false;
     end_file_transfer(); /* Clean up any active transfer */
     LOG_INF("🔌 BLE connection terminated, file transfer cleaned up");
 }
@@ -987,7 +1163,19 @@ int juxta_ble_service_init(void)
             JUXTA_FILE_TRANSFER_CHUNK_SIZE + 3, JUXTA_FILE_TRANSFER_CHUNK_SIZE,
             JUXTA_NODE_RESPONSE_MAX_SIZE, JUXTA_GATEWAY_COMMAND_MAX_SIZE);
 
-    /* Service is automatically registered with BT_GATT_SERVICE_DEFINE */
+    /* Locate characteristic value attributes in our service */
+    filename_char_attr = bt_gatt_find_by_uuid(juxta_hublink_svc.attrs,
+                                              juxta_hublink_svc.attr_count,
+                                              BT_UUID_JUXTA_FILENAME_CHAR);
+    file_transfer_char_attr = bt_gatt_find_by_uuid(juxta_hublink_svc.attrs,
+                                                   juxta_hublink_svc.attr_count,
+                                                   BT_UUID_JUXTA_FILE_TRANSFER_CHAR);
+
+    if (!filename_char_attr || !file_transfer_char_attr)
+    {
+        LOG_WRN("⚠️ Could not resolve characteristic attributes (indications may fail)");
+    }
+
     return 0;
 }
 
@@ -1030,8 +1218,9 @@ int juxta_ble_get_status(uint16_t *mtu, bool *connected, bool *transfer_active)
     *connected = (current_conn != NULL);
     *transfer_active = file_transfer_active;
 
-    LOG_DBG("📊 Service status: MTU=%d, Connected=%s, Transfer=%s",
-            *mtu, *connected ? "yes" : "no", *transfer_active ? "active" : "idle");
+    LOG_DBG("📊 Service status: MTU=%d, Connected=%s, Transfer=%s, State=%d, Indication=%s",
+            *mtu, *connected ? "yes" : "no", *transfer_active ? "active" : "idle",
+            file_transfer_state, indication_pending ? "pending" : "idle");
     return 0;
 }
 
@@ -1042,7 +1231,7 @@ int juxta_ble_get_status(uint16_t *mtu, bool *connected, bool *transfer_active)
 int juxta_ble_test_gateway_commands(void)
 {
     LOG_INF("🧪 Testing gateway command functionality...");
-    
+
     /* Test 1: Timestamp synchronization */
     LOG_INF("Test 1: Timestamp synchronization");
     uint32_t test_timestamp = 1705752000; /* 2024-01-20 12:00:00 UTC */
@@ -1053,7 +1242,7 @@ int juxta_ble_test_gateway_commands(void)
         return ret;
     }
     LOG_INF("✅ Timestamp synchronization test passed");
-    
+
     /* Test 2: Invalid timestamp validation */
     LOG_INF("Test 2: Invalid timestamp validation");
     uint32_t invalid_timestamp = 1000000000; /* Too old */
@@ -1064,7 +1253,7 @@ int juxta_ble_test_gateway_commands(void)
         return -1;
     }
     LOG_INF("✅ Invalid timestamp validation test passed");
-    
+
     /* Test 3: ClearMemory functionality (only if framfs is available) */
     if (framfs_ctx && framfs_ctx->initialized)
     {
@@ -1081,7 +1270,7 @@ int juxta_ble_test_gateway_commands(void)
     {
         LOG_WRN("⚠️ Skipping ClearMemory test - framfs not available");
     }
-    
+
     LOG_INF("✅ All gateway command tests passed");
     return 0;
 }
