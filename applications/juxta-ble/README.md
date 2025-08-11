@@ -63,7 +63,7 @@ Each minute record uses the `juxta_framfs_device_record` structure:
 ```c
 struct juxta_framfs_device_record {
     uint16_t minute;          /* 0-1439 for full day */
-    uint8_t type;             /* Number of devices (0-128) */
+    uint8_t type;             /* Number of devices (0-128) or type cde */
     uint8_t motion_count;     /* Motion events this minute */
     uint8_t battery_level;    /* Battery level (0-100) */
     int8_t temperature;       /* Temperature in degrees Celsius */
@@ -74,14 +74,14 @@ struct juxta_framfs_device_record {
 
 ### FRAM Memory Usage Analysis
 
-The 1 Mbit FRAM (128 KB) provides the following storage capacity:
+The 1 Mbit FRAM (128 KB) provides the following storage capacity based on daily device discovery rates:
 
-| Scan Rate | Record Size | Daily File Size | Days Until Full | Notes |
-|-----------|-------------|-----------------|-----------------|-------|
-| **1 device/min** | 8 bytes | 11.5 KB | **11.2 days** | Minimal activity |
-| **5 devices/min** | 16 bytes | 23.0 KB | **5.6 days** | Moderate activity |
-| **10 devices/min** | 26 bytes | 37.4 KB | **3.4 days** | High activity |
-| **No activity** | 6 bytes | 8.6 KB | **15.0 days** | Battery/temp only |
+| Daily Device Count | Avg Devices/Min | Record Size | Daily File Size | Days Until Full | Usage Scenario |
+|-------------------|-----------------|-------------|-----------------|-----------------|----------------|
+| **10 devices/day** | 0.007/min | 6.1 bytes | 8.8 KB | **14.7 days** | Very low activity |
+| **100 devices/day** | 0.069/min | 6.8 bytes | 9.8 KB | **13.2 days** | Low activity |
+| **1,000 devices/day** | 0.694/min | 13.4 bytes | 19.3 KB | **6.7 days** | Moderate activity |
+| **No devices** | 0/min | 6.0 bytes | 8.6 KB | **15.0 days** | Battery/temp only |
 
 **Memory Breakdown:**
 - **Total FRAM**: 131,072 bytes (1 Mbit)
@@ -89,11 +89,16 @@ The 1 Mbit FRAM (128 KB) provides the following storage capacity:
 - **Available for Data**: ~129,072 bytes
 - **Daily Records**: 1,440 minutes per day
 
-**File Size Calculation:**
-- **No devices**: 6 bytes × 1,440 = 8,640 bytes/day
-- **1 device**: 8 bytes × 1,440 = 11,520 bytes/day  
-- **5 devices**: 16 bytes × 1,440 = 23,040 bytes/day
-- **10 devices**: 26 bytes × 1,440 = 37,440 bytes/day
+**Storage Calculation:**
+- **Base record size**: 6 bytes (time, motion, battery, temperature)
+- **Per device**: 2 bytes (MAC index + RSSI)
+- **Daily file size**: (avg record size × 1,440 minutes) + system events
+- **System events**: ~10 bytes/day (BOOT, CONNECTED, ERROR records)
+
+**Real-World Usage Patterns:**
+- **10 devices/day**: Typical for isolated deployments
+- **100 devices/day**: Common in moderate traffic environments  
+- **1,000 devices/day**: High-traffic areas or dense deployments
 
 ### System Events
 Additional 3-byte records are logged for system events:
@@ -103,96 +108,63 @@ Additional 3-byte records are logged for system events:
 
 ## Essential Usage Examples
 
-### Basic Initialization
-```c
-/* Initialize all subsystems */
-struct juxta_vitals_ctx vitals_ctx;
-struct juxta_framfs_context framfs_ctx;
-struct juxta_framfs_ctx time_ctx;
-
-juxta_vitals_init(&vitals_ctx, true);
-juxta_framfs_init(&framfs_ctx, &fram_dev);
-juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, 
-                           juxta_vitals_get_file_date_wrapper, true);
+### Basic Initialization Pattern
+```
+1. Initialize vitals library with battery monitoring
+2. Initialize FRAM file system with device
+3. Initialize time-aware file system with RTC function
+4. Set up automatic daily file management
 ```
 
-### Minute-by-Minute Data Logging
-```c
-/* In state machine work handler - every minute */
-uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
-if (current_minute != last_logged_minute) {
-    /* Get sensor data */
-    uint8_t battery_level = juxta_vitals_get_battery_percent(&vitals_ctx);
-    int8_t temperature = juxta_vitals_get_temperature(&vitals_ctx);
-    
-    if (juxta_scan_count > 0) {
-        /* Log device scan with sensor data */
-        juxta_framfs_append_device_scan_data(&time_ctx, current_minute, 
-                                             motion_count, battery_level, temperature,
-                                             mac_ids, rssi_values, device_count);
-    } else {
-        /* Log no activity with sensor data */
-        juxta_framfs_append_device_scan_data(&time_ctx, current_minute, 
-                                             motion_count, battery_level, temperature,
-                                             NULL, NULL, 0);
-    }
-    last_logged_minute = current_minute;
-}
+### Minute-by-Minute Data Logging Pattern
+```
+Every minute:
+1. Get current minute of day from RTC
+2. Read battery level and temperature sensors
+3. If devices were scanned:
+   - Convert scan results to packed format
+   - Log consolidated record with device data
+4. If no devices found:
+   - Log consolidated record with battery/temperature only
+5. Update last logged minute timestamp
 ```
 
-### Motion-Based Power Optimization
-```c
-/* Motion interrupt handler */
-static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
-    motion_count++;
-    motion_based_intervals = false;  /* Reset to default intervals */
-    k_timer_start(&motion_timer, K_SECONDS(1), K_NO_WAIT);
-}
+### Motion-Based Power Optimization Pattern
+```
+Motion detection:
+1. Increment motion counter on interrupt
+2. Reset power optimization flag
+3. Start motion processing timer
 
-/* In minute timer - check for no motion */
-if (motion_count > 0) {
-    motion_count = 0;
-} else {
-    motion_based_intervals = true;  /* Switch to extended intervals */
-}
+Minute timer check:
+1. If motion detected this minute:
+   - Reset motion counter
+   - Use default power intervals
+2. If no motion detected:
+   - Switch to extended power intervals (2x)
 ```
 
-### BLE State Machine
-```c
-/* Main state machine loop */
-static void state_work_handler(struct k_work *work) {
-    uint32_t current_time = get_rtc_timestamp();
-    
-    /* Check if time for advertising */
-    if (is_time_to_advertise() && ble_state == BLE_STATE_IDLE) {
-        ble_state = BLE_STATE_ADVERTISING;
-        juxta_start_advertising();
-        k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS), K_NO_WAIT);
-    }
-    
-    /* Check if time for scanning */
-    if (is_time_to_scan() && ble_state == BLE_STATE_IDLE) {
-        ble_state = BLE_STATE_SCANNING;
-        juxta_start_scanning();
-        k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
-    }
-}
+### BLE State Machine Pattern
+```
+Main state machine loop:
+1. Check if time for advertising burst
+2. Check if time for scanning burst
+3. Handle gateway advertising priority
+4. Start appropriate BLE operation
+5. Set timer for burst duration
+6. Calculate next action timing with randomization
 ```
 
-### Device Scanning and Discovery
-```c
-/* BLE scan callback */
-static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type, struct net_buf_simple *ad) {
-    /* Parse device name */
-    if (strncmp(name, "JX_", 3) == 0) {
-        /* JUXTA peripheral device */
-        uint32_t mac_id = extract_mac_id(name);
-        add_to_scan_table(mac_id, rssi);
-    } else if (strncmp(name, "JXGA_", 5) == 0) {
-        /* JUXTA gateway device */
-        doGatewayAdvertise = true;
-    }
-}
+### Device Scanning and Discovery Pattern
+```
+BLE scan callback:
+1. Parse device name from advertisement
+2. If JUXTA peripheral device (JX_XXXXXX):
+   - Extract MAC ID from name
+   - Add to scan table with RSSI
+3. If JUXTA gateway device (JXGA_XXXX):
+   - Set gateway advertising flag
+   - Trigger connectable advertising mode
 ```
 
 ## BLE Service
