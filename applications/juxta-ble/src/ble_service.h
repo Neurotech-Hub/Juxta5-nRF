@@ -16,6 +16,9 @@
 /* Forward declaration for framfs context */
 struct juxta_framfs_context;
 
+/* Forward declaration for vitals context */
+struct juxta_vitals_ctx;
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -82,6 +85,13 @@ extern "C"
     void juxta_ble_set_framfs_context(struct juxta_framfs_context *ctx);
 
     /**
+     * @brief Set the vitals context for timestamp synchronization
+     *
+     * @param ctx Initialized vitals context
+     */
+    void juxta_ble_set_vitals_context(struct juxta_vitals_ctx *ctx);
+
+    /**
      * @brief Trigger timing update callback (called when settings change)
      *
      * This function should be implemented in main.c to handle timing updates
@@ -109,6 +119,16 @@ extern "C"
      * @return 0 on success, negative error code on failure
      */
     int juxta_ble_get_status(uint16_t *mtu, bool *connected, bool *transfer_active);
+
+    /**
+     * @brief Test function for gateway command functionality
+     *
+     * This function tests timestamp synchronization and clearMemory functionality.
+     * It can be called during development to verify the implementation.
+     *
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_ble_test_gateway_commands(void);
 
 #ifdef __cplusplus
 }

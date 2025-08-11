@@ -1237,6 +1237,16 @@ int main(void)
         return ret;
     }
 
+    /* Link vitals context to BLE service for timestamp synchronization */
+    juxta_ble_set_vitals_context(&vitals_ctx);
+
+    /* Test gateway command functionality */
+    ret = juxta_ble_test_gateway_commands();
+    if (ret < 0)
+    {
+        LOG_WRN("⚠️ Gateway command test failed: %d (continuing anyway)", ret);
+    }
+
     /* Initialize time-aware file system after vitals are ready */
     LOG_INF("📁 Initializing time-aware file system...");
     ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);

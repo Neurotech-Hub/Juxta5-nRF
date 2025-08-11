@@ -15,9 +15,11 @@
 #include <zephyr/bluetooth/att.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "ble_service.h"
 #include "juxta_framfs/framfs.h"
+#include "juxta_vitals_nrf52/vitals.h"
 
 LOG_MODULE_REGISTER(juxta_ble_service, LOG_LEVEL_DBG);
 
@@ -25,6 +27,9 @@ LOG_MODULE_REGISTER(juxta_ble_service, LOG_LEVEL_DBG);
 static int generate_file_listing(char *buffer, size_t buffer_size);
 static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                            const void *data, uint16_t len);
+static int handle_timestamp_synchronization(uint32_t timestamp);
+static int handle_memory_clearing(void);
+static bool validate_timestamp(uint32_t timestamp);
 
 /* Characteristic values - will be used in later phases */
 static char node_response[JUXTA_NODE_RESPONSE_MAX_SIZE] __unused;
@@ -45,6 +50,9 @@ static const struct bt_gatt_attr *filename_char_attr = NULL;
 /* External framfs context - will be set during initialization */
 static struct juxta_framfs_context *framfs_ctx = NULL;
 
+/* External vitals context - will be set during initialization */
+static struct juxta_vitals_ctx *vitals_ctx = NULL;
+
 /* File transfer state */
 static bool file_transfer_active = false;
 static char current_transfer_filename[JUXTA_FRAMFS_FILENAME_LEN];
@@ -62,6 +70,125 @@ void juxta_ble_set_framfs_context(struct juxta_framfs_context *ctx)
 {
     framfs_ctx = ctx;
     LOG_INF("📁 BLE service linked to framfs context");
+}
+
+/**
+ * @brief Set the vitals context for timestamp synchronization
+ */
+void juxta_ble_set_vitals_context(struct juxta_vitals_ctx *ctx)
+{
+    vitals_ctx = ctx;
+    LOG_INF("⏰ BLE service linked to vitals context");
+}
+
+/**
+ * @brief Validate timestamp for reasonable range
+ * 
+ * @param timestamp Unix timestamp to validate
+ * @return true if timestamp is valid, false otherwise
+ */
+static bool validate_timestamp(uint32_t timestamp)
+{
+    /* Check for reasonable range: 2020-01-01 to 2030-12-31 */
+    const uint32_t MIN_TIMESTAMP = 1577836800; /* 2020-01-01 00:00:00 UTC */
+    const uint32_t MAX_TIMESTAMP = 1924992000; /* 2030-12-31 23:59:59 UTC */
+    
+    if (timestamp < MIN_TIMESTAMP || timestamp > MAX_TIMESTAMP)
+    {
+        LOG_WRN("⏰ Timestamp out of valid range: %u (expected %u-%u)", 
+                timestamp, MIN_TIMESTAMP, MAX_TIMESTAMP);
+        return false;
+    }
+    
+    return true;
+}
+
+/**
+ * @brief Handle timestamp synchronization
+ * 
+ * @param timestamp Unix timestamp to set
+ * @return 0 on success, negative error code on failure
+ */
+static int handle_timestamp_synchronization(uint32_t timestamp)
+{
+    if (!vitals_ctx)
+    {
+        LOG_ERR("⏰ Vitals context not available for timestamp synchronization");
+        return -ENODEV;
+    }
+    
+    if (!validate_timestamp(timestamp))
+    {
+        LOG_ERR("⏰ Invalid timestamp: %u", timestamp);
+        return -EINVAL;
+    }
+    
+    /* Get current timestamp for comparison */
+    uint32_t current_timestamp = juxta_vitals_get_timestamp(vitals_ctx);
+    
+    /* Set the new timestamp */
+    int ret = juxta_vitals_set_timestamp(vitals_ctx, timestamp);
+    if (ret < 0)
+    {
+        LOG_ERR("⏰ Failed to set timestamp: %d", ret);
+        return ret;
+    }
+    
+    /* Log the timestamp change */
+    if (current_timestamp > 0)
+    {
+        LOG_INF("⏰ Timestamp synchronized: %u → %u (delta: %d seconds)", 
+                current_timestamp, timestamp, (int)(timestamp - current_timestamp));
+    }
+    else
+    {
+        LOG_INF("⏰ Timestamp set to: %u", timestamp);
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief Handle memory clearing (file system format)
+ * 
+ * @return 0 on success, negative error code on failure
+ */
+static int handle_memory_clearing(void)
+{
+    if (!framfs_ctx || !framfs_ctx->initialized)
+    {
+        LOG_ERR("🧹 Framfs not available for memory clearing");
+        return -ENODEV;
+    }
+    
+    LOG_INF("🧹 Starting memory clearing operation...");
+    
+    /* Format the file system */
+    int ret = juxta_framfs_format(framfs_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("🧹 Failed to format file system: %d", ret);
+        return ret;
+    }
+    
+    /* Clear MAC address table */
+    ret = juxta_framfs_mac_clear(framfs_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("🧹 Failed to clear MAC table: %d", ret);
+        return ret;
+    }
+    
+    /* Clear user settings (reset to defaults) */
+    ret = juxta_framfs_clear_user_settings(framfs_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("🧹 Failed to clear user settings: %d", ret);
+        return ret;
+    }
+    
+    LOG_INF("✅ Memory clearing completed successfully");
+    return 0;
 }
 
 /**
@@ -191,6 +318,8 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
     /* Simple JSON parsing - look for key-value pairs */
     const char *p = json_cmd;
     bool settings_changed = false;
+    bool send_filenames_requested = false;
+    bool clear_memory_requested = false;
 
     /* Look for timestamp */
     p = strstr(json_cmd, "\"timestamp\":");
@@ -200,7 +329,12 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         if (sscanf(p, "\"timestamp\":%u", &timestamp) == 1)
         {
             LOG_INF("🎛️ Timestamp command: %u", timestamp);
-            /* TODO: Phase 4 - Implement timestamp synchronization */
+            int ret = handle_timestamp_synchronization(timestamp);
+            if (ret < 0)
+            {
+                LOG_ERR("❌ Timestamp synchronization failed: %d", ret);
+                return ret;
+            }
         }
     }
 
@@ -210,6 +344,7 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
     {
         if (strstr(p, "\"sendFilenames\":true") || strstr(p, "\"sendFilenames\": true"))
         {
+            send_filenames_requested = true;
             LOG_INF("🎛️ Send filenames command received");
             /* Trigger file listing via filename characteristic */
             if (current_conn)
@@ -248,8 +383,26 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
     {
         if (strstr(p, "\"clearMemory\":true") || strstr(p, "\"clearMemory\": true"))
         {
+            clear_memory_requested = true;
             LOG_INF("🎛️ Clear memory command received");
-            /* TODO: Phase 4 - Implement memory clearing */
+        }
+    }
+
+    /* Check for command conflicts */
+    if (send_filenames_requested && clear_memory_requested)
+    {
+        LOG_ERR("❌ Command conflict: sendFilenames and clearMemory cannot be used together");
+        return -EINVAL;
+    }
+
+    /* Execute clearMemory if requested */
+    if (clear_memory_requested)
+    {
+        int ret = handle_memory_clearing();
+        if (ret < 0)
+        {
+            LOG_ERR("❌ Memory clearing failed: %d", ret);
+            return ret;
         }
     }
 
@@ -879,5 +1032,56 @@ int juxta_ble_get_status(uint16_t *mtu, bool *connected, bool *transfer_active)
 
     LOG_DBG("📊 Service status: MTU=%d, Connected=%s, Transfer=%s",
             *mtu, *connected ? "yes" : "no", *transfer_active ? "active" : "idle");
+    return 0;
+}
+
+/**
+ * @brief Test function for timestamp synchronization and clearMemory functionality
+ * This function can be called during development to verify the implementation
+ */
+int juxta_ble_test_gateway_commands(void)
+{
+    LOG_INF("🧪 Testing gateway command functionality...");
+    
+    /* Test 1: Timestamp synchronization */
+    LOG_INF("Test 1: Timestamp synchronization");
+    uint32_t test_timestamp = 1705752000; /* 2024-01-20 12:00:00 UTC */
+    int ret = handle_timestamp_synchronization(test_timestamp);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ Timestamp synchronization test failed: %d", ret);
+        return ret;
+    }
+    LOG_INF("✅ Timestamp synchronization test passed");
+    
+    /* Test 2: Invalid timestamp validation */
+    LOG_INF("Test 2: Invalid timestamp validation");
+    uint32_t invalid_timestamp = 1000000000; /* Too old */
+    ret = handle_timestamp_synchronization(invalid_timestamp);
+    if (ret >= 0)
+    {
+        LOG_ERR("❌ Invalid timestamp validation test failed - should have rejected timestamp");
+        return -1;
+    }
+    LOG_INF("✅ Invalid timestamp validation test passed");
+    
+    /* Test 3: ClearMemory functionality (only if framfs is available) */
+    if (framfs_ctx && framfs_ctx->initialized)
+    {
+        LOG_INF("Test 3: ClearMemory functionality");
+        ret = handle_memory_clearing();
+        if (ret < 0)
+        {
+            LOG_ERR("❌ ClearMemory test failed: %d", ret);
+            return ret;
+        }
+        LOG_INF("✅ ClearMemory test passed");
+    }
+    else
+    {
+        LOG_WRN("⚠️ Skipping ClearMemory test - framfs not available");
+    }
+    
+    LOG_INF("✅ All gateway command tests passed");
     return 0;
 }

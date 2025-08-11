@@ -44,6 +44,8 @@ Accepts JSON commands to control device behavior. Multiple commands can be sent 
 }
 ```
 
+This implementaion is unique from other nodes that have an internal memory card where subjectId and uploadPath would be manually set/written. Here, we must rely on the BLE connection itself.
+
 **Commands**:
 - `timestamp` (number): Unix timestamp for device synchronization
 - `sendFilenames` (boolean): Triggers file listing process when true
