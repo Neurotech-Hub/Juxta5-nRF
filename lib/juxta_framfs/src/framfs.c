@@ -1004,6 +1004,66 @@ int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx)
     return JUXTA_FRAMFS_OK;
 }
 
+int juxta_framfs_get_mac_table_data_size(struct juxta_framfs_context *ctx, uint32_t *size)
+{
+    if (!ctx || !ctx->initialized || !size)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Calculate size: 3 bytes per valid MAC ID (entry_count from header) */
+    *size = ctx->mac_header.entry_count * JUXTA_FRAMFS_MAC_ADDRESS_SIZE;
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_read_mac_table_data(struct juxta_framfs_context *ctx,
+                                     uint32_t offset, uint8_t *buffer, size_t length)
+{
+    if (!ctx || !ctx->initialized || !buffer)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Calculate total data size */
+    uint32_t total_size = ctx->mac_header.entry_count * JUXTA_FRAMFS_MAC_ADDRESS_SIZE;
+
+    /* Check bounds */
+    if (offset >= total_size)
+    {
+        return 0; /* End of data */
+    }
+
+    /* Calculate how many bytes we can read */
+    size_t bytes_to_read = MIN(length, total_size - offset);
+
+    /* Calculate which MAC entries we need to read */
+    uint8_t start_entry = offset / JUXTA_FRAMFS_MAC_ADDRESS_SIZE;
+    uint8_t end_entry = (offset + bytes_to_read - 1) / JUXTA_FRAMFS_MAC_ADDRESS_SIZE;
+
+    /* Read MAC entries and extract just the 3-byte MAC IDs */
+    size_t bytes_read = 0;
+    for (uint8_t i = start_entry; i <= end_entry && i < ctx->mac_header.entry_count; i++)
+    {
+        struct juxta_framfs_mac_entry entry;
+        int ret = framfs_read_mac_entry(ctx, i, &entry);
+        if (ret != JUXTA_FRAMFS_OK)
+        {
+            return ret;
+        }
+
+        /* Calculate offset within this entry */
+        uint32_t entry_offset = offset + bytes_read - (i * JUXTA_FRAMFS_MAC_ADDRESS_SIZE);
+        size_t copy_size = MIN(JUXTA_FRAMFS_MAC_ADDRESS_SIZE - entry_offset,
+                               bytes_to_read - bytes_read);
+
+        /* Copy just the 3-byte MAC ID */
+        memcpy(buffer + bytes_read, entry.mac_id + entry_offset, copy_size);
+        bytes_read += copy_size;
+    }
+
+    return bytes_read;
+}
+
 /* ========================================================================
  * User Settings API Functions
  * ======================================================================== */

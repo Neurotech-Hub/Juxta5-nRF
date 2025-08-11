@@ -985,26 +985,38 @@ static int test_rtc_functionality(void)
 
     LOG_INF("🧪 Testing RTC functionality...");
 
-    ret = juxta_vitals_init(&vitals_ctx, true); // Enable battery monitoring
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to initialize vitals library: %d", ret);
-        return ret;
-    }
-
-    // Set RTC/Unix timestamp for correct minute-of-day tracking
-    // Example: 2024-01-20 12:00:00 UTC (1705752000)
-    uint32_t initial_timestamp = 1705752000;
-    ret = juxta_vitals_set_timestamp(&vitals_ctx, initial_timestamp);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to set timestamp: %d", ret);
-        return ret;
-    }
-
-    LOG_INF("✅ RTC timestamp set to: %u", initial_timestamp);
-
+    /* Check if vitals are already initialized (from BLE timestamp sync) */
     uint32_t current_timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
+    if (current_timestamp > 0)
+    {
+        LOG_INF("⏰ Vitals already initialized with timestamp: %u", current_timestamp);
+        LOG_INF("✅ Skipping vitals reinitialization to preserve BLE timestamp");
+    }
+    else
+    {
+        /* Only initialize if not already done */
+        ret = juxta_vitals_init(&vitals_ctx, true); // Enable battery monitoring
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to initialize vitals library: %d", ret);
+            return ret;
+        }
+
+        // Set RTC/Unix timestamp for correct minute-of-day tracking
+        // Example: 2024-01-20 12:00:00 UTC (1705752000)
+        uint32_t initial_timestamp = 1705752000;
+        ret = juxta_vitals_set_timestamp(&vitals_ctx, initial_timestamp);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to set timestamp: %d", ret);
+            return ret;
+        }
+
+        LOG_INF("✅ RTC timestamp set to: %u", initial_timestamp);
+    }
+
+    /* Get current timestamp (either from BLE or test) */
+    current_timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
     LOG_INF("📅 Current timestamp: %u", current_timestamp);
 
     uint32_t date = juxta_vitals_get_date_yyyymmdd(&vitals_ctx);

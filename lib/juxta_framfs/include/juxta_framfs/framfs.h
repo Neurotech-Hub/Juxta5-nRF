@@ -392,6 +392,27 @@ extern "C"
      */
     int juxta_framfs_mac_clear(struct juxta_framfs_context *ctx);
 
+    /**
+     * @brief Get size of valid MAC table data for transfer
+     *
+     * @param ctx File system context
+     * @param size Pointer to store size in bytes (3 bytes per valid MAC ID)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_mac_table_data_size(struct juxta_framfs_context *ctx, uint32_t *size);
+
+    /**
+     * @brief Read MAC table data for transfer (3-byte MAC IDs only)
+     *
+     * @param ctx File system context
+     * @param offset Offset within MAC table data
+     * @param buffer Buffer to store MAC IDs
+     * @param length Number of bytes to read
+     * @return Number of bytes read on success, negative error code on failure
+     */
+    int juxta_framfs_read_mac_table_data(struct juxta_framfs_context *ctx,
+                                         uint32_t offset, uint8_t *buffer, size_t length);
+
     /* ========================================================================
      * User Settings API
      * ======================================================================== */

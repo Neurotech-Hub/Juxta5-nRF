@@ -648,6 +648,23 @@ static int generate_file_listing(char *buffer, size_t buffer_size)
         written += eof_len;
     }
 
+    /* Add MAC table as special "file" if it has data */
+    uint32_t mac_table_size;
+    if (juxta_framfs_get_mac_table_data_size(framfs_ctx, &mac_table_size) == 0 && mac_table_size > 0)
+    {
+        int mac_len = snprintf(buffer + written, buffer_size - written,
+                               ";MACIDX|%u", mac_table_size);
+        if (mac_len >= 0 && written + mac_len < buffer_size)
+        {
+            written += mac_len;
+            LOG_DBG("📁 Added MAC table to listing: MACIDX|%u", mac_table_size);
+        }
+        else
+        {
+            LOG_WRN("📁 MAC table listing truncated due to buffer size");
+        }
+    }
+
     LOG_INF("📁 Generated file listing (%d bytes): %s", written, buffer);
     return written;
 }
@@ -669,7 +686,37 @@ static int start_file_transfer(const char *filename)
         return -EINVAL;
     }
 
-    /* Get file info */
+    /* Check if this is a MAC table request */
+    if (strcmp(filename, "MACIDX") == 0)
+    {
+        /* Handle MAC table transfer */
+        uint32_t mac_table_size;
+        int ret = juxta_framfs_get_mac_table_data_size(framfs_ctx, &mac_table_size);
+        if (ret < 0)
+        {
+            LOG_ERR("📁 Failed to get MAC table size: %d", ret);
+            return ret;
+        }
+
+        if (mac_table_size == 0)
+        {
+            LOG_WRN("📁 MAC table is empty");
+            return -ENOENT;
+        }
+
+        /* Initialize transfer state for MAC table */
+        strncpy(current_transfer_filename, "MACIDX", JUXTA_FRAMFS_FILENAME_LEN - 1);
+        current_transfer_filename[JUXTA_FRAMFS_FILENAME_LEN - 1] = '\0';
+        current_transfer_offset = 0;
+        current_transfer_file_size = mac_table_size;
+        file_transfer_active = true;
+
+        LOG_INF("📁 Started MAC table transfer: %d bytes, MTU: %d",
+                mac_table_size, current_mtu);
+        return 0;
+    }
+
+    /* Get file info for regular files */
     struct juxta_framfs_entry entry;
     int ret = juxta_framfs_get_file_info(framfs_ctx, filename, &entry);
     if (ret != 0)
@@ -717,7 +764,28 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         return 0; /* Transfer complete */
     }
 
-    /* Read file chunk */
+    /* Check if this is MAC table transfer */
+    if (strcmp(current_transfer_filename, "MACIDX") == 0)
+    {
+        /* Read MAC table chunk */
+        int ret = juxta_framfs_read_mac_table_data(framfs_ctx, current_transfer_offset,
+                                                   buffer, chunk_size);
+        if (ret < 0)
+        {
+            LOG_ERR("📁 Failed to read MAC table chunk: %d", ret);
+            return ret;
+        }
+
+        current_transfer_offset += ret;
+        *bytes_read = ret;
+
+        LOG_DBG("📁 MAC table chunk: offset=%u/%d, bytes=%zu, progress=%.1f%%",
+                current_transfer_offset, current_transfer_file_size, *bytes_read,
+                (double)current_transfer_offset / current_transfer_file_size * 100.0);
+        return 0;
+    }
+
+    /* Read file chunk for regular files */
     int ret = juxta_framfs_read(framfs_ctx, current_transfer_filename,
                                 current_transfer_offset, buffer, chunk_size);
     if (ret < 0)
