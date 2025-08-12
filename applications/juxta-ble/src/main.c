@@ -12,7 +12,7 @@
 #ifdef DEBUG_SKIP_DATETIME_SYNC
 #undef DEBUG_SKIP_DATETIME_SYNC
 #endif
-#define DEBUG_SKIP_MAGNET_SENSOR
+// #define DEBUG_SKIP_MAGNET_SENSOR
 // #define DEBUG_SKIP_DATETIME_SYNC
 
 #include <zephyr/kernel.h>

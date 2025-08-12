@@ -268,8 +268,29 @@ static int generate_node_response(char *buffer, size_t buffer_size)
         LOG_WRN("📁 Framfs not available, using default upload path");
     }
 
-    /* TODO: Phase 3 - Get battery level from system */
-    /* For now, battery_level = 0 means "not set" */
+    /* Get battery level from vitals library */
+    if (vitals_ctx && vitals_ctx->initialized)
+    {
+        /* Force a vitals update to get fresh battery reading */
+        (void)juxta_vitals_update(vitals_ctx);
+
+        /* Get validated battery level (0-100) */
+        int ret = juxta_vitals_get_validated_battery_level(vitals_ctx, &battery_level);
+        if (ret == 0)
+        {
+            LOG_DBG("📊 Battery level: %d%%", battery_level);
+        }
+        else
+        {
+            LOG_WRN("📊 Failed to get battery level: %d, using 0", ret);
+            battery_level = 0; /* Default to 0 if read fails */
+        }
+    }
+    else
+    {
+        LOG_WRN("📊 Vitals context not available, battery level = 0");
+        battery_level = 0;
+    }
 
     /* Generate JSON response */
     int written = snprintf(buffer, buffer_size,
