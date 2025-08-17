@@ -2,7 +2,7 @@
  * JUXTA BLE Service Header
  * Defines BLE service and characteristics for JUXTA Hublink protocol
  *
- * Copyright (c) 2024 NeurotechHub
+ * Copyright (c) 2025 NeurotechHub
  * SPDX-License-Identifier: Apache-2.0
  */
 

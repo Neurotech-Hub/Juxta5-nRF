@@ -1,11 +1,13 @@
 /*
  * JUXTA BLE Application
  *
- * Copyright (c) 2024 NeurotechHub
+ * Copyright (c) 2025 NeurotechHub
  * SPDX-License-Identifier: Apache-2.0
  */
 
 /* Debug overrides - uncomment to skip magnet sensor and datetime sync for debugging */
+/* DEBUG_SKIP_MAGNET_SENSOR requires magnet to be applied before beginning the production flow */
+/* DEBUG_SKIP_DATETIME_SYNC requires datetime to be set via connectable advertising before beginning the production flow */
 #ifdef DEBUG_SKIP_MAGNET_SENSOR
 #undef DEBUG_SKIP_MAGNET_SENSOR
 #endif

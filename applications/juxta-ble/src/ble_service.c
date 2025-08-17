@@ -2,7 +2,7 @@
  * JUXTA BLE Service Implementation
  * Implements BLE GATT service for JUXTA Hublink protocol
  *
- * Copyright (c) 2024 NeurotechHub
+ * Copyright (c) 2025 NeurotechHub
  * SPDX-License-Identifier: Apache-2.0
  */
 
