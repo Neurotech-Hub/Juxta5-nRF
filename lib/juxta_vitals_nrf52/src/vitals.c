@@ -93,7 +93,7 @@ int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitori
         adc_cfg.gain = ADC_GAIN_1_6;
         adc_cfg.reference = ADC_REF_INTERNAL;
         adc_cfg.acquisition_time = ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40);
-        adc_cfg.channel_id = 0;
+        adc_cfg.channel_id = 1;
         adc_cfg.input_positive = SAADC_CH_PSELP_PSELP_VDD;
 
         int ret = adc_channel_setup(adc_dev, &adc_cfg);
@@ -109,7 +109,7 @@ int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitori
 
         /* Configure ADC sequence */
         memset(&adc_seq, 0, sizeof(adc_seq));
-        adc_seq.channels = BIT(0);
+        adc_seq.channels = BIT(1);
         adc_seq.buffer = &adc_sample_buffer;
         adc_seq.buffer_size = sizeof(adc_sample_buffer);
         adc_seq.resolution = 14;
