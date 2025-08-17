@@ -33,6 +33,7 @@
 #include "juxta_framfs/framfs.h"
 #include "juxta_fram/fram.h"
 #include "ble_service.h"
+#include "adc.h"
 #include <stdio.h>
 #include <time.h>
 #include "lis2dh12.h"
@@ -210,6 +211,13 @@ static void juxta_scan_table_print_and_clear(void)
 
 static struct k_work state_work;
 static struct k_timer state_timer;
+
+// ADC timer for mode 1 (ADC_ONLY mode)
+static struct k_timer adc_timer;
+
+/* Operating mode definitions */
+#define OPERATING_MODE_NORMAL 0x00   /* State machine/BLE bursts/motion counting */
+#define OPERATING_MODE_ADC_ONLY 0x01 /* Purely ADC recordings */
 
 #define OPERATING_MODE 0x00
 #define ADV_BURST_DURATION_MS 100
@@ -424,6 +432,61 @@ static bool should_allow_fram_write(void)
         return false;
     }
     return true;
+}
+
+// ADC timer callback - triggers ADC burst sampling every 1 second in ADC_ONLY mode
+static void adc_timer_callback(struct k_timer *timer)
+{
+    if (!hardware_verified || !framfs_ctx.initialized || ble_connected || !juxta_adc_is_ready())
+    {
+        return;
+    }
+
+    /* Check battery before FRAM operations */
+    if (!should_allow_fram_write())
+    {
+        LOG_INF("📊 Skipping ADC burst due to low battery");
+        return;
+    }
+
+    // Trigger ADC burst sampling
+    int32_t samples[1000]; // Use int32_t as per adc.c function signature
+    uint32_t actual_samples;
+    uint32_t duration_us;
+
+    int ret = juxta_adc_burst_sample(samples, 1000, &actual_samples, &duration_us);
+    if (ret == 0 && actual_samples > 0)
+    {
+        uint32_t start_time = juxta_vitals_get_timestamp(&vitals_ctx) * 1000000; // Convert to microseconds
+
+        // Convert int32_t samples to uint8_t for storage (scale appropriately)
+        uint8_t scaled_samples[1000];
+        for (uint32_t i = 0; i < actual_samples && i < 1000; i++)
+        {
+            // Scale int32_t voltage (mV) to uint8_t (0-255 range)
+            // Assuming voltage range is roughly -2000 to +2000 mV
+            int32_t scaled = (samples[i] + 2000) * 255 / 4000;
+            if (scaled < 0)
+                scaled = 0;
+            if (scaled > 255)
+                scaled = 255;
+            scaled_samples[i] = (uint8_t)scaled;
+        }
+
+        ret = juxta_framfs_append_adc_burst_data(&time_ctx, start_time, scaled_samples, (uint16_t)actual_samples, duration_us);
+        if (ret == 0)
+        {
+            LOG_DBG("📊 ADC burst recorded: %d samples, %d us duration", actual_samples, duration_us);
+        }
+        else
+        {
+            LOG_ERR("📊 Failed to record ADC burst: %d", ret);
+        }
+    }
+    else
+    {
+        LOG_WRN("📊 ADC burst sampling failed or no samples: %d", ret);
+    }
 }
 
 /* Definition: simple record logger (BOOT/CONNECTED/NO_ACTIVITY/ERROR) */
@@ -999,19 +1062,33 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
     else
     {
-        /* Normal operation - resume state machine only after full init */
+        /* Normal operation - resume appropriate mode only after full init */
         if (production_initialization_complete)
         {
-            last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
-            last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();
+            uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
+            if (framfs_ctx.initialized)
+            {
+                juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
+            }
 
-            LOG_INF("▶️ FRAMFS logging operations resumed");
-            LOG_INF("▶️ State machine resumed - resuming normal operation");
-            k_work_submit(&state_work);
+            if (current_mode == OPERATING_MODE_NORMAL)
+            {
+                last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
+                last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();
+
+                LOG_INF("▶️ FRAMFS logging operations resumed");
+                LOG_INF("▶️ State machine resumed - resuming normal operation");
+                k_work_submit(&state_work);
+            }
+            else if (current_mode == OPERATING_MODE_ADC_ONLY)
+            {
+                LOG_INF("▶️ ADC_ONLY mode resumed - ADC timer continues");
+                // ADC timer continues automatically
+            }
         }
         else
         {
-            LOG_INF("⏳ Skipping state machine resume (initialization not complete)");
+            LOG_INF("⏳ Skipping mode resume (initialization not complete)");
         }
     }
 }
@@ -1366,7 +1443,18 @@ int main(void)
                 LOG_WRN("⚠️ LIS2DH motion system initialization failed, continuing without motion detection");
             }
 
-            LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH)");
+            // Initialize ADC system
+            ret = juxta_adc_init();
+            if (ret < 0)
+            {
+                LOG_WRN("⚠️ ADC initialization failed, continuing without ADC functionality");
+            }
+            else
+            {
+                LOG_INF("✅ ADC system initialized successfully");
+            }
+
+            LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH + ADC)");
             hardware_verified = true;
 
             /* Log BOOT event now that hardware is verified */
@@ -1489,17 +1577,51 @@ int main(void)
             LOG_WRN("⚠️ LIS2DH motion system initialization failed, continuing without motion detection");
         }
 
-        LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH)");
+        // Initialize ADC system
+        ret = juxta_adc_init();
+        if (ret < 0)
+        {
+            LOG_WRN("⚠️ ADC initialization failed, continuing without ADC functionality");
+        }
+        else
+        {
+            LOG_INF("✅ ADC system initialized successfully");
+        }
+
+        LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH + ADC)");
         hardware_verified = true;
 
         /* Log BOOT event now that hardware is verified */
         juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_BOOT);
 
-        /* Start state machine after hardware is verified to avoid SPI contention */
-        k_work_submit(&state_work);
-        k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
+        /* Start appropriate mode based on operating mode setting */
+        uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
+        if (framfs_ctx.initialized)
+        {
+            juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
+        }
 
-        LOG_INF("✅ JUXTA BLE Application started successfully");
+        if (current_mode == OPERATING_MODE_NORMAL)
+        {
+            /* Mode 0: Start state machine for BLE bursts/motion counting */
+            k_work_submit(&state_work);
+            k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
+            LOG_INF("✅ JUXTA BLE Application started in NORMAL mode (BLE bursts/motion counting)");
+        }
+        else if (current_mode == OPERATING_MODE_ADC_ONLY)
+        {
+            /* Mode 1: Start ADC timer for pure ADC recordings - no state machine needed */
+            k_timer_init(&adc_timer, adc_timer_callback, NULL);
+            k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1)); // Every 1 second
+            LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
+            LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (1s intervals)");
+        }
+        else
+        {
+            LOG_WRN("⚠️ Unknown operating mode: %d, defaulting to NORMAL mode", current_mode);
+            k_work_submit(&state_work);
+            k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT);
+        }
 
         // Initialize watchdog timer
         if (!device_is_ready(wdt))
