@@ -13,6 +13,7 @@ target_sources(app PRIVATE
     src/main.c
     src/ble_service.c
     src/lis2dh12.c
+    src/adc.c
 )
 
 # Add include directories for our libraries
