@@ -5,18 +5,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* Debug overrides - uncomment to skip magnet sensor and datetime sync for debugging */
-/* DEBUG_SKIP_MAGNET_SENSOR requires magnet to be applied before beginning the production flow */
-/* DEBUG_SKIP_DATETIME_SYNC requires datetime to be set via connectable advertising before beginning the production flow */
-#ifdef DEBUG_SKIP_MAGNET_SENSOR
-#undef DEBUG_SKIP_MAGNET_SENSOR
-#endif
-#ifdef DEBUG_SKIP_DATETIME_SYNC
-#undef DEBUG_SKIP_DATETIME_SYNC
-#endif
-// #define DEBUG_SKIP_MAGNET_SENSOR
-// #define DEBUG_SKIP_DATETIME_SYNC
-
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -59,7 +47,6 @@ static bool ble_connected = false; // Track connection state
 // Production flow tracking
 static bool magnet_activated = false;
 static bool datetime_synchronized = false;
-static bool production_initialization_complete = false;
 static uint8_t datetime_sync_retry_count = 0;
 
 // Work queue for async connectable advertising restart
@@ -1039,7 +1026,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     juxta_ble_connection_terminated();
 
     /* Production flow: Check if datetime was synchronized during initial boot */
-    if (magnet_activated && !production_initialization_complete && !datetime_synchronized)
+    if (magnet_activated && !datetime_synchronized)
     {
         datetime_sync_retry_count++;
         LOG_INF("⏰ Initial boot: Datetime not yet synchronized - scheduling connectable advertising restart (attempt %d)", datetime_sync_retry_count);
@@ -1062,8 +1049,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
     else
     {
-        /* Normal operation - resume appropriate mode only after full init */
-        if (production_initialization_complete)
+        /* Normal operation - resume appropriate mode */
         {
             uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
             if (framfs_ctx.initialized)
@@ -1085,10 +1071,6 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
                 LOG_INF("▶️ ADC_ONLY mode resumed - ADC timer continues");
                 // ADC timer continues automatically
             }
-        }
-        else
-        {
-            LOG_INF("⏳ Skipping mode resume (initialization not complete)");
         }
     }
 }
@@ -1264,403 +1246,260 @@ int main(void)
     NRF_POWER->RESETREAS = reset_reason;
 
     // Wait for magnet sensor activation before starting BLE
-    if (!production_initialization_complete)
+    wait_for_magnet_sensor();
+    magnet_activated = true;
+    LOG_INF("🧲 Magnet activated - starting datetime synchronization phase");
+
+    LOG_INF("⏰ Starting connectable advertising for datetime synchronization...");
+    // Start connectable advertising and wait for datetime sync
+    ret = bt_enable(NULL);
+    if (ret)
     {
-#ifdef DEBUG_SKIP_MAGNET_SENSOR
-        LOG_INF("Skipping magnet sensor wait due to DEBUG_SKIP_MAGNET_SENSOR");
-#else
-        wait_for_magnet_sensor();
-#endif
-
-        magnet_activated = true;
-        LOG_INF("🧲 Magnet activated - starting datetime synchronization phase");
-
-// Wait for datetime synchronization
-#ifdef DEBUG_SKIP_DATETIME_SYNC
-        LOG_INF("Skipping datetime sync due to DEBUG_SKIP_DATETIME_SYNC");
-        datetime_synchronized = true;
-#else
-        LOG_INF("⏰ Starting connectable advertising for datetime synchronization...");
-        // Start connectable advertising and wait for datetime sync
-        ret = bt_enable(NULL);
-        if (ret)
-        {
-            LOG_ERR("Bluetooth init failed (err %d)", ret);
-            return ret;
-        }
-
-        LOG_INF("Bluetooth initialized for datetime sync");
-
-        /* Initialize vitals early so timestamp sync can succeed */
-        ret = juxta_vitals_init(&vitals_ctx, true);
-        if (ret < 0)
-        {
-            LOG_ERR("Vitals init failed (err %d)", ret);
-            return ret;
-        }
-        juxta_ble_set_vitals_context(&vitals_ctx);
-
-        /* Initialize watchdog feed timer early */
-        k_timer_init(&wdt_feed_timer, wdt_feed_timer_callback, NULL);
-
-        /* Minimal FRAM + framfs init so sendFilenames can work during the
-         * initial connectable session. Heavier init (time-aware FS, LIS2DH, etc.)
-         * happens after we disconnect from the gateway.
-         */
-        LOG_INF("📁 Initializing FRAM device (pre-sync minimal)...");
-        ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
-        if (ret < 0)
-        {
-            LOG_ERR("FRAM/framfs init failed: %d", ret);
-            return ret;
-        }
-        juxta_ble_set_framfs_context(&framfs_ctx);
-
-        setup_dynamic_adv_name();
-        ret = juxta_ble_service_init();
-        if (ret < 0)
-        {
-            LOG_ERR("BLE service init failed (err %d)", ret);
-            return ret;
-        }
-
-        /* Set up datetime synchronization callback for production flow */
-        juxta_ble_set_datetime_sync_callback(datetime_synchronized_callback);
-
-        setup_dynamic_adv_name();
-
-        // Start connectable advertising and wait for datetime synchronization
-        // Ensure work handler is initialized before any scheduling
-        k_work_init(&datetime_sync_restart_work, datetime_sync_restart_work_handler);
-        ret = juxta_start_connectable_advertising();
-        if (ret < 0)
-        {
-            LOG_ERR("Failed to start connectable advertising for datetime sync: %d", ret);
-            return ret;
-        }
-
-        LOG_INF("🔔 Connectable advertising started - waiting for datetime synchronization...");
-        connectable_adv_active = true;
-
-        // Wait for datetime synchronization (this will be set in the BLE service)
-        while (!datetime_synchronized)
-        {
-            k_sleep(K_MSEC(100));
-        }
-
-        LOG_INF("✅ Datetime synchronized successfully");
-        /* Stay connected and serve filenames. Do not proceed with production
-         * initialization until we disconnect from the gateway.
-         */
-        LOG_INF("⏳ Waiting for disconnect before production initialization...");
-        while (ble_connected)
-        {
-            k_sleep(K_MSEC(50));
-        }
-
-        /* Start watchdog feed timer now that we have a timestamp */
-        k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
-        LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
-#endif
-        {
-            struct tm timeinfo;
-            time_t t = 1705752030; // 2024-01-20 12:00:30 UTC
-            gmtime_r(&t, &timeinfo);
-            LOG_INF("Test gmtime_r: %04d-%02d-%02d %02d:%02d:%02d",
-                    timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-
-            LOG_INF("Board: %s", CONFIG_BOARD);
-            LOG_INF("Device: %s", CONFIG_SOC);
-            LOG_INF("Advertising: %d ms burst every %d seconds", ADV_BURST_DURATION_MS, ADV_INTERVAL_SECONDS);
-            LOG_INF("Scanning: %d ms burst every %d seconds", SCAN_BURST_DURATION_MS, SCAN_INTERVAL_SECONDS);
-
-            // BLE is already enabled and service registered during datetime sync phase.
-            // Proceed to hardware initialization only.
-
-            // Small delay to allow RTT buffer to catch up
-            k_sleep(K_MSEC(50));
-
-            /* Initialize FRAM device and framfs */
-            LOG_INF("📁 Initializing FRAM device...");
-            ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
-            if (ret < 0)
-            {
-                LOG_ERR("FRAM/framfs init failed: %d", ret);
-                return ret;
-            }
-
-            /* Link framfs context to BLE service */
-            juxta_ble_set_framfs_context(&framfs_ctx);
-
-            ret = test_rtc_functionality();
-            if (ret < 0)
-            {
-                LOG_ERR("RTC test failed (err %d)", ret);
-                return ret;
-            }
-
-            /* Link vitals context to BLE service for timestamp synchronization */
-            juxta_ble_set_vitals_context(&vitals_ctx);
-
-            /* Initialize time-aware file system after vitals are ready */
-            LOG_INF("📁 Initializing time-aware file system...");
-            ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
-            if (ret < 0)
-            {
-                LOG_ERR("Time-aware framfs init failed: %d", ret);
-                return ret;
-            }
-
-            init_randomization();
-            k_work_init(&state_work, state_work_handler);
-            k_timer_init(&state_timer, state_timer_callback, NULL);
-
-            /* Quick vitals sanity read in thread context */
-            (void)juxta_vitals_update(&vitals_ctx);
-            uint8_t bl = juxta_vitals_get_battery_percent(&vitals_ctx);
-            int8_t it = juxta_vitals_get_temperature(&vitals_ctx);
-            LOG_DBG("Vitals init: battery=%u%%, temp=%dC", bl, it);
-
-            // Initialize 10-minute timer (now only for gateway advertising timeout)
-            k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
-
-            uint32_t now = get_rtc_timestamp();
-            last_adv_timestamp = now - get_adv_interval();
-            last_scan_timestamp = now - get_scan_interval();
-            last_logged_minute = 0xFFFF; // Initialize last_logged_minute
-
-            // Quick hardware verification
-            LOG_INF("🔧 Hardware verification...");
-
-            // Test FRAM functionality
-            test_fram_functionality();
-
-            // Initialize LIS2DH motion system
-            ret = lis2dh12_init_motion_system();
-            if (ret < 0)
-            {
-                LOG_WRN("⚠️ LIS2DH motion system initialization failed, continuing without motion detection");
-            }
-
-            // Initialize ADC system
-            ret = juxta_adc_init();
-            if (ret < 0)
-            {
-                LOG_WRN("⚠️ ADC initialization failed, continuing without ADC functionality");
-            }
-            else
-            {
-                LOG_INF("✅ ADC system initialized successfully");
-            }
-
-            LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH + ADC)");
-            hardware_verified = true;
-
-            /* Log BOOT event now that hardware is verified */
-            juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_BOOT);
-
-            /* Start state machine after hardware is verified to avoid SPI contention */
-            k_work_submit(&state_work);
-            k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
-
-            LOG_INF("✅ JUXTA BLE Application started successfully");
-
-            // Initialize watchdog timer
-            if (!device_is_ready(wdt))
-            {
-                LOG_ERR("Watchdog device not ready");
-                return -ENODEV;
-            }
-
-            struct wdt_timeout_cfg wdt_cfg = {
-                .window = {
-                    .min = 0,
-                    .max = WDT_TIMEOUT_MS,
-                },
-                .callback = NULL,
-                .flags = WDT_FLAG_RESET_SOC,
-            };
-
-            wdt_channel_id = wdt_install_timeout(wdt, &wdt_cfg);
-            if (wdt_channel_id < 0)
-            {
-                LOG_ERR("Failed to install watchdog timeout: %d", wdt_channel_id);
-                return wdt_channel_id;
-            }
-
-            int err = wdt_setup(wdt, 0);
-            if (err < 0)
-            {
-                LOG_ERR("Failed to setup watchdog: %d", err);
-                return err;
-            }
-
-            LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
-
-            /* Start watchdog feed timer */
-            k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
-            LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
-
-            production_initialization_complete = true;
-        }
+        LOG_ERR("Bluetooth init failed (err %d)", ret);
+        return ret;
     }
 
-    // Initialize remaining hardware and start normal operation
-    if (!production_initialization_complete)
+    LOG_INF("Bluetooth initialized for datetime sync");
+
+    /* Initialize vitals early so timestamp sync can succeed */
+    ret = juxta_vitals_init(&vitals_ctx, true);
+    if (ret < 0)
     {
-        // Initialize FRAM device and framfs
-        LOG_INF("📁 Initializing FRAM device...");
-        ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
-        if (ret < 0)
-        {
-            LOG_ERR("FRAM/framfs init failed: %d", ret);
-            return ret;
-        }
-
-        /* Link framfs context to BLE service */
-        juxta_ble_set_framfs_context(&framfs_ctx);
-
-        ret = test_rtc_functionality();
-        if (ret < 0)
-        {
-            LOG_ERR("RTC test failed (err %d)", ret);
-            return ret;
-        }
-
-        /* Link vitals context to BLE service for timestamp synchronization */
-        juxta_ble_set_vitals_context(&vitals_ctx);
-
-        /* Initialize time-aware file system after vitals are ready */
-        LOG_INF("📁 Initializing time-aware file system...");
-        ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
-        if (ret < 0)
-        {
-            LOG_ERR("Time-aware framfs init failed: %d", ret);
-            return ret;
-        }
-
-        init_randomization();
-        k_work_init(&state_work, state_work_handler);
-        k_timer_init(&state_timer, state_timer_callback, NULL);
-
-        /* Quick vitals sanity read in thread context */
-        (void)juxta_vitals_update(&vitals_ctx);
-        uint8_t bl = juxta_vitals_get_battery_percent(&vitals_ctx);
-        int8_t it = juxta_vitals_get_temperature(&vitals_ctx);
-        LOG_DBG("Vitals init: battery=%u%%, temp=%dC", bl, it);
-
-        // Initialize datetime sync restart work
-        k_work_init(&datetime_sync_restart_work, datetime_sync_restart_work_handler);
-
-        // Initialize 10-minute timer (now only for gateway advertising timeout)
-        k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
-
-        /* Initialize watchdog feed timer */
-        k_timer_init(&wdt_feed_timer, wdt_feed_timer_callback, NULL);
-
-        uint32_t now = get_rtc_timestamp();
-        last_adv_timestamp = now - get_adv_interval();
-        last_scan_timestamp = now - get_scan_interval();
-        last_logged_minute = 0xFFFF; // Initialize last_logged_minute
-
-        // Quick hardware verification
-        LOG_INF("🔧 Hardware verification...");
-
-        // Test FRAM functionality
-        test_fram_functionality();
-
-        // Initialize LIS2DH motion system
-        ret = lis2dh12_init_motion_system();
-        if (ret < 0)
-        {
-            LOG_WRN("⚠️ LIS2DH motion system initialization failed, continuing without motion detection");
-        }
-
-        // Initialize ADC system
-        ret = juxta_adc_init();
-        if (ret < 0)
-        {
-            LOG_WRN("⚠️ ADC initialization failed, continuing without ADC functionality");
-        }
-        else
-        {
-            LOG_INF("✅ ADC system initialized successfully");
-        }
-
-        LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH + ADC)");
-        hardware_verified = true;
-
-        /* Log BOOT event now that hardware is verified */
-        juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_BOOT);
-
-        /* Start appropriate mode based on operating mode setting */
-        uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
-        if (framfs_ctx.initialized)
-        {
-            juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
-        }
-
-        if (current_mode == OPERATING_MODE_NORMAL)
-        {
-            /* Mode 0: Start state machine for BLE bursts/motion counting */
-            k_work_submit(&state_work);
-            k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
-            LOG_INF("✅ JUXTA BLE Application started in NORMAL mode (BLE bursts/motion counting)");
-        }
-        else if (current_mode == OPERATING_MODE_ADC_ONLY)
-        {
-            /* Mode 1: Start ADC timer for pure ADC recordings - no state machine needed */
-            k_timer_init(&adc_timer, adc_timer_callback, NULL);
-            k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1)); // Every 1 second
-            LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
-            LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (1s intervals)");
-        }
-        else
-        {
-            LOG_WRN("⚠️ Unknown operating mode: %d, defaulting to NORMAL mode", current_mode);
-            k_work_submit(&state_work);
-            k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT);
-        }
-
-        // Initialize watchdog timer
-        if (!device_is_ready(wdt))
-        {
-            LOG_ERR("Watchdog device not ready");
-            return -ENODEV;
-        }
-
-        struct wdt_timeout_cfg wdt_cfg = {
-            .window = {
-                .min = 0,
-                .max = WDT_TIMEOUT_MS,
-            },
-            .callback = NULL,
-            .flags = WDT_FLAG_RESET_SOC,
-        };
-
-        wdt_channel_id = wdt_install_timeout(wdt, &wdt_cfg);
-        if (wdt_channel_id < 0)
-        {
-            LOG_ERR("Failed to install watchdog timeout: %d", wdt_channel_id);
-            return wdt_channel_id;
-        }
-
-        int err = wdt_setup(wdt, 0);
-        if (err < 0)
-        {
-            LOG_ERR("Failed to setup watchdog: %d", err);
-            return err;
-        }
-
-        LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
-
-        /* Start watchdog feed timer */
-        k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
-        LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
-
-        production_initialization_complete = true;
+        LOG_ERR("Vitals init failed (err %d)", ret);
+        return ret;
     }
+    juxta_ble_set_vitals_context(&vitals_ctx);
+
+    /* Initialize watchdog feed timer early */
+    k_timer_init(&wdt_feed_timer, wdt_feed_timer_callback, NULL);
+
+    /* Minimal FRAM + framfs init so sendFilenames can work during the
+     * initial connectable session. Heavier init (time-aware FS, LIS2DH, etc.)
+     * happens after we disconnect from the gateway.
+     */
+    LOG_INF("📁 Initializing FRAM device (pre-sync minimal)...");
+    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
+    if (ret < 0)
+    {
+        LOG_ERR("FRAM/framfs init failed: %d", ret);
+        return ret;
+    }
+    juxta_ble_set_framfs_context(&framfs_ctx);
+
+    setup_dynamic_adv_name();
+    ret = juxta_ble_service_init();
+    if (ret < 0)
+    {
+        LOG_ERR("BLE service init failed (err %d)", ret);
+        return ret;
+    }
+
+    /* Set up datetime synchronization callback for production flow */
+    juxta_ble_set_datetime_sync_callback(datetime_synchronized_callback);
+
+    // Start connectable advertising and wait for datetime synchronization
+    // Ensure work handler is initialized before any scheduling
+    k_work_init(&datetime_sync_restart_work, datetime_sync_restart_work_handler);
+    ret = juxta_start_connectable_advertising();
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to start connectable advertising for datetime sync: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("🔔 Connectable advertising started - waiting for datetime synchronization...");
+    connectable_adv_active = true;
+
+    // Wait for datetime synchronization (this will be set in the BLE service)
+    while (!datetime_synchronized)
+    {
+        k_sleep(K_MSEC(100));
+    }
+
+    LOG_INF("✅ Datetime synchronized successfully");
+    /* Stay connected and serve filenames. Do not proceed with production
+     * initialization until we disconnect from the gateway.
+     */
+    LOG_INF("⏳ Waiting for disconnect before production initialization...");
+    while (ble_connected)
+    {
+        k_sleep(K_MSEC(50));
+    }
+
+    /* Start watchdog feed timer now that we have a timestamp */
+    k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
+    LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
+
+    /* Initialize FRAM device and framfs */
+    LOG_INF("📁 Initializing FRAM device...");
+    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
+    if (ret < 0)
+    {
+        LOG_ERR("FRAM/framfs init failed: %d", ret);
+        return ret;
+    }
+
+    /* Link framfs context to BLE service */
+    juxta_ble_set_framfs_context(&framfs_ctx);
+
+    ret = test_rtc_functionality();
+    if (ret < 0)
+    {
+        LOG_ERR("RTC test failed (err %d)", ret);
+        return ret;
+    }
+
+    /* Link vitals context to BLE service for timestamp synchronization */
+    juxta_ble_set_vitals_context(&vitals_ctx);
+
+    /* Initialize time-aware file system after vitals are ready */
+    LOG_INF("📁 Initializing time-aware file system...");
+    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
+    if (ret < 0)
+    {
+        LOG_ERR("Time-aware framfs init failed: %d", ret);
+        return ret;
+    }
+
+    /* Initialize FRAM device and framfs */
+    LOG_INF("📁 Initializing FRAM device...");
+    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
+    if (ret < 0)
+    {
+        LOG_ERR("FRAM/framfs init failed: %d", ret);
+        return ret;
+    }
+
+    /* Link framfs context to BLE service */
+    juxta_ble_set_framfs_context(&framfs_ctx);
+
+    ret = test_rtc_functionality();
+    if (ret < 0)
+    {
+        LOG_ERR("RTC test failed (err %d)", ret);
+        return ret;
+    }
+
+    /* Link vitals context to BLE service for timestamp synchronization */
+    juxta_ble_set_vitals_context(&vitals_ctx);
+
+    /* Initialize time-aware file system after vitals are ready */
+    LOG_INF("📁 Initializing time-aware file system...");
+    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
+    if (ret < 0)
+    {
+        LOG_ERR("Time-aware framfs init failed: %d", ret);
+        return ret;
+    }
+
+    init_randomization();
+    k_work_init(&state_work, state_work_handler);
+    k_timer_init(&state_timer, state_timer_callback, NULL);
+
+    /* Quick vitals sanity read in thread context */
+    (void)juxta_vitals_update(&vitals_ctx);
+    uint8_t battery_level = juxta_vitals_get_battery_percent(&vitals_ctx);
+    int8_t temperature = juxta_vitals_get_temperature(&vitals_ctx);
+    LOG_DBG("Vitals init: battery=%u%%, temp=%dC", battery_level, temperature);
+
+    // Initialize 10-minute timer (now only for gateway advertising timeout)
+    k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
+
+    uint32_t current_time = get_rtc_timestamp();
+    last_adv_timestamp = current_time - get_adv_interval();
+    last_scan_timestamp = current_time - get_scan_interval();
+    last_logged_minute = 0xFFFF; // Initialize last_logged_minute
+
+    // Quick hardware verification
+    LOG_INF("🔧 Hardware verification...");
+
+    // Test FRAM functionality
+    test_fram_functionality();
+
+    // Initialize LIS2DH motion system
+    ret = lis2dh12_init_motion_system();
+    if (ret < 0)
+    {
+        LOG_WRN("⚠️ LIS2DH motion system initialization failed, continuing without motion detection");
+    }
+
+    // Initialize ADC system
+    ret = juxta_adc_init();
+    if (ret < 0)
+    {
+        LOG_WRN("⚠️ ADC initialization failed, continuing without ADC functionality");
+    }
+    else
+    {
+        LOG_INF("✅ ADC system initialized successfully");
+    }
+
+    LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH + ADC)");
+    hardware_verified = true;
+
+    /* Log BOOT event now that hardware is verified */
+    juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_BOOT);
+
+    /* Start appropriate mode based on operating mode setting */
+    uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
+    if (framfs_ctx.initialized)
+    {
+        juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
+    }
+
+    if (current_mode == OPERATING_MODE_NORMAL)
+    {
+        /* Mode 0: Start state machine for BLE bursts/motion counting */
+        k_work_submit(&state_work);
+        k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
+        LOG_INF("✅ JUXTA BLE Application started in NORMAL mode (BLE bursts/motion counting)");
+    }
+    else if (current_mode == OPERATING_MODE_ADC_ONLY)
+    {
+        /* Mode 1: Start ADC timer for pure ADC recordings - no state machine needed */
+        k_timer_init(&adc_timer, adc_timer_callback, NULL);
+        k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1)); // Every 1 second
+        LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
+        LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (1s intervals)");
+    }
+    else
+    {
+        LOG_WRN("⚠️ Unknown operating mode: %d, defaulting to NORMAL mode", current_mode);
+        k_work_submit(&state_work);
+        k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT);
+    }
+
+    // Initialize watchdog timer
+    if (!device_is_ready(wdt))
+    {
+        LOG_ERR("Watchdog device not ready");
+        return -ENODEV;
+    }
+
+    struct wdt_timeout_cfg wdt_config = {
+        .window = {
+            .min = 0,
+            .max = WDT_TIMEOUT_MS,
+        },
+        .callback = NULL,
+        .flags = WDT_FLAG_RESET_SOC,
+    };
+
+    wdt_channel_id = wdt_install_timeout(wdt, &wdt_config);
+    if (wdt_channel_id < 0)
+    {
+        LOG_ERR("Failed to install watchdog timeout: %d", wdt_channel_id);
+        return wdt_channel_id;
+    }
+
+    int setup_err = wdt_setup(wdt, 0);
+    if (setup_err < 0)
+    {
+        LOG_ERR("Failed to setup watchdog: %d", setup_err);
+        return setup_err;
+    }
+
+    LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
 
     uint32_t heartbeat_counter = 0;
     while (1)
