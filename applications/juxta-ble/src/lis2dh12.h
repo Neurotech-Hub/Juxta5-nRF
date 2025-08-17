@@ -39,6 +39,13 @@ int lis2dh12_reset_motion_detection(struct lis2dh12_dev *dev);
 int lis2dh12_test_interrupt_clearing(struct lis2dh12_dev *dev);
 int lis2dh12_analyze_interrupt_trigger(struct lis2dh12_dev *dev);
 
+/* Motion system management functions */
+int lis2dh12_init_motion_system(void);
+void lis2dh12_process_motion_events(void);
+bool lis2dh12_should_use_extended_intervals(void);
+uint8_t lis2dh12_get_motion_count(void);
+void lis2dh12_reset_motion_count(void);
+
 /* Platform functions for direct register access */
 int32_t lis2dh12_platform_read(void *handle, uint8_t reg, uint8_t *data, uint16_t len);
 int32_t lis2dh12_platform_write(void *handle, uint8_t reg, const uint8_t *data, uint16_t len);

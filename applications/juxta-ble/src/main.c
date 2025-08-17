@@ -67,14 +67,8 @@ static struct k_work datetime_sync_restart_work;
 // Track whether connectable advertising is currently active
 static bool connectable_adv_active = false;
 
-// LIS2DH motion detection
-static uint8_t motion_count = 0;
-static volatile bool lis2dh_interrupt_pending = false;
-static struct lis2dh12_dev lis2dh_dev;
+// Hardware state
 static struct juxta_fram_device fram_dev; /* Global FRAM device for framfs */
-static struct k_work motion_work;
-static struct k_timer motion_timer;
-static bool motion_based_intervals = false; // Flag for extended intervals when no motion
 static bool hardware_verified = false;
 static bool watchdog_reset_detected = false; // Set true after LIS2DH + FRAM verification
 
@@ -93,141 +87,6 @@ static void wdt_feed_timer_callback(struct k_timer *timer)
         {
             LOG_ERR("Failed to feed watchdog: %d", err);
         }
-    }
-}
-
-// Motion work handler - runs in work queue context (safe for longer operations)
-static void motion_work_handler(struct k_work *work)
-{
-    if (lis2dh_interrupt_pending)
-    {
-        lis2dh_interrupt_pending = false;
-
-        // Clear the interrupt so we can detect new ones
-        lis2dh12_clear_int1_interrupt(&lis2dh_dev);
-
-        // Reset to default intervals when motion is detected
-        motion_based_intervals = false;
-        LOG_INF("🏃 Motion interrupt cleared (count: %d) - reset to default intervals", motion_count);
-    }
-}
-
-// Motion timer callback - starts work queue after 1 second delay
-static void motion_timer_callback(struct k_timer *timer)
-{
-    k_work_submit(&motion_work);
-}
-
-// GPIO interrupt callback for LIS2DH motion detection
-static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    motion_count++;
-    lis2dh_interrupt_pending = true;
-    printk("🏃 Motion detected via GPIO! Count: %d\n", motion_count);
-
-    // Start 1-second timer to process interrupt (self-limiting to 60 events/minute)
-    k_timer_start(&motion_timer, K_SECONDS(1), K_NO_WAIT);
-}
-
-static struct gpio_callback lis2dh_int_cb;
-
-static int configure_lis2dh_motion_detection(void)
-{
-    // Initialize LIS2DH device
-    lis2dh_dev.spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
-
-    // Initialize GPIO specs manually
-    lis2dh_dev.cs_gpio.port = DEVICE_DT_GET(DT_GPIO_CTLR_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1));
-    lis2dh_dev.cs_gpio.pin = DT_GPIO_PIN_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
-    lis2dh_dev.cs_gpio.dt_flags = DT_GPIO_FLAGS_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
-
-    lis2dh_dev.int_gpio.port = DEVICE_DT_GET(DT_GPIO_CTLR(DT_PATH(gpio_keys, accel_int), gpios));
-    lis2dh_dev.int_gpio.pin = DT_GPIO_PIN(DT_PATH(gpio_keys, accel_int), gpios);
-    lis2dh_dev.int_gpio.dt_flags = DT_GPIO_FLAGS(DT_PATH(gpio_keys, accel_int), gpios);
-
-    int ret = lis2dh12_init(&lis2dh_dev);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to initialize LIS2DH: %d", ret);
-        return ret;
-    }
-
-    // Configure motion detection with high-pass filter for mouse collar sensitivity (0.01g = ~10 in LIS2DH units)
-    ret = lis2dh12_configure_motion_detection(&lis2dh_dev, 10, 0);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to configure LIS2DH motion detection: %d", ret);
-        return ret;
-    }
-
-    // Configure GPIO interrupt for INT1
-    if (!device_is_ready(lis2dh_dev.int_gpio.port))
-    {
-        LOG_ERR("LIS2DH INT GPIO not ready");
-        return -ENODEV;
-    }
-
-    ret = gpio_pin_configure(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin, GPIO_INPUT | GPIO_PULL_UP);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to configure LIS2DH INT GPIO: %d", ret);
-        return ret;
-    }
-
-    ret = gpio_pin_interrupt_configure(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin, GPIO_INT_EDGE_RISING);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to configure LIS2DH INT interrupt: %d", ret);
-        return ret;
-    }
-
-    gpio_init_callback(&lis2dh_int_cb, lis2dh_int_callback, BIT(lis2dh_dev.int_gpio.pin));
-    ret = gpio_add_callback(lis2dh_dev.int_gpio.port, &lis2dh_int_cb);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to add LIS2DH INT callback: %d", ret);
-        return ret;
-    }
-
-    LOG_INF("✅ LIS2DH motion detection configured (ODR=100Hz, HP filtered, threshold=0.01g, duration=0)");
-
-    // Test GPIO interrupt setup
-    int gpio_state = gpio_pin_get(lis2dh_dev.int_gpio.port, lis2dh_dev.int_gpio.pin);
-    LOG_INF("LIS2DH INT GPIO initial state: %d", gpio_state);
-
-    return 0;
-}
-
-static void check_lis2dh(void)
-{
-    if (!lis2dh12_is_ready(&lis2dh_dev))
-    {
-        LOG_ERR("❌ LIS2DH device not ready");
-        return;
-    }
-
-    // Quick verification that LIS2DH is responding
-    float x, y, z;
-    int rc = lis2dh12_read_accel(&lis2dh_dev, &x, &y, &z);
-    if (rc == 0)
-    {
-        LOG_INF("✅ LIS2DH: X=%d mg, Y=%d mg, Z=%d mg", (int)x, (int)y, (int)z);
-    }
-    else
-    {
-        LOG_ERR("❌ LIS2DH read failed: %d", rc);
-    }
-
-    // Read temperature (low power mode, 8-bit resolution)
-    int8_t temperature;
-    rc = lis2dh12_read_temperature_lowres(&lis2dh_dev, &temperature);
-    if (rc == 0)
-    {
-        LOG_INF("🌡️ LIS2DH Temperature: %d°C", temperature);
-    }
-    else
-    {
-        LOG_ERR("❌ LIS2DH temperature read failed: %d", rc);
     }
 }
 
@@ -444,7 +303,7 @@ static uint32_t get_adv_interval(void)
     }
 
     /* Apply motion-based interval adjustment */
-    if (motion_based_intervals)
+    if (lis2dh12_should_use_extended_intervals())
     {
         adv_interval *= 2; /* Double the interval when no motion detected */
         LOG_DBG("📡 No motion detected, using extended adv_interval: %d", adv_interval);
@@ -477,7 +336,7 @@ static uint32_t get_scan_interval(void)
     }
 
     /* Apply motion-based interval adjustment */
-    if (motion_based_intervals)
+    if (lis2dh12_should_use_extended_intervals())
     {
         scan_interval *= 2; /* Double the interval when no motion detected */
         LOG_DBG("🔍 No motion detected, using extended scan_interval: %d", scan_interval);
@@ -674,10 +533,7 @@ static void state_work_handler(struct k_work *work)
 
             /* Get temperature from LIS2DH */
             int8_t temperature = 0;
-            if (lis2dh12_read_temperature_lowres(&lis2dh_dev, &temperature) != 0)
-            {
-                temperature = 0; // Default if read fails
-            }
+            // TODO: Add temperature reading through motion system interface
 
             if (juxta_scan_count > 0)
             {
@@ -692,19 +548,19 @@ static void state_work_handler(struct k_work *work)
                     mac_ids[i][2] = juxta_scan_table[i].mac_id & 0xFF;
                     rssi_values[i] = juxta_scan_table[i].rssi;
                 }
-                int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, motion_count,
+                int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, lis2dh12_get_motion_count(),
                                                                battery_level, temperature,
                                                                mac_ids, rssi_values, device_count);
                 if (ret == 0)
                 {
                     LOG_INF("📊 FRAMFS minute record: devices=%d, motion=%d, battery=%d%%, temp=%d°C",
-                            device_count, motion_count, battery_level, temperature);
+                            device_count, lis2dh12_get_motion_count(), battery_level, temperature);
                 }
             }
             else
             {
                 /* No devices found - use NO_ACTIVITY type but still include battery/temperature */
-                int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, motion_count,
+                int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, lis2dh12_get_motion_count(),
                                                                battery_level, temperature,
                                                                NULL, NULL, 0);
                 if (ret == 0)
@@ -722,18 +578,8 @@ static void state_work_handler(struct k_work *work)
         /* Print and clear after logging to preserve contents */
         juxta_scan_table_print_and_clear();
 
-        // Report and clear motion count, adjust intervals based on activity
-        if (motion_count > 0)
-        {
-            LOG_INF("Motion events in last minute: %d", motion_count);
-            motion_count = 0;
-        }
-        else
-        {
-            // No motion detected in the last minute, switch to extended intervals
-            motion_based_intervals = true;
-            LOG_INF("No motion detected in last minute - switching to extended intervals (2x)");
-        }
+        // Process motion events and adjust intervals based on activity
+        lis2dh12_process_motion_events();
 
         last_logged_minute = current_minute;
         LOG_INF("Minute of day: %u", current_minute);
@@ -1507,10 +1353,6 @@ int main(void)
             int8_t it = juxta_vitals_get_temperature(&vitals_ctx);
             LOG_DBG("Vitals init: battery=%u%%, temp=%dC", bl, it);
 
-            // Initialize motion processing work and timer
-            k_work_init(&motion_work, motion_work_handler);
-            k_timer_init(&motion_timer, motion_timer_callback, NULL);
-
             // Initialize 10-minute timer (now only for gateway advertising timeout)
             k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
 
@@ -1525,16 +1367,11 @@ int main(void)
             // Test FRAM functionality
             test_fram_functionality();
 
-            // Configure LIS2DH motion detection
-            ret = configure_lis2dh_motion_detection();
+            // Initialize LIS2DH motion system
+            ret = lis2dh12_init_motion_system();
             if (ret < 0)
             {
-                LOG_WRN("⚠️ LIS2DH motion detection configuration failed, continuing without motion detection");
-            }
-            else
-            {
-                // Only check LIS2DH if initialization was successful
-                check_lis2dh();
+                LOG_WRN("⚠️ LIS2DH motion system initialization failed, continuing without motion detection");
             }
 
             LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH)");
@@ -1655,10 +1492,6 @@ int main(void)
         int8_t it = juxta_vitals_get_temperature(&vitals_ctx);
         LOG_DBG("Vitals init: battery=%u%%, temp=%dC", bl, it);
 
-        // Initialize motion processing work and timer
-        k_work_init(&motion_work, motion_work_handler);
-        k_timer_init(&motion_timer, motion_timer_callback, NULL);
-
         // Initialize datetime sync restart work
         k_work_init(&datetime_sync_restart_work, datetime_sync_restart_work_handler);
 
@@ -1679,16 +1512,11 @@ int main(void)
         // Test FRAM functionality
         test_fram_functionality();
 
-        // Configure LIS2DH motion detection
-        ret = configure_lis2dh_motion_detection();
+        // Initialize LIS2DH motion system
+        ret = lis2dh12_init_motion_system();
         if (ret < 0)
         {
-            LOG_WRN("⚠️ LIS2DH motion detection configuration failed, continuing without motion detection");
-        }
-        else
-        {
-            // Only check LIS2DH if initialization was successful
-            check_lis2dh();
+            LOG_WRN("⚠️ LIS2DH motion system initialization failed, continuing without motion detection");
         }
 
         LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH)");
