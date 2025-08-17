@@ -59,12 +59,10 @@ extern "C"
      * @param max_samples Maximum number of samples to store
      * @param actual_samples Pointer to store actual number of samples taken
      * @param duration_us Pointer to store actual duration in microseconds
-     * @param sampling_rate_hz Pointer to store calculated sampling rate
      * @return 0 on success, negative error code on failure
      */
     int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
-                               uint32_t *actual_samples, uint32_t *duration_us,
-                               float *sampling_rate_hz);
+                               uint32_t *actual_samples, uint32_t *duration_us);
 
 #ifdef __cplusplus
 }

@@ -122,15 +122,14 @@ bool juxta_adc_is_ready(void)
 }
 
 int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
-                           uint32_t *actual_samples, uint32_t *duration_us,
-                           float *sampling_rate_hz)
+                           uint32_t *actual_samples, uint32_t *duration_us)
 {
     if (!adc_initialized || !adc_dev)
     {
         return -ENODEV;
     }
 
-    if (!samples || !actual_samples || !duration_us || !sampling_rate_hz)
+    if (!samples || !actual_samples || !duration_us)
     {
         return -EINVAL;
     }
@@ -169,10 +168,9 @@ int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
     uint32_t end_ticks = NRF_RTC0->COUNTER;
     uint32_t duration_ticks = end_ticks - start_ticks;
 
-    /* Calculate actual duration and sampling rate */
+    /* Calculate actual duration */
     *actual_samples = sample_count;
     *duration_us = (duration_ticks * 1000000) / 32768; /* Convert ticks to microseconds */
-    *sampling_rate_hz = (float)sample_count / (*duration_us / 1000000.0f);
 
     return 0;
 }
