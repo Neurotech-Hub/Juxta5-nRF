@@ -91,42 +91,79 @@ static void wdt_feed_timer_callback(struct k_timer *timer)
 }
 
 /**
- * @brief Quick FRAM test to verify basic functionality
+ * @brief Consolidated FRAM and framfs initialization function
+ * @param fram_device Pointer to FRAM device structure to initialize
+ * @param framfs_context Pointer to framfs context to initialize (if init_framfs is true)
+ * @param init_framfs Whether to initialize framfs context
+ * @param test_id Whether to read and log FRAM ID for testing
+ * @return 0 on success, negative error code on failure
  */
-static void test_fram_functionality(void)
+static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct juxta_framfs_context *framfs_context, bool init_framfs, bool test_id)
 {
     const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
     if (!spi_dev || !device_is_ready(spi_dev))
     {
         LOG_ERR("❌ SPI0 device not ready");
-        return;
+        return -ENODEV;
     }
 
     static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
     if (!device_is_ready(fram_cs.port))
     {
         LOG_ERR("❌ FRAM CS not ready");
-        return;
+        return -ENODEV;
     }
 
-    struct juxta_fram_device fram_dev;
-    int ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
+    int ret = juxta_fram_init(fram_device, spi_dev, 8000000, &fram_cs);
     if (ret < 0)
     {
         LOG_ERR("❌ FRAM init failed: %d", ret);
-        return;
+        return ret;
     }
 
-    struct juxta_fram_id id;
-    ret = juxta_fram_read_id(&fram_dev, &id);
+    if (test_id)
+    {
+        struct juxta_fram_id id;
+        ret = juxta_fram_read_id(fram_device, &id);
+        if (ret < 0)
+        {
+            LOG_ERR("❌ FRAM ID read failed: %d", ret);
+            return ret;
+        }
+        LOG_INF("✅ FRAM: ID=0x%02X%02X%02X%02X",
+                id.manufacturer_id, id.continuation_code, id.product_id_1, id.product_id_2);
+    }
+
+    if (init_framfs)
+    {
+        if (!framfs_context)
+        {
+            LOG_ERR("❌ Framfs context pointer is NULL");
+            return -EINVAL;
+        }
+        ret = juxta_framfs_init(framfs_context, fram_device);
+        if (ret < 0)
+        {
+            LOG_ERR("❌ Framfs init failed: %d", ret);
+            return ret;
+        }
+        LOG_INF("✅ Framfs initialized");
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Quick FRAM test to verify basic functionality
+ */
+static void test_fram_functionality(void)
+{
+    struct juxta_fram_device fram_test_dev;
+    int ret = init_fram_and_framfs(&fram_test_dev, NULL, false, true);
     if (ret < 0)
     {
-        LOG_ERR("❌ FRAM ID read failed: %d", ret);
-        return;
+        LOG_ERR("❌ FRAM functionality test failed: %d", ret);
     }
-
-    LOG_INF("✅ FRAM: ID=0x%02X%02X%02X%02X",
-            id.manufacturer_id, id.continuation_code, id.product_id_1, id.product_id_2);
 }
 
 #define BLE_MIN_INTER_BURST_DELAY_MS 100
@@ -135,8 +172,7 @@ static struct juxta_vitals_ctx vitals_ctx;
 static struct juxta_framfs_context framfs_ctx;
 static struct juxta_framfs_ctx time_ctx; /* Time-aware file system context */
 
-static bool in_adv_burst = false;
-static bool in_scan_burst = false;
+// Unused burst tracking variables removed - state machine handles this
 static uint32_t last_adv_timestamp = 0;
 static uint32_t last_scan_timestamp = 0;
 
@@ -193,6 +229,7 @@ static int juxta_stop_scanning(void);
 static uint32_t get_rtc_timestamp(void);
 static int juxta_start_connectable_advertising(void);
 static void juxta_log_simple(uint8_t type);
+static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct juxta_framfs_context *framfs_context, bool init_framfs, bool test_id);
 
 /* Dynamic advertising name setup */
 static void setup_dynamic_adv_name(void);
@@ -432,8 +469,6 @@ static void setup_dynamic_adv_name(void)
 
 static bool is_time_to_advertise(void)
 {
-    if (in_adv_burst)
-        return false;
     uint32_t current_time = get_rtc_timestamp();
     if (current_time == 0)
         return false;
@@ -442,8 +477,6 @@ static bool is_time_to_advertise(void)
 
 static bool is_time_to_scan(void)
 {
-    if (in_scan_burst)
-        return false;
     uint32_t current_time = get_rtc_timestamp();
     if (current_time == 0)
         return false;
@@ -919,8 +952,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
     (void)juxta_stop_advertising();
     (void)juxta_stop_scanning();
     connectable_adv_active = false;
-    in_adv_burst = false;
-    in_scan_burst = false;
 
     /* Notify BLE service of connection */
     juxta_ble_connection_established(conn);
@@ -1199,28 +1230,10 @@ int main(void)
          * happens after we disconnect from the gateway.
          */
         LOG_INF("📁 Initializing FRAM device (pre-sync minimal)...");
-        const struct device *spi_dev_pre = DEVICE_DT_GET(DT_NODELABEL(spi0));
-        if (!spi_dev_pre || !device_is_ready(spi_dev_pre))
-        {
-            LOG_ERR("SPI0 device not ready");
-            return -ENODEV;
-        }
-        static const struct gpio_dt_spec fram_cs_pre = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
-        if (!device_is_ready(fram_cs_pre.port))
-        {
-            LOG_ERR("FRAM CS not ready");
-            return -ENODEV;
-        }
-        ret = juxta_fram_init(&fram_dev, spi_dev_pre, 8000000, &fram_cs_pre);
+        ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
         if (ret < 0)
         {
-            LOG_ERR("FRAM init failed: %d", ret);
-            return ret;
-        }
-        ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
-        if (ret < 0)
-        {
-            LOG_ERR("Framfs init failed: %d", ret);
+            LOG_ERR("FRAM/framfs init failed: %d", ret);
             return ret;
         }
         juxta_ble_set_framfs_context(&framfs_ctx);
@@ -1292,34 +1305,12 @@ int main(void)
 
             /* Initialize FRAM device and framfs */
             LOG_INF("📁 Initializing FRAM device...");
-            const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
-            if (!spi_dev || !device_is_ready(spi_dev))
-            {
-                LOG_ERR("SPI0 device not ready");
-                return -ENODEV;
-            }
-
-            static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
-            if (!device_is_ready(fram_cs.port))
-            {
-                LOG_ERR("FRAM CS not ready");
-                return -ENODEV;
-            }
-
-            ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
+            ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
             if (ret < 0)
             {
-                LOG_ERR("FRAM init failed: %d", ret);
+                LOG_ERR("FRAM/framfs init failed: %d", ret);
                 return ret;
             }
-
-            ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
-            if (ret < 0)
-            {
-                LOG_ERR("Framfs init failed: %d", ret);
-                return ret;
-            }
-            LOG_INF("✅ Framfs initialized");
 
             /* Link framfs context to BLE service */
             juxta_ble_set_framfs_context(&framfs_ctx);
@@ -1431,34 +1422,12 @@ int main(void)
     {
         // Initialize FRAM device and framfs
         LOG_INF("📁 Initializing FRAM device...");
-        const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
-        if (!spi_dev || !device_is_ready(spi_dev))
-        {
-            LOG_ERR("SPI0 device not ready");
-            return -ENODEV;
-        }
-
-        static const struct gpio_dt_spec fram_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 0);
-        if (!device_is_ready(fram_cs.port))
-        {
-            LOG_ERR("FRAM CS not ready");
-            return -ENODEV;
-        }
-
-        ret = juxta_fram_init(&fram_dev, spi_dev, 8000000, &fram_cs);
+        ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
         if (ret < 0)
         {
-            LOG_ERR("FRAM init failed: %d", ret);
+            LOG_ERR("FRAM/framfs init failed: %d", ret);
             return ret;
         }
-
-        ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
-        if (ret < 0)
-        {
-            LOG_ERR("Framfs init failed: %d", ret);
-            return ret;
-        }
-        LOG_INF("✅ Framfs initialized");
 
         /* Link framfs context to BLE service */
         juxta_ble_set_framfs_context(&framfs_ctx);
