@@ -364,23 +364,23 @@ static int juxta_vitals_read_battery_voltage(struct juxta_vitals_ctx *ctx)
 
     ctx->battery_mv = vdd_mv;
 
-    /* Calculate battery percentage based on VDD range */
+    /* Calculate battery percentage based on range between FULL and CRITICAL */
     if (ctx->battery_mv >= JUXTA_VITALS_BATTERY_FULL_MV)
     {
         ctx->battery_percent = 100;
     }
-    else if (ctx->battery_mv <= JUXTA_VITALS_BATTERY_LOW_MV)
+    else if (ctx->battery_mv <= JUXTA_VITALS_BATTERY_CRITICAL_MV)
     {
         ctx->battery_percent = 0;
     }
     else
     {
-        uint32_t range = JUXTA_VITALS_BATTERY_FULL_MV - JUXTA_VITALS_BATTERY_LOW_MV;
-        uint32_t current = ctx->battery_mv - JUXTA_VITALS_BATTERY_LOW_MV;
+        uint32_t range = JUXTA_VITALS_BATTERY_FULL_MV - JUXTA_VITALS_BATTERY_CRITICAL_MV;
+        uint32_t current = ctx->battery_mv - JUXTA_VITALS_BATTERY_CRITICAL_MV;
         ctx->battery_percent = (current * 100) / range;
     }
 
-    /* Set low battery flag */
+    /* Set low battery flag when voltage drops below critical threshold */
     ctx->low_battery = (ctx->battery_mv <= JUXTA_VITALS_BATTERY_CRITICAL_MV);
 
     return JUXTA_VITALS_OK;

@@ -515,6 +515,18 @@ static uint32_t get_rtc_timestamp(void)
     return timestamp;
 }
 
+/* Battery check helper for FRAM operations */
+static bool should_allow_fram_write(void)
+{
+    if (juxta_vitals_is_low_battery(&vitals_ctx))
+    {
+        LOG_WRN("⚠️ Battery critically low (%d mV) - preventing FRAM write",
+                juxta_vitals_get_battery_mv(&vitals_ctx));
+        return false;
+    }
+    return true;
+}
+
 /* Definition: simple record logger (BOOT/CONNECTED/NO_ACTIVITY/ERROR) */
 static void juxta_log_simple(uint8_t type)
 {
@@ -522,6 +534,12 @@ static void juxta_log_simple(uint8_t type)
     {
         return;
     }
+
+    if (!should_allow_fram_write())
+    {
+        return;
+    }
+
     uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
     (void)juxta_framfs_append_simple_record_data(&time_ctx, minute, type);
 }
@@ -637,6 +655,13 @@ static void state_work_handler(struct k_work *work)
         /* Consolidated minute logging to FRAMFS (devices + motion + battery + temperature) */
         if (hardware_verified && framfs_ctx.initialized && !ble_connected)
         {
+            /* Check battery before FRAM operations */
+            if (!should_allow_fram_write())
+            {
+                LOG_INF("📊 Skipping FRAMFS minute logging due to low battery");
+                return;
+            }
+
             /* Get battery level */
             uint8_t battery_level = 0;
             (void)juxta_vitals_update(&vitals_ctx);

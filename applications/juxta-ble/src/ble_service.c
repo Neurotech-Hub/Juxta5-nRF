@@ -71,6 +71,24 @@ static struct juxta_framfs_context *framfs_ctx = NULL;
 /* External vitals context - will be set during initialization */
 static struct juxta_vitals_ctx *vitals_ctx = NULL;
 
+/* Battery check helper for FRAM operations */
+static bool should_allow_fram_write(void)
+{
+    if (!vitals_ctx || !vitals_ctx->initialized)
+    {
+        LOG_WRN("⚠️ Vitals context not available - allowing FRAM write");
+        return true;
+    }
+
+    if (juxta_vitals_is_low_battery(vitals_ctx))
+    {
+        LOG_WRN("⚠️ Battery critically low (%d mV) - preventing FRAM write",
+                juxta_vitals_get_battery_mv(vitals_ctx));
+        return false;
+    }
+    return true;
+}
+
 /* Datetime synchronization callback for production flow */
 static void (*datetime_sync_callback)(void) = NULL;
 
@@ -204,6 +222,13 @@ static int handle_memory_clearing(void)
     }
 
     LOG_INF("🧹 Starting memory clearing operation...");
+
+    /* Check battery before FRAM operations */
+    if (!should_allow_fram_write())
+    {
+        LOG_WRN("⚠️ Skipping memory clearing due to low battery");
+        return -EAGAIN;
+    }
 
     /* Format the file system */
     int ret = juxta_framfs_format(framfs_ctx);
@@ -532,6 +557,12 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         LOG_INF("🎛️ Settings updated - saving to framfs");
         if (framfs_ctx && framfs_ctx->initialized)
         {
+            if (!should_allow_fram_write())
+            {
+                LOG_WRN("⚠️ Skipping settings save due to low battery");
+                return 0;
+            }
+
             if (juxta_framfs_set_user_settings(framfs_ctx, settings) == 0)
             {
                 LOG_INF("✅ Settings saved successfully");
