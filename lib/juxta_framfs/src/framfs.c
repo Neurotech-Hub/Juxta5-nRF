@@ -1116,6 +1116,30 @@ int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
     return framfs_write_user_settings(ctx);
 }
 
+int juxta_framfs_get_operating_mode(struct juxta_framfs_context *ctx,
+                                    uint8_t *mode)
+{
+    if (!ctx || !ctx->initialized || !mode)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    *mode = ctx->user_settings.operating_mode;
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_operating_mode(struct juxta_framfs_context *ctx,
+                                    uint8_t mode)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    ctx->user_settings.operating_mode = mode;
+    return framfs_write_user_settings(ctx);
+}
+
 int juxta_framfs_get_subject_id(struct juxta_framfs_context *ctx,
                                 char *subject_id)
 {
@@ -1205,6 +1229,7 @@ int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx)
     memset(&ctx->user_settings, 0, sizeof(ctx->user_settings));
     ctx->user_settings.magic = JUXTA_FRAMFS_USER_SETTINGS_MAGIC;
     ctx->user_settings.version = JUXTA_FRAMFS_USER_SETTINGS_VERSION;
+    ctx->user_settings.operating_mode = 0x00;        /* Default: normal operation mode */
     ctx->user_settings.adv_interval = 5;             /* Default: advertising every 5 seconds */
     ctx->user_settings.scan_interval = 15;           /* Default: scanning every 15 seconds */
     strcpy(ctx->user_settings.subject_id, "");       /* Default: empty */

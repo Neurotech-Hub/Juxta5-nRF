@@ -141,7 +141,7 @@ extern "C"
     {
         uint16_t magic;                                 /* User settings magic number */
         uint8_t version;                                /* User settings version */
-        uint8_t reserved;                               /* Reserved for future use */
+        uint8_t operating_mode;                         /* Operating mode */
         uint8_t adv_interval;                           /* Advertising interval (0-255) */
         uint8_t scan_interval;                          /* Scanning interval (0-255) */
         char subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN];   /* Subject ID string */
@@ -471,6 +471,12 @@ extern "C"
      */
     int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
                                        uint8_t interval);
+
+    int juxta_framfs_get_operating_mode(struct juxta_framfs_context *ctx,
+                                        uint8_t *mode);
+
+    int juxta_framfs_set_operating_mode(struct juxta_framfs_context *ctx,
+                                        uint8_t mode);
 
     /**
      * @brief Get subject ID

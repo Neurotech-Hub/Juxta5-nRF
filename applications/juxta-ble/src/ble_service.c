@@ -317,10 +317,21 @@ static int generate_node_response(char *buffer, size_t buffer_size)
         battery_level = 0;
     }
 
+    /* Get operating mode from framfs user settings */
+    uint8_t operating_mode = 0x00;
+    if (framfs_ctx && framfs_ctx->initialized)
+    {
+        if (juxta_framfs_get_operating_mode(framfs_ctx, &operating_mode) != 0)
+        {
+            LOG_WRN("🎛️ Failed to get operating mode from framfs, using default");
+            operating_mode = 0x00;
+        }
+    }
+
     /* Generate JSON response */
     int written = snprintf(buffer, buffer_size,
-                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"alert\":\"%s\"}",
-                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, alert);
+                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"operating_mode\":%d,\"alert\":\"%s\"}",
+                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, operating_mode, alert);
 
     if (written >= buffer_size)
     {
@@ -363,7 +374,7 @@ static ssize_t read_node_char(struct bt_conn *conn, const struct bt_gatt_attr *a
 
 /**
  * @brief Parse JSON command from gateway characteristic
- * Expected format: {"timestamp":1234567890,"sendFilenames":true,"clearMemory":true,"advInterval":5,"scanInterval":15,"subjectId":"vole001","uploadPath":"/TEST"}
+ * Expected format: {"timestamp":1234567890,"sendFilenames":true,"clearMemory":true,"operatingMode":0,"advInterval":5,"scanInterval":15,"subjectId":"vole001","uploadPath":"/TEST"}
  */
 static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_settings *settings)
 {
@@ -388,6 +399,7 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         {
             LOG_WRN("🎛️ Failed to get current settings, using defaults");
             /* Use defaults if framfs not available */
+            settings->operating_mode = 0x00;
             settings->adv_interval = 5;
             settings->scan_interval = 15;
             strcpy(settings->subject_id, "");
@@ -397,6 +409,7 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
     else
     {
         /* Use defaults if framfs not available */
+        settings->operating_mode = 0x00;
         settings->adv_interval = 5;
         settings->scan_interval = 15;
         strcpy(settings->subject_id, "");
@@ -491,6 +504,23 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         {
             LOG_ERR("❌ Memory clearing failed: %d", ret);
             return ret;
+        }
+    }
+
+    /* Look for operatingMode */
+    p = strstr(json_cmd, "\"operatingMode\":");
+    if (p)
+    {
+        uint8_t operating_mode;
+        if (sscanf(p, "\"operatingMode\":%hhu", &operating_mode) == 1)
+        {
+            LOG_INF("🎛️ Operating mode command: %d", operating_mode);
+            settings->operating_mode = operating_mode;
+            settings_changed = true;
+        }
+        else
+        {
+            LOG_WRN("🎛️ Invalid operatingMode format in command");
         }
     }
 

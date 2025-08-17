@@ -211,6 +211,7 @@ static void juxta_scan_table_print_and_clear(void)
 static struct k_work state_work;
 static struct k_timer state_timer;
 
+#define OPERATING_MODE 0x00
 #define ADV_BURST_DURATION_MS 100
 #define SCAN_BURST_DURATION_MS 500
 #define ADV_INTERVAL_SECONDS 5
