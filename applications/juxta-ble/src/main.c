@@ -198,6 +198,7 @@ static void juxta_scan_table_print_and_clear(void)
 
 static struct k_work state_work;
 static struct k_timer state_timer;
+static bool state_system_ready = false;
 
 // ADC timer for mode 1 (ADC_ONLY mode)
 static struct k_timer adc_timer;
@@ -564,11 +565,13 @@ static void process_scan_events(void)
             continue;
         }
         bool found = false;
+        uint8_t found_index = 0;
         for (uint8_t i = 0; i < juxta_scan_count; i++)
         {
             if (juxta_scan_table[i].mac_id == evt.mac_id)
             {
                 found = true;
+                found_index = i;
                 break;
             }
         }
@@ -581,7 +584,13 @@ static void process_scan_events(void)
         }
         else
         {
-            LOG_DBG("🛑 Duplicate MAC %06X (ignored)", evt.mac_id);
+            // Update RSSI if this one is stronger (higher value)
+            if (evt.rssi > juxta_scan_table[found_index].rssi)
+            {
+                LOG_DBG("🔍 Updated RSSI for MAC %06X: %d -> %d (stronger signal)",
+                        evt.mac_id, juxta_scan_table[found_index].rssi, evt.rssi);
+                juxta_scan_table[found_index].rssi = evt.rssi;
+            }
         }
     }
 }
@@ -1051,6 +1060,12 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     {
         /* Normal operation - resume appropriate mode */
         {
+            /* Avoid submitting work before state system is initialized */
+            if (!state_system_ready)
+            {
+                LOG_DBG("State system not ready yet; skipping resume on disconnect");
+                return;
+            }
             uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
             if (framfs_ctx.initialized)
             {
@@ -1361,40 +1376,10 @@ int main(void)
         return ret;
     }
 
-    /* Initialize FRAM device and framfs */
-    LOG_INF("📁 Initializing FRAM device...");
-    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
-    if (ret < 0)
-    {
-        LOG_ERR("FRAM/framfs init failed: %d", ret);
-        return ret;
-    }
-
-    /* Link framfs context to BLE service */
-    juxta_ble_set_framfs_context(&framfs_ctx);
-
-    ret = test_rtc_functionality();
-    if (ret < 0)
-    {
-        LOG_ERR("RTC test failed (err %d)", ret);
-        return ret;
-    }
-
-    /* Link vitals context to BLE service for timestamp synchronization */
-    juxta_ble_set_vitals_context(&vitals_ctx);
-
-    /* Initialize time-aware file system after vitals are ready */
-    LOG_INF("📁 Initializing time-aware file system...");
-    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
-    if (ret < 0)
-    {
-        LOG_ERR("Time-aware framfs init failed: %d", ret);
-        return ret;
-    }
-
     init_randomization();
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
+    state_system_ready = true;
 
     /* Quick vitals sanity read in thread context */
     (void)juxta_vitals_update(&vitals_ctx);
