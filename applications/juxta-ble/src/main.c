@@ -202,12 +202,17 @@ static bool state_system_ready = false;
 
 // ADC timer for mode 1 (ADC_ONLY mode)
 static struct k_timer adc_timer;
+static struct k_work adc_work;
+
+/* Static buffers for ADC sampling to avoid sysworkq stack overflow */
+#define ADC_MAX_SAMPLES 1000
+static int32_t adc_samples_buffer[ADC_MAX_SAMPLES];
+static uint8_t adc_scaled_buffer[ADC_MAX_SAMPLES];
 
 /* Operating mode definitions */
 #define OPERATING_MODE_NORMAL 0x00   /* State machine/BLE bursts/motion counting */
 #define OPERATING_MODE_ADC_ONLY 0x01 /* Purely ADC recordings */
 
-#define OPERATING_MODE 0x00
 #define ADV_BURST_DURATION_MS 100
 #define SCAN_BURST_DURATION_MS 500
 #define ADV_INTERVAL_SECONDS 5
@@ -422,8 +427,8 @@ static bool should_allow_fram_write(void)
     return true;
 }
 
-// ADC timer callback - triggers ADC burst sampling every 1 second in ADC_ONLY mode
-static void adc_timer_callback(struct k_timer *timer)
+// ADC work handler - runs in thread context to avoid ISR issues
+static void adc_work_handler(struct k_work *work)
 {
     if (!hardware_verified || !framfs_ctx.initialized || ble_connected || !juxta_adc_is_ready())
     {
@@ -437,19 +442,20 @@ static void adc_timer_callback(struct k_timer *timer)
         return;
     }
 
-    // Trigger ADC burst sampling
-    int32_t samples[1000]; // Use int32_t as per adc.c function signature
+    // Trigger ADC burst sampling into static buffer
+    int32_t *samples = adc_samples_buffer; // Use static buffer to avoid stack usage
     uint32_t actual_samples;
     uint32_t duration_us;
 
-    int ret = juxta_adc_burst_sample(samples, 1000, &actual_samples, &duration_us);
+    int ret = juxta_adc_burst_sample(samples, ADC_MAX_SAMPLES, &actual_samples, &duration_us);
     if (ret == 0 && actual_samples > 0)
     {
         uint32_t start_time = juxta_vitals_get_timestamp(&vitals_ctx) * 1000000; // Convert to microseconds
 
-        // Convert int32_t samples to uint8_t for storage (scale appropriately)
-        uint8_t scaled_samples[1000];
-        for (uint32_t i = 0; i < actual_samples && i < 1000; i++)
+        // Convert int32_t samples to uint8_t for storage (scale appropriately) using static buffer
+        uint8_t *scaled_samples = adc_scaled_buffer;
+        uint32_t count = (actual_samples > ADC_MAX_SAMPLES) ? ADC_MAX_SAMPLES : actual_samples;
+        for (uint32_t i = 0; i < count; i++)
         {
             // Scale int32_t voltage (mV) to uint8_t (0-255 range)
             // Assuming voltage range is roughly -2000 to +2000 mV
@@ -461,10 +467,10 @@ static void adc_timer_callback(struct k_timer *timer)
             scaled_samples[i] = (uint8_t)scaled;
         }
 
-        ret = juxta_framfs_append_adc_burst_data(&time_ctx, start_time, scaled_samples, (uint16_t)actual_samples, duration_us);
+        ret = juxta_framfs_append_adc_burst_data(&time_ctx, start_time, scaled_samples, (uint16_t)count, duration_us);
         if (ret == 0)
         {
-            LOG_DBG("📊 ADC burst recorded: %d samples, %d us duration", actual_samples, duration_us);
+            LOG_INF("📊 ADC burst saved: %u samples, %u us", (unsigned)count, (unsigned)duration_us);
         }
         else
         {
@@ -475,6 +481,13 @@ static void adc_timer_callback(struct k_timer *timer)
     {
         LOG_WRN("📊 ADC burst sampling failed or no samples: %d", ret);
     }
+}
+
+// ADC timer callback - triggers ADC work in thread context
+static void adc_timer_callback(struct k_timer *timer)
+{
+    // Only submit work, do not call FRAMFS functions in ISR context
+    k_work_submit(&adc_work);
 }
 
 /* Definition: simple record logger (BOOT/CONNECTED/NO_ACTIVITY/ERROR) */
@@ -1341,10 +1354,6 @@ int main(void)
         k_sleep(K_MSEC(50));
     }
 
-    /* Start watchdog feed timer now that we have a timestamp */
-    k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
-    LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
-
     /* Initialize FRAM device and framfs */
     LOG_INF("📁 Initializing FRAM device...");
     ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
@@ -1430,6 +1439,11 @@ int main(void)
     if (framfs_ctx.initialized)
     {
         juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
+        LOG_INF("🔧 Operating mode read from FRAMFS: %d", current_mode);
+    }
+    else
+    {
+        LOG_WRN("⚠️ FRAMFS not initialized, using default operating mode: %d", current_mode);
     }
 
     if (current_mode == OPERATING_MODE_NORMAL)
@@ -1442,6 +1456,7 @@ int main(void)
     else if (current_mode == OPERATING_MODE_ADC_ONLY)
     {
         /* Mode 1: Start ADC timer for pure ADC recordings - no state machine needed */
+        k_work_init(&adc_work, adc_work_handler);
         k_timer_init(&adc_timer, adc_timer_callback, NULL);
         k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1)); // Every 1 second
         LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
@@ -1485,6 +1500,10 @@ int main(void)
     }
 
     LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
+
+    /* Start watchdog feed timer immediately after watchdog initialization */
+    k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
+    LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
 
     uint32_t heartbeat_counter = 0;
     while (1)
