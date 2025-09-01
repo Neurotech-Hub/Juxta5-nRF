@@ -81,8 +81,6 @@ int juxta_fram_init(struct juxta_fram_device *fram_dev,
     fram_dev->spi_cfg.cs.gpio.dt_flags = cs_spec->dt_flags;
     fram_dev->spi_cfg.cs.delay = 0;
 
-    fram_dev->initialized = true;
-
     LOG_INF("FRAM initialized: freq=%d Hz, CS=P%d.%02d",
             frequency,
             cs_spec->port ? 1 : 0,
@@ -91,6 +89,20 @@ int juxta_fram_init(struct juxta_fram_device *fram_dev,
     /* Check if FRAM chip is present by testing CS line */
     LOG_INF("Checking FRAM chip presence...");
 
+    /* Verify FRAM chip is present by reading device ID */
+    struct juxta_fram_id chip_id;
+    int ret = juxta_fram_read_id(fram_dev, &chip_id);
+    if (ret < 0)
+    {
+        LOG_ERR("FRAM chip not detected or invalid ID (error %d)", ret);
+        return ret;
+    }
+
+    LOG_INF("FRAM chip detected: ID=0x%02X%02X%02X%02X",
+            chip_id.manufacturer_id, chip_id.continuation_code,
+            chip_id.product_id_1, chip_id.product_id_2);
+
+    fram_dev->initialized = true;
     return JUXTA_FRAM_OK;
 }
 

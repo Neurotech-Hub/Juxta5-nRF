@@ -83,10 +83,9 @@ static void wdt_feed_timer_callback(struct k_timer *timer)
  * @param fram_device Pointer to FRAM device structure to initialize
  * @param framfs_context Pointer to framfs context to initialize (if init_framfs is true)
  * @param init_framfs Whether to initialize framfs context
- * @param test_id Whether to read and log FRAM ID for testing
  * @return 0 on success, negative error code on failure
  */
-static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct juxta_framfs_context *framfs_context, bool init_framfs, bool test_id)
+static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct juxta_framfs_context *framfs_context, bool init_framfs)
 {
     const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
     if (!spi_dev || !device_is_ready(spi_dev))
@@ -106,20 +105,11 @@ static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct ju
     if (ret < 0)
     {
         LOG_ERR("❌ FRAM init failed: %d", ret);
-        return ret;
-    }
-
-    if (test_id)
-    {
-        struct juxta_fram_id id;
-        ret = juxta_fram_read_id(fram_device, &id);
-        if (ret < 0)
+        if (ret == JUXTA_FRAM_ERROR_ID)
         {
-            LOG_ERR("❌ FRAM ID read failed: %d", ret);
-            return ret;
+            LOG_ERR("❌ FRAM chip not detected - check hardware connections");
         }
-        LOG_INF("✅ FRAM: ID=0x%02X%02X%02X%02X",
-                id.manufacturer_id, id.continuation_code, id.product_id_1, id.product_id_2);
+        return ret;
     }
 
     if (init_framfs)
@@ -147,7 +137,7 @@ static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct ju
 static void test_fram_functionality(void)
 {
     struct juxta_fram_device fram_test_dev;
-    int ret = init_fram_and_framfs(&fram_test_dev, NULL, false, true);
+    int ret = init_fram_and_framfs(&fram_test_dev, NULL, false);
     if (ret < 0)
     {
         LOG_ERR("❌ FRAM functionality test failed: %d", ret);
@@ -231,7 +221,7 @@ static int juxta_stop_scanning(void);
 static uint32_t get_rtc_timestamp(void);
 static int juxta_start_connectable_advertising(void);
 static void juxta_log_simple(uint8_t type);
-static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct juxta_framfs_context *framfs_context, bool init_framfs, bool test_id);
+static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct juxta_framfs_context *framfs_context, bool init_framfs);
 
 /* Dynamic advertising name setup */
 static void setup_dynamic_adv_name(void);
@@ -1306,7 +1296,7 @@ int main(void)
      * happens after we disconnect from the gateway.
      */
     LOG_INF("📁 Initializing FRAM device (pre-sync minimal)...");
-    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
+    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true);
     if (ret < 0)
     {
         LOG_ERR("FRAM/framfs init failed: %d", ret);
@@ -1356,7 +1346,7 @@ int main(void)
 
     /* Initialize FRAM device and framfs */
     LOG_INF("📁 Initializing FRAM device...");
-    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true, false);
+    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true);
     if (ret < 0)
     {
         LOG_ERR("FRAM/framfs init failed: %d", ret);
