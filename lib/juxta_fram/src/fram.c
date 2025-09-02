@@ -51,13 +51,13 @@ int juxta_fram_init(struct juxta_fram_device *fram_dev,
 
     if (!device_is_ready(spi_dev))
     {
-        LOG_ERR("SPI device not ready");
+        LOG_INF("SPI device not ready");
         return JUXTA_FRAM_ERROR_INIT;
     }
 
     if (!gpio_is_ready_dt(cs_spec))
     {
-        LOG_ERR("CS GPIO not ready");
+        LOG_INF("CS GPIO not ready");
         return JUXTA_FRAM_ERROR_INIT;
     }
 
@@ -111,9 +111,9 @@ int juxta_fram_read_id(struct juxta_fram_device *fram_dev,
 {
     int ret;
 
-    if (!fram_dev || !fram_dev->initialized)
+    if (!fram_dev)
     {
-        return JUXTA_FRAM_ERROR_INIT;
+        return JUXTA_FRAM_ERROR;
     }
 
     uint8_t tx_rdid[] = {
@@ -162,11 +162,11 @@ int juxta_fram_read_id(struct juxta_fram_device *fram_dev,
         read_id.product_id_2 != JUXTA_FRAM_PRODUCT_ID_2)
     {
 
-        LOG_ERR("Device ID mismatch:");
-        LOG_ERR("  Expected: 0x%02X 0x%02X 0x%02X 0x%02X",
+        LOG_INF("Device ID mismatch:");
+        LOG_INF("  Expected: 0x%02X 0x%02X 0x%02X 0x%02X",
                 JUXTA_FRAM_MANUFACTURER_ID, JUXTA_FRAM_CONTINUATION_CODE,
                 JUXTA_FRAM_PRODUCT_ID_1, JUXTA_FRAM_PRODUCT_ID_2);
-        LOG_ERR("  Read:     0x%02X 0x%02X 0x%02X 0x%02X",
+        LOG_INF("  Read:     0x%02X 0x%02X 0x%02X 0x%02X",
                 read_id.manufacturer_id, read_id.continuation_code,
                 read_id.product_id_1, read_id.product_id_2);
         return JUXTA_FRAM_ERROR_ID;

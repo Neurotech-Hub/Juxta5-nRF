@@ -1170,23 +1170,11 @@ static void wait_for_magnet_sensor(void)
         LOG_ERR("❌ Magnet sensor device not ready");
         return;
     }
-    if (!device_is_ready(led.port))
-    {
-        LOG_ERR("❌ LED device not ready");
-        return;
-    }
-
-    // Configure pins manually since device tree doesn't always configure them
+    // Configure magnet sensor pin manually since device tree doesn't always configure it
     int ret = gpio_pin_configure(magnet_sensor.port, magnet_sensor.pin, GPIO_INPUT); // No flags, no pull-up
     if (ret < 0)
     {
         LOG_ERR("❌ Failed to configure magnet sensor: %d", ret);
-        return;
-    }
-    ret = gpio_pin_configure(led.port, led.pin, GPIO_OUTPUT_ACTIVE | GPIO_ACTIVE_HIGH);
-    if (ret < 0)
-    {
-        LOG_ERR("❌ Failed to configure LED: %d", ret);
         return;
     }
 
@@ -1194,6 +1182,12 @@ static void wait_for_magnet_sensor(void)
     while (gpio_pin_get_dt(&magnet_sensor))
     {
         LOG_INF("💤 Waiting for magnet sensor activation (debug every 1s)...");
+
+        // Pulse LED for 10ms to show system is alive
+        gpio_pin_set_dt(&led, 1); // LED ON
+        k_sleep(K_MSEC(10));
+        gpio_pin_set_dt(&led, 0); // LED OFF
+
         k_sleep(K_SECONDS(1));
     }
     LOG_INF("🔔 Magnet sensor activated! Waking up...");
@@ -1263,6 +1257,45 @@ int main(void)
     /* Clear reset reason register */
     NRF_POWER->RESETREAS = reset_reason;
 
+    // Configure LED early for FRAM error indication
+    if (!device_is_ready(led.port))
+    {
+        LOG_ERR("❌ LED device not ready");
+        return -ENODEV;
+    }
+    int led_ret = gpio_pin_configure(led.port, led.pin, GPIO_OUTPUT_ACTIVE | GPIO_ACTIVE_HIGH);
+    if (led_ret < 0)
+    {
+        LOG_ERR("❌ Failed to configure LED: %d", led_ret);
+        return led_ret;
+    }
+    gpio_pin_set_dt(&led, 0); // LED OFF initially
+
+    // Initialize FRAM early to catch hardware issues before magnet activation
+    LOG_INF("📁 Early FRAM initialization check...");
+    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, false); // Don't initialize framfs yet
+    if (ret < 0)
+    {
+        LOG_ERR("❌ FRAM initialization failed: %d", ret);
+        if (ret == JUXTA_FRAM_ERROR_ID || ret == -2)
+        {
+            LOG_ERR("❌ FRAM chip not detected - blinking LED at 50ms interval");
+            // Blink LED rapidly to indicate FRAM hardware issue
+            while (1)
+            {
+                gpio_pin_set_dt(&led, 1); // LED ON
+                k_sleep(K_MSEC(50));
+                gpio_pin_set_dt(&led, 0); // LED OFF
+                k_sleep(K_MSEC(50));
+            }
+        }
+        else
+        {
+            return ret;
+        }
+    }
+    LOG_INF("✅ FRAM chip detected and initialized successfully");
+
     // Wait for magnet sensor activation before starting BLE
     wait_for_magnet_sensor();
     magnet_activated = true;
@@ -1291,15 +1324,12 @@ int main(void)
     /* Initialize watchdog feed timer early */
     k_timer_init(&wdt_feed_timer, wdt_feed_timer_callback, NULL);
 
-    /* Minimal FRAM + framfs init so sendFilenames can work during the
-     * initial connectable session. Heavier init (time-aware FS, LIS2DH, etc.)
-     * happens after we disconnect from the gateway.
-     */
-    LOG_INF("📁 Initializing FRAM device (pre-sync minimal)...");
-    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true);
+    /* FRAM already initialized early - now initialize framfs for sendFilenames */
+    LOG_INF("📁 Initializing framfs context (pre-sync)...");
+    ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
     if (ret < 0)
     {
-        LOG_ERR("FRAM/framfs init failed: %d", ret);
+        LOG_ERR("Framfs init failed: %d", ret);
         return ret;
     }
     juxta_ble_set_framfs_context(&framfs_ctx);
@@ -1344,12 +1374,12 @@ int main(void)
         k_sleep(K_MSEC(50));
     }
 
-    /* Initialize FRAM device and framfs */
-    LOG_INF("📁 Initializing FRAM device...");
-    ret = init_fram_and_framfs(&fram_dev, &framfs_ctx, true);
+    /* FRAM already initialized - reinitialize framfs for production use */
+    LOG_INF("📁 Reinitializing framfs context for production...");
+    ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
     if (ret < 0)
     {
-        LOG_ERR("FRAM/framfs init failed: %d", ret);
+        LOG_ERR("Framfs reinit failed: %d", ret);
         return ret;
     }
 
