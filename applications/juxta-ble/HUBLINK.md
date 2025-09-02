@@ -40,7 +40,8 @@ Accepts JSON commands to control device behavior. Multiple commands can be sent 
   "advInterval": 5,
   "scanInterval": 15,
   "subjectId":"vole001",
-  "uploadPath":"/TEST"
+  "uploadPath":"/TEST",
+  "operatingMode": 0
 }
 ```
 
@@ -49,10 +50,12 @@ This implementaion is unique from other nodes that have an internal memory card 
 **Commands**:
 - `timestamp` (number): Unix timestamp for device synchronization
 - `sendFilenames` (boolean): Triggers file listing process when true
+- `clearMemory` (boolean): Clears device memory when true
 - `advInterval` (integer): set advertising burst interval, 0 means no advertising
 - `scanInterval` (integer): set scanning burst interval, 0 means no scanning
 - `subjectId` (string): should be saved internally
 - `uploadPath` (string): should be saved internally
+- `operatingMode` (integer): set device operating mode (0 = NORMAL mode with BLE bursts/motion counting, 1 = ADC_ONLY mode with pure ADC recordings)
 
 **Usage**: Write JSON commands to control device behavior. Device responds via callbacks.
 

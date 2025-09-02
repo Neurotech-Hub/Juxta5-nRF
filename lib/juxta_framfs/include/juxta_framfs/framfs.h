@@ -55,6 +55,7 @@ extern "C"
 #define JUXTA_FRAMFS_TYPE_RAW_DATA 0x00
 #define JUXTA_FRAMFS_TYPE_SENSOR_LOG 0x01
 #define JUXTA_FRAMFS_TYPE_CONFIG 0x02
+#define JUXTA_FRAMFS_TYPE_ADC_BURST 0x03
 #define JUXTA_FRAMFS_TYPE_COMPRESSED 0x80 /* High bit = compressed */
 
 /* Record type codes */
@@ -140,7 +141,7 @@ extern "C"
     {
         uint16_t magic;                                 /* User settings magic number */
         uint8_t version;                                /* User settings version */
-        uint8_t reserved;                               /* Reserved for future use */
+        uint8_t operating_mode;                         /* Operating mode */
         uint8_t adv_interval;                           /* Advertising interval (0-255) */
         uint8_t scan_interval;                          /* Scanning interval (0-255) */
         char subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN];   /* Subject ID string */
@@ -173,6 +174,20 @@ extern "C"
     {
         uint16_t minute; /* 0-1439 for full day */
         uint8_t type;    /* Record type */
+    } __packed;
+
+    /**
+     * @brief ADC burst record structure (8 bytes + variable data)
+     *
+     * Used for ADC burst data storage
+     * Total size: 8 + data_length bytes
+     */
+    struct juxta_framfs_adc_burst_record
+    {
+        uint32_t start_time_us; /* Absolute time since boot in microseconds */
+        uint16_t data_length;   /* Number of 8-bit ADC samples */
+        uint16_t duration_us;   /* Actual measured duration in microseconds */
+        uint8_t data[];         /* Variable length: 8-bit ADC samples */
     } __packed;
 
     /**
@@ -457,6 +472,12 @@ extern "C"
     int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
                                        uint8_t interval);
 
+    int juxta_framfs_get_operating_mode(struct juxta_framfs_context *ctx,
+                                        uint8_t *mode);
+
+    int juxta_framfs_set_operating_mode(struct juxta_framfs_context *ctx,
+                                        uint8_t mode);
+
     /**
      * @brief Get subject ID
      *
@@ -572,6 +593,18 @@ extern "C"
      */
     int juxta_framfs_decode_simple_record(const uint8_t *buffer,
                                           struct juxta_framfs_simple_record *record);
+
+    /**
+     * @brief Decode ADC burst record from buffer
+     *
+     * @param buffer Buffer containing encoded data
+     * @param buffer_size Size of buffer
+     * @param record ADC burst record structure to populate
+     * @return Number of bytes decoded on success, negative error code on failure
+     */
+    int juxta_framfs_decode_adc_burst_record(const uint8_t *buffer,
+                                             size_t buffer_size,
+                                             struct juxta_framfs_adc_burst_record *record);
 
     /**
      * @brief Append device scan record to active file with MAC indexing
@@ -703,6 +736,25 @@ extern "C"
     int juxta_framfs_append_simple_record_data(struct juxta_framfs_ctx *ctx,
                                                uint16_t minute,
                                                uint8_t type);
+
+    /**
+     * @brief Append ADC burst with automatic file management (PRIMARY API)
+     *
+     * Efficiently writes ADC burst data directly to FRAM without intermediate buffers.
+     * Supports up to 65535 samples per burst (uint16_t limit).
+     *
+     * @param ctx File system context
+     * @param start_time_us Absolute time since boot in microseconds
+     * @param samples Array of 8-bit ADC samples
+     * @param sample_count Number of samples (0-65535)
+     * @param duration_us Actual measured duration in microseconds
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
+                                           uint32_t start_time_us,
+                                           const uint8_t *samples,
+                                           uint16_t sample_count,
+                                           uint32_t duration_us);
 
     /**
      * @brief Get current active filename

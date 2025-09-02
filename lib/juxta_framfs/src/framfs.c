@@ -1116,6 +1116,30 @@ int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
     return framfs_write_user_settings(ctx);
 }
 
+int juxta_framfs_get_operating_mode(struct juxta_framfs_context *ctx,
+                                    uint8_t *mode)
+{
+    if (!ctx || !ctx->initialized || !mode)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    *mode = ctx->user_settings.operating_mode;
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_operating_mode(struct juxta_framfs_context *ctx,
+                                    uint8_t mode)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    ctx->user_settings.operating_mode = mode;
+    return framfs_write_user_settings(ctx);
+}
+
 int juxta_framfs_get_subject_id(struct juxta_framfs_context *ctx,
                                 char *subject_id)
 {
@@ -1205,6 +1229,7 @@ int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx)
     memset(&ctx->user_settings, 0, sizeof(ctx->user_settings));
     ctx->user_settings.magic = JUXTA_FRAMFS_USER_SETTINGS_MAGIC;
     ctx->user_settings.version = JUXTA_FRAMFS_USER_SETTINGS_VERSION;
+    ctx->user_settings.operating_mode = 0x00;        /* Default: normal operation mode */
     ctx->user_settings.adv_interval = 5;             /* Default: advertising every 5 seconds */
     ctx->user_settings.scan_interval = 15;           /* Default: scanning every 15 seconds */
     strcpy(ctx->user_settings.subject_id, "");       /* Default: empty */
@@ -1657,6 +1682,158 @@ int juxta_framfs_advance_to_next_day(struct juxta_framfs_ctx *ctx)
     {
         LOG_INF("Advanced to next day: %s", ctx->current_filename);
     }
+
+    return JUXTA_FRAMFS_OK;
+}
+
+/* ========================================================================
+ * ADC Burst Record Functions
+ * ======================================================================== */
+
+/* Note: Encode function removed - encoding is done directly in append function */
+
+int juxta_framfs_decode_adc_burst_record(const uint8_t *buffer,
+                                         size_t buffer_size,
+                                         struct juxta_framfs_adc_burst_record *record)
+{
+    if (!buffer || !record || buffer_size < 8)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Decode fixed fields */
+    record->start_time_us = ((uint32_t)buffer[0] << 24) |
+                            ((uint32_t)buffer[1] << 16) |
+                            ((uint32_t)buffer[2] << 8) |
+                            buffer[3];
+    record->data_length = (buffer[4] << 8) | buffer[5];
+    record->duration_us = (buffer[6] << 8) | buffer[7];
+
+    /* Validate data length */
+    if (record->data_length == 0)
+    {
+        LOG_WRN("Invalid data length: %d", record->data_length);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Calculate required buffer size */
+    size_t required_size = 8 + record->data_length;
+    if (buffer_size < required_size)
+    {
+        LOG_WRN("Buffer too small: %zu < %zu", buffer_size, required_size);
+        return JUXTA_FRAMFS_ERROR_SIZE;
+    }
+
+    /* Note: Data is available at buffer + 8, but we can't copy to flexible array member */
+    /* Caller should access data directly from buffer + 8 */
+
+    return (int)required_size;
+}
+
+int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
+                                       uint32_t start_time_us,
+                                       const uint8_t *samples,
+                                       uint16_t sample_count,
+                                       uint32_t duration_us)
+{
+    if (!ctx || !ctx->fs_ctx || !ctx->fs_ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    if (!samples || sample_count == 0)
+    {
+        LOG_WRN("Invalid ADC burst parameters");
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Ensure correct file is active */
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Check active file */
+    if (ctx->fs_ctx->active_file_index < 0)
+    {
+        LOG_WRN("No active file for append operation");
+        return JUXTA_FRAMFS_ERROR_NO_ACTIVE;
+    }
+
+    /* Read current active file entry */
+    struct juxta_framfs_entry entry;
+    ret = framfs_read_entry(ctx->fs_ctx, ctx->fs_ctx->active_file_index, &entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read active file entry: %d", ret);
+        return ret;
+    }
+
+    /* Verify it's still active */
+    if (!(entry.flags & JUXTA_FRAMFS_FLAG_ACTIVE))
+    {
+        LOG_WRN("File is not active: %s", entry.filename);
+        return JUXTA_FRAMFS_ERROR_READ_ONLY;
+    }
+
+    /* Calculate total record size and check FRAM bounds */
+    uint32_t record_size = 8 + sample_count;
+    uint32_t write_addr = entry.start_addr + entry.length;
+    if (write_addr + record_size > JUXTA_FRAM_SIZE_BYTES)
+    {
+        LOG_WRN("ADC burst would exceed FRAM size");
+        return JUXTA_FRAMFS_ERROR_FULL;
+    }
+
+    /* Prepare header (8 bytes) */
+    uint8_t header[8];
+    header[0] = (start_time_us >> 24) & 0xFF; /* start_time high byte */
+    header[1] = (start_time_us >> 16) & 0xFF;
+    header[2] = (start_time_us >> 8) & 0xFF;
+    header[3] = start_time_us & 0xFF;       /* start_time low byte */
+    header[4] = (sample_count >> 8) & 0xFF; /* data_length high byte */
+    header[5] = sample_count & 0xFF;        /* data_length low byte */
+    header[6] = (duration_us >> 8) & 0xFF;  /* duration high byte */
+    header[7] = duration_us & 0xFF;         /* duration low byte */
+
+    /* Write header directly to FRAM */
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, 8);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write ADC burst header to FRAM: %d", ret);
+        return ret;
+    }
+
+    /* Write samples directly to FRAM (no intermediate buffer) */
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 8, samples, sample_count);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write ADC burst samples to FRAM: %d", ret);
+        return ret;
+    }
+
+    /* Update entry with new length */
+    entry.length += record_size;
+    ret = framfs_write_entry(ctx->fs_ctx, ctx->fs_ctx->active_file_index, &entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to update file entry: %d", ret);
+        return ret;
+    }
+
+    /* Update header statistics */
+    ctx->fs_ctx->header.total_data_size += record_size;
+    ctx->fs_ctx->header.next_data_addr = write_addr + record_size;
+    ret = framfs_write_header(ctx->fs_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to update header: %d", ret);
+        return ret;
+    }
+
+    LOG_DBG("Appended ADC burst: %d samples, %d bytes to %s (total: %d bytes)",
+            sample_count, record_size, entry.filename, entry.length);
 
     return JUXTA_FRAMFS_OK;
 }

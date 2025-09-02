@@ -569,6 +569,156 @@ int lis2dh12_test_interrupt_clearing(struct lis2dh12_dev *dev)
     return ret;
 }
 
+/* ========================================================================
+ * Motion System Management
+ * ======================================================================== */
+
+/* Motion system state */
+static uint8_t motion_count = 0;
+static volatile bool lis2dh_interrupt_pending = false;
+static struct lis2dh12_dev motion_dev;
+static struct k_work motion_work;
+static struct k_timer motion_timer;
+static bool motion_based_intervals = false;
+static struct gpio_callback lis2dh_int_cb;
+
+/* Motion work handler - runs in work queue context (safe for longer operations) */
+static void motion_work_handler(struct k_work *work)
+{
+    if (lis2dh_interrupt_pending)
+    {
+        lis2dh_interrupt_pending = false;
+
+        // Clear the interrupt so we can detect new ones
+        lis2dh12_clear_int1_interrupt(&motion_dev);
+
+        // Reset to default intervals when motion is detected
+        motion_based_intervals = false;
+        LOG_INF("🏃 Motion interrupt cleared (count: %d) - reset to default intervals", motion_count);
+    }
+}
+
+/* Motion timer callback - starts work queue after 1 second delay */
+static void motion_timer_callback(struct k_timer *timer)
+{
+    k_work_submit(&motion_work);
+}
+
+/* GPIO interrupt callback for LIS2DH motion detection */
+static void lis2dh_int_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    motion_count++;
+    lis2dh_interrupt_pending = true;
+    printk("🏃 Motion detected via GPIO! Count: %d\n", motion_count);
+
+    // Start 1-second timer to process interrupt (self-limiting to 60 events/minute)
+    k_timer_start(&motion_timer, K_SECONDS(1), K_NO_WAIT);
+}
+
+int lis2dh12_init_motion_system(void)
+{
+    // Initialize LIS2DH device
+    motion_dev.spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi0));
+
+    // Initialize GPIO specs manually
+    motion_dev.cs_gpio.port = DEVICE_DT_GET(DT_GPIO_CTLR_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1));
+    motion_dev.cs_gpio.pin = DT_GPIO_PIN_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
+    motion_dev.cs_gpio.dt_flags = DT_GPIO_FLAGS_BY_IDX(DT_NODELABEL(spi0), cs_gpios, 1);
+
+    motion_dev.int_gpio.port = DEVICE_DT_GET(DT_GPIO_CTLR(DT_PATH(gpio_keys, accel_int), gpios));
+    motion_dev.int_gpio.pin = DT_GPIO_PIN(DT_PATH(gpio_keys, accel_int), gpios);
+    motion_dev.int_gpio.dt_flags = DT_GPIO_FLAGS(DT_PATH(gpio_keys, accel_int), gpios);
+
+    int ret = lis2dh12_init(&motion_dev);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to initialize LIS2DH: %d", ret);
+        return ret;
+    }
+
+    // Configure motion detection with high-pass filter for mouse collar sensitivity (0.01g = ~10 in LIS2DH units)
+    ret = lis2dh12_configure_motion_detection(&motion_dev, 10, 0);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure LIS2DH motion detection: %d", ret);
+        return ret;
+    }
+
+    // Configure GPIO interrupt for INT1
+    if (!device_is_ready(motion_dev.int_gpio.port))
+    {
+        LOG_ERR("LIS2DH INT GPIO not ready");
+        return -ENODEV;
+    }
+
+    ret = gpio_pin_configure(motion_dev.int_gpio.port, motion_dev.int_gpio.pin, GPIO_INPUT | GPIO_PULL_UP);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure LIS2DH INT GPIO: %d", ret);
+        return ret;
+    }
+
+    ret = gpio_pin_interrupt_configure(motion_dev.int_gpio.port, motion_dev.int_gpio.pin, GPIO_INT_EDGE_RISING);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to configure LIS2DH INT interrupt: %d", ret);
+        return ret;
+    }
+
+    gpio_init_callback(&lis2dh_int_cb, lis2dh_int_callback, BIT(motion_dev.int_gpio.pin));
+    ret = gpio_add_callback(motion_dev.int_gpio.port, &lis2dh_int_cb);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to add LIS2DH INT callback: %d", ret);
+        return ret;
+    }
+
+    // Initialize work and timer
+    k_work_init(&motion_work, motion_work_handler);
+    k_timer_init(&motion_timer, motion_timer_callback, NULL);
+
+    LOG_INF("✅ LIS2DH motion detection configured (ODR=100Hz, HP filtered, threshold=0.01g, duration=0)");
+
+    // Test GPIO interrupt setup
+    int gpio_state = gpio_pin_get(motion_dev.int_gpio.port, motion_dev.int_gpio.pin);
+    LOG_INF("LIS2DH INT GPIO initial state: %d", gpio_state);
+
+    return 0;
+}
+
+void lis2dh12_process_motion_events(void)
+{
+    // This function is called from main.c minute processing
+    // Handle motion count reporting and interval adjustment
+    if (motion_count > 0)
+    {
+        LOG_INF("Motion events in last minute: %d", motion_count);
+        motion_count = 0;
+        motion_based_intervals = false; // Reset to default intervals
+    }
+    else
+    {
+        // No motion detected in the last minute, switch to extended intervals
+        motion_based_intervals = true;
+        LOG_INF("No motion detected in last minute - switching to extended intervals (2x)");
+    }
+}
+
+bool lis2dh12_should_use_extended_intervals(void)
+{
+    return motion_based_intervals;
+}
+
+uint8_t lis2dh12_get_motion_count(void)
+{
+    return motion_count;
+}
+
+void lis2dh12_reset_motion_count(void)
+{
+    motion_count = 0;
+}
+
 int lis2dh12_analyze_interrupt_trigger(struct lis2dh12_dev *dev)
 {
     if (!dev || !dev->initialized)
