@@ -55,3 +55,4 @@ compile_commands.json
 .Trashes
 ehthumbs.db
 Thumbs.db 
+mcuboot_private.pem
