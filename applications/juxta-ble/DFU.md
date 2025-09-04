@@ -17,19 +17,18 @@ This document outlines a simple, robust path to enable over-the-air firmware upd
 - Board partitions are already suitable for MCUboot two-slot swaps.
 
 ### Files to adjust
-- `applications/juxta-ble/prj.conf` ✅ **UPDATED**
+- `applications/juxta-ble/prj.conf`
   - Enable MCUboot (bootloader, two-slot swap) and MCUmgr core with BLE transport.
   - Enable image and OS management groups.
   - Keep `CONFIG_BT_SMP=n` for unauthenticated DFU (development/in-house).
   - Optional later: tune BLE/MCUmgr buffers if throughput is insufficient; current ATT_MTU 247 is acceptable to start.
 
-- `applications/juxta-ble/child_image/mcuboot.conf` ✅ **UPDATED**
+- `applications/juxta-ble/child_image/mcuboot.conf` (new)
   - Configure MCUboot signing (RSA-2048) and swap policy (test-then-confirm by default).
   - Point to the local private key file used for signing. Do not commit private keys.
 
-- Local signing key (not in repo) ✅ **SCRIPT PROVIDED**
+- Local signing key (not in repo)
   - Generate an RSA-2048 keypair for signing. The build uses this to produce signed images (`app_update.bin` / `zephyr.signed.bin`).
-  - Use the provided `generate_signing_key.sh` script to create keys.
 
 - `applications/juxta-ble/src/main.c`
   - Add magnet-hold timing check at the very start of `main()` (before BLE/vitals/FRAM init):
@@ -74,17 +73,5 @@ This document outlines a simple, robust path to enable over-the-air firmware upd
 - Enable sysbuild so MCUboot is built alongside the app.
 - Output artifacts include a signed image for DFU. Use the signed image when uploading over MCUmgr.
 
-### Quick start steps
-1. **Generate signing keys**: Run `./generate_signing_key.sh` in the `applications/juxta-ble/` directory.
-2. **Enable signing**: Uncomment the signing lines in `child_image/mcuboot.conf` and update the key path.
-3. **Build with sysbuild**: Use VS Code nRF extension with sysbuild enabled, or command line with `-DSYSBUILD=y`.
-4. **Test DFU**: Use MCUmgr CLI or Nordic Device Manager app to upload the signed image.
-
-### Troubleshooting
-- **Kconfig errors**: Ensure `mcuboot.conf` uses valid MCUboot symbols (not application symbols).
-- **Build failures**: Verify sysbuild is enabled and MCUboot is being built as a child image.
-- **Signing errors**: Ensure the private key path in `mcuboot.conf` is correct and the key file exists.
-- **DFU not working**: Check that MCUmgr SMP service is present in BLE scan results when in DFU mode.
-
-This plan keeps DFU explicit, simple for users, and isolated from your application's normal services and state machine.
+This plan keeps DFU explicit, simple for users, and isolated from your application’s normal services and state machine.
 

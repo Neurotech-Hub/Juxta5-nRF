@@ -1,9 +1,0 @@
-/* Disable peripherals not needed by MCUboot bootloader */
-
-&adc {
-	status = "disabled";
-};
-
-&spi0 {
-	status = "disabled";
-};

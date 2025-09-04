@@ -18,7 +18,4 @@ CONFIG_UART_CONSOLE=n
 # Default Console (RTT)
 CONFIG_USE_SEGGER_RTT=y
 CONFIG_RTT_CONSOLE=y
-CONFIG_CONSOLE=y
-
-# Flash partitions (disable PM for fixed partitions)
-CONFIG_PARTITION_MANAGER_ENABLED=n 
+CONFIG_CONSOLE=y 
