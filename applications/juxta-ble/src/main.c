@@ -17,6 +17,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/watchdog.h>
+#include <zephyr/settings/settings.h>
 #include "juxta_vitals_nrf52/vitals.h"
 #include "juxta_framfs/framfs.h"
 #include "juxta_fram/fram.h"
@@ -27,6 +28,8 @@
 #include "lis2dh12.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
+
+/* MCUmgr SMP manual registration removed; rely on NCS auto-init when enabled */
 
 typedef enum
 {
@@ -1117,6 +1120,11 @@ static int juxta_start_connectable_advertising(void)
     uint8_t juxta_service_uuid_le[16];
     memcpy(juxta_service_uuid_le, svc_uuid->val, sizeof(juxta_service_uuid_le));
 
+    // SMP UUID (8D53DC1D-1DB7-4CD3-868B-8A527460AA84) in little-endian byte order
+    static const uint8_t smp_uuid_le[16] = {
+        0x84, 0xAA, 0x60, 0x74, 0x27, 0x8A, 0x8B, 0x86,
+        0xD3, 0x4C, 0xB7, 0x1D, 0x1D, 0xDC, 0x53, 0x8D};
+
     // Comprehensive advertising data for maximum discoverability
     struct bt_data adv_data[] = {
         BT_DATA(BT_DATA_FLAGS, (uint8_t[]){BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR}, 1),
@@ -1126,6 +1134,7 @@ static int juxta_start_connectable_advertising(void)
 
     // Add scan response data for additional information
     struct bt_data scan_data[] = {
+        BT_DATA(BT_DATA_UUID128_ALL, smp_uuid_le, sizeof(smp_uuid_le)),
         BT_DATA(BT_DATA_NAME_COMPLETE, adv_name, strlen(adv_name)),
     };
 
@@ -1240,6 +1249,9 @@ int main(void)
 {
     int ret;
 
+    /* CRITICAL: First thing - test if we can even print */
+    printk("MAIN: Entry point reached\n");
+
     LOG_INF("🚀 Starting JUXTA BLE Application");
 
     /* Check for watchdog reset */
@@ -1311,6 +1323,16 @@ int main(void)
     }
 
     LOG_INF("Bluetooth initialized for datetime sync");
+
+    /* Load BLE settings for proper identity */
+#if defined(CONFIG_SETTINGS)
+    settings_load();
+    LOG_INF("✅ BLE settings loaded");
+#else
+    LOG_WRN("settings_load() skipped (CONFIG_SETTINGS not enabled)");
+#endif
+
+    /* MCUmgr SMP is auto-initialized when enabled via Kconfig */
 
     /* Initialize vitals early so timestamp sync can succeed */
     ret = juxta_vitals_init(&vitals_ctx, true);

@@ -9,7 +9,6 @@
 	chosen {
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,code-partition = &slot0_partition;
 	};
 
 	leds {
@@ -89,12 +88,11 @@
 		   <&gpio0 5 GPIO_ACTIVE_LOW>;   /* Accelerometer CS */
 	
 	fram0: fram@0 {
-		compatible = "jedec,spi-nor";
+		/* FRAM is not a JEDEC SPI-NOR flash; expose as a generic SPI device */
+		compatible = "zephyr,spi-device";
 		reg = <0>;
-		spi-max-frequency = <8000000>; /* 8MHz - standard SPI clock */
-		size = <DT_SIZE_K(128)>; /* MB85RS1MTPW-G-APEWE1 is 1Mbit = 128KB */
-		has-dpd;
-		jedec-id = [04 7F 27];
+		spi-max-frequency = <8000000>;
+		label = "FRAM0";
 	};
 
 	/* LIS2DH12 accelerometer - using custom driver */
@@ -135,6 +133,7 @@
 	};
 };
 
+/* Flash partitions for MCUboot - using Nordic standard layout */
 &flash0 {
 	partitions {
 		compatible = "fixed-partitions";
@@ -143,22 +142,19 @@
 
 		boot_partition: partition@0 {
 			label = "mcuboot";
-			reg = <0x00000000 DT_SIZE_K(48)>;
+			reg = <0x0 0x10000>;
 		};
-
-		slot0_partition: partition@c000 {
+		slot0_partition: partition@10000 {
 			label = "image-0";
-			reg = <0x0000c000 DT_SIZE_K(464)>;
+			reg = <0x10000 0x74000>;
 		};
-
-		slot1_partition: partition@80000 {
+		slot1_partition: partition@84000 {
 			label = "image-1";
-			reg = <0x00080000 DT_SIZE_K(464)>;
+			reg = <0x84000 0x74000>;
 		};
-
-		storage_partition: partition@f0000 {
+		storage_partition: partition@f8000 {
 			label = "storage";
-			reg = <0x000f0000 DT_SIZE_K(64)>;
+			reg = <0xf8000 0x8000>;
 		};
 	};
-}; 
+};

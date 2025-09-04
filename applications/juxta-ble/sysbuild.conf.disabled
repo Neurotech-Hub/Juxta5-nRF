@@ -1,0 +1,2 @@
+# Ensure MCUboot child image is included by sysbuild with fixed partitions
+SB_CONFIG_BOOTLOADER_MCUBOOT=y
