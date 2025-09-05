@@ -11,6 +11,7 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gap.h>
+#include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/device.h>
 #include <zephyr/sys/util.h>
@@ -441,7 +442,9 @@ static void adc_work_handler(struct k_work *work)
     int ret = juxta_adc_burst_sample(samples, ADC_MAX_SAMPLES, &actual_samples, &duration_us);
     if (ret == 0 && actual_samples > 0)
     {
-        uint32_t start_time = juxta_vitals_get_timestamp(&vitals_ctx) * 1000000; // Convert to microseconds
+        // Get Unix timestamp and microsecond offset using the new vitals helper functions
+        uint32_t unix_timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
+        uint32_t microsecond_offset = juxta_vitals_get_rel_microseconds_to_unix(&vitals_ctx);
 
         // Convert int32_t samples to uint8_t for storage (scale appropriately) using static buffer
         uint8_t *scaled_samples = adc_scaled_buffer;
@@ -458,7 +461,7 @@ static void adc_work_handler(struct k_work *work)
             scaled_samples[i] = (uint8_t)scaled;
         }
 
-        ret = juxta_framfs_append_adc_burst_data(&time_ctx, start_time, scaled_samples, (uint16_t)count, duration_us);
+        ret = juxta_framfs_append_adc_burst_data(&time_ctx, unix_timestamp, microsecond_offset, scaled_samples, (uint16_t)count, duration_us);
         if (ret == 0)
         {
             LOG_INF("📊 ADC burst saved: %u samples, %u us", (unsigned)count, (unsigned)duration_us);
@@ -1097,6 +1100,17 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
 }
 
+static void mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+    LOG_INF("📏 MTU updated: TX=%d, RX=%d", tx, rx);
+    // Notify BLE service of MTU update
+    juxta_ble_mtu_updated(tx);
+}
+
+static struct bt_gatt_cb gatt_callbacks = {
+    .att_mtu_updated = mtu_updated,
+};
+
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected,
     .disconnected = disconnected,
@@ -1465,6 +1479,9 @@ int main(void)
         return ret;
     }
 
+    /* Register GATT callbacks for MTU exchange */
+    bt_gatt_cb_register(&gatt_callbacks);
+
     /* Set up datetime synchronization callback for production flow */
     juxta_ble_set_datetime_sync_callback(datetime_synchronized_callback);
 
@@ -1659,6 +1676,9 @@ int main(void)
     }
 
     LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
+
+    /* Set up BLE service watchdog feeding */
+    juxta_ble_set_watchdog_channel(wdt_channel_id);
 
     /* Start watchdog feed timer immediately after watchdog initialization */
     k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));

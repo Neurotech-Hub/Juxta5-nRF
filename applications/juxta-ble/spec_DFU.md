@@ -73,6 +73,23 @@ CONFIG_ZCBOR=y
 3. **Upload**: Use Nordic Device Manager app to upload `zephyr.signed.bin`
 4. **Reset**: Device automatically boots new firmware after upload
 
+### Build Configuration Requirements
+
+#### VS Code nRF Extension Build Configuration
+When building with the nRF Connect extension in VS Code, add these CMake arguments to the **Build Configuration**:
+
+```
+-Dmcuboot_CONFIG_ADC=n -Dmcuboot_CONFIG_ADC_NRFX_SAADC=n -Dmcuboot_CONFIG_I2C=n -Dmcuboot_CONFIG_SPI=n -Dmcuboot_CONFIG_SENSOR=n -Dmcuboot_CONFIG_GPIO=y -Dmcuboot_CONFIG_SERIAL=y
+```
+
+**Purpose**: These arguments disable unnecessary drivers in the MCUboot bootloader to reduce memory usage and prevent conflicts with the main application.
+
+**How to Add**:
+1. Open VS Code nRF Connect extension
+2. Go to Build Configuration
+3. Add the arguments to the CMake arguments field
+4. Build with sysbuild enabled
+
 ### Critical Pitfalls to Avoid
 
 #### 1. **BLE Stack Initialization**

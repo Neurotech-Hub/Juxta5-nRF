@@ -13,6 +13,8 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/att.h>
+#include <zephyr/drivers/watchdog.h>
+#include <hal/nrf_rtc.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -71,6 +73,23 @@ static struct juxta_framfs_context *framfs_ctx = NULL;
 /* External vitals context - will be set during initialization */
 static struct juxta_vitals_ctx *vitals_ctx = NULL;
 
+/* Watchdog device for feeding during long operations */
+static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
+static int wdt_channel_id = -1;
+
+/* Watchdog feeding helper for long operations */
+static void feed_watchdog(void)
+{
+    if (wdt && wdt_channel_id >= 0)
+    {
+        int err = wdt_feed(wdt, wdt_channel_id);
+        if (err < 0)
+        {
+            LOG_WRN("⚠️ Failed to feed watchdog: %d", err);
+        }
+    }
+}
+
 /* Battery check helper for FRAM operations */
 static bool should_allow_fram_write(void)
 {
@@ -121,6 +140,15 @@ void juxta_ble_set_vitals_context(struct juxta_vitals_ctx *ctx)
 {
     vitals_ctx = ctx;
     LOG_INF("⏰ BLE service linked to vitals context");
+}
+
+/**
+ * @brief Set the watchdog channel ID for feeding during long operations
+ */
+void juxta_ble_set_watchdog_channel(int channel_id)
+{
+    wdt_channel_id = channel_id;
+    LOG_INF("🛡️ BLE service linked to watchdog channel %d", channel_id);
 }
 
 /**
@@ -177,6 +205,9 @@ static int handle_timestamp_synchronization(uint32_t timestamp)
     /* Get current timestamp for comparison */
     uint32_t current_timestamp = juxta_vitals_get_timestamp(vitals_ctx);
 
+    /* Capture microsecond reference before setting timestamp */
+    uint32_t microsecond_reference = NRF_RTC0->COUNTER;
+
     /* Set the new timestamp */
     int ret = juxta_vitals_set_timestamp(vitals_ctx, timestamp);
     if (ret < 0)
@@ -184,6 +215,12 @@ static int handle_timestamp_synchronization(uint32_t timestamp)
         LOG_ERR("⏰ Failed to set timestamp: %d", ret);
         return ret;
     }
+
+    /* Enable microsecond tracking with captured reference */
+    vitals_ctx->microsecond_reference = microsecond_reference;
+    vitals_ctx->microsecond_tracking_enabled = true;
+
+    LOG_INF("⏰ Microsecond tracking enabled (RTC0 reference: %u)", microsecond_reference);
 
     /* Log the timestamp change */
     if (current_timestamp > 0)
@@ -237,6 +274,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to format file system: %d", ret);
         return ret;
     }
+    feed_watchdog(); /* Feed watchdog after format operation */
 
     /* Clear MAC address table */
     ret = juxta_framfs_mac_clear(framfs_ctx);
@@ -245,6 +283,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to clear MAC table: %d", ret);
         return ret;
     }
+    feed_watchdog(); /* Feed watchdog after MAC clear operation */
 
     /* Clear user settings (reset to defaults) */
     ret = juxta_framfs_clear_user_settings(framfs_ctx);
@@ -253,6 +292,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to clear user settings: %d", ret);
         return ret;
     }
+    feed_watchdog(); /* Feed watchdog after settings clear operation */
 
     LOG_INF("✅ Memory clearing completed successfully");
     return 0;
@@ -861,9 +901,12 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         current_transfer_offset += ret;
         *bytes_read = ret;
 
+        /* Feed watchdog during MAC table transfer operations */
+        feed_watchdog();
+
+        double progress = (double)current_transfer_offset / current_transfer_file_size * 100.0;
         LOG_DBG("📁 MAC table chunk: offset=%u/%d, bytes=%zu, progress=%.1f%%",
-                current_transfer_offset, current_transfer_file_size, *bytes_read,
-                (double)current_transfer_offset / current_transfer_file_size * 100.0);
+                current_transfer_offset, current_transfer_file_size, *bytes_read, progress);
         return 0;
     }
 
@@ -878,9 +921,12 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
     current_transfer_offset += ret;
     *bytes_read = ret;
 
+    /* Feed watchdog during file transfer operations */
+    feed_watchdog();
+
+    double progress = (double)current_transfer_offset / current_transfer_file_size * 100.0;
     LOG_DBG("📁 File transfer chunk: offset=%u/%d, bytes=%zu, progress=%.1f%%",
-            current_transfer_offset, current_transfer_file_size, *bytes_read,
-            (double)current_transfer_offset / current_transfer_file_size * 100.0);
+            current_transfer_offset, current_transfer_file_size, *bytes_read, progress);
     return 0;
 }
 
@@ -1227,9 +1273,12 @@ void juxta_ble_connection_established(struct bt_conn *conn)
     current_conn = conn;
     LOG_INF("🔗 BLE connection established for file transfer");
 
-    // SoftDevice controller does not support GATT client MTU exchange.
-    // The peer (e.g., mobile app) must initiate MTU exchange for larger MTU.
-    current_mtu = bt_gatt_get_mtu(conn); // Will be 23 unless peer requests larger
+    // Note: MTU exchange is initiated by the peer (e.g., iPhone)
+    // The device will respond to MTU exchange requests automatically
+    LOG_INF("📏 Ready for MTU exchange (peer-initiated)");
+
+    // Get current MTU (will be 23 initially, updated after exchange)
+    current_mtu = bt_gatt_get_mtu(conn);
     mtu_negotiated = (current_mtu > 23);
     LOG_INF("📏 Current MTU: %d bytes (negotiated=%s)", current_mtu, mtu_negotiated ? "yes" : "no");
 
@@ -1249,6 +1298,13 @@ void juxta_ble_connection_terminated(void)
     indication_pending = false;
     end_file_transfer(); /* Clean up any active transfer */
     LOG_INF("🔌 BLE connection terminated, file transfer cleaned up");
+}
+
+void juxta_ble_mtu_updated(uint16_t new_mtu)
+{
+    current_mtu = new_mtu;
+    mtu_negotiated = (current_mtu > 23);
+    LOG_INF("📏 MTU updated: %d bytes (negotiated=%s)", current_mtu, mtu_negotiated ? "yes" : "no");
 }
 
 /* JUXTA Hublink BLE Service Definition */
@@ -1314,6 +1370,9 @@ int juxta_ble_service_init(void)
     LOG_INF("📏 MTU: %d bytes, Chunk: %d bytes, Node: %d bytes, Gateway: %d bytes",
             JUXTA_FILE_TRANSFER_CHUNK_SIZE + 3, JUXTA_FILE_TRANSFER_CHUNK_SIZE,
             JUXTA_NODE_RESPONSE_MAX_SIZE, JUXTA_GATEWAY_COMMAND_MAX_SIZE);
+
+    /* GATT callbacks are registered in main.c */
+    LOG_INF("📏 GATT callbacks will be registered by main.c");
 
     /* Locate characteristic value attributes in our service */
     filename_char_attr = bt_gatt_find_by_uuid(juxta_hublink_svc.attrs,

@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <hal/nrf_rtc.h>
 #include "juxta_vitals_nrf52/vitals.h"
 
 LOG_MODULE_REGISTER(juxta_vitals_nrf52, CONFIG_JUXTA_VITALS_NRF52_LOG_LEVEL);
@@ -58,7 +59,8 @@ int juxta_vitals_init(struct juxta_vitals_ctx *ctx, bool enable_battery_monitori
     memset(ctx, 0, sizeof(*ctx));
     ctx->initialized = true;
     ctx->battery_monitoring = enable_battery_monitoring;
-    ctx->temperature_monitoring = true; // Always enable temperature monitoring
+    ctx->temperature_monitoring = true;        // Always enable temperature monitoring
+    ctx->microsecond_tracking_enabled = false; // Will be enabled when BLE timestamp is set
 
     /* RTC device disabled for BLE application to avoid conflicts */
     LOG_INF("RTC device disabled - using uptime-based timing for BLE compatibility");
@@ -237,6 +239,86 @@ uint32_t juxta_vitals_get_timestamp(struct juxta_vitals_ctx *ctx)
     LOG_DBG("Current timestamp: %u (elapsed: %u seconds)", current_timestamp, elapsed_seconds);
 
     return current_timestamp;
+}
+
+uint64_t juxta_vitals_get_timestamp_with_microseconds(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !ctx->initialized)
+    {
+        return 0;
+    }
+
+    uint32_t unix_timestamp = juxta_vitals_get_timestamp(ctx);
+    if (unix_timestamp == 0)
+    {
+        return 0;
+    }
+
+    if (!ctx->microsecond_tracking_enabled)
+    {
+        /* Return Unix timestamp with zero microseconds if microsecond tracking not available */
+        return ((uint64_t)unix_timestamp << 32);
+    }
+
+    /* Use the new helper function to get microsecond offset within current second */
+    uint32_t microseconds = juxta_vitals_get_microsecond_offset(ctx);
+
+    /* Combine Unix timestamp (upper 32 bits) with microseconds (lower 32 bits) */
+    return ((uint64_t)unix_timestamp << 32) | microseconds;
+}
+
+uint32_t juxta_vitals_get_microsecond_offset(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !ctx->initialized || !ctx->microsecond_tracking_enabled)
+    {
+        return 0;
+    }
+
+    /* Calculate microsecond offset from RTC0 counter */
+    uint32_t current_rtc_ticks = NRF_RTC0->COUNTER;
+    uint32_t elapsed_ticks = current_rtc_ticks - ctx->microsecond_reference;
+
+    /* Convert ticks to microseconds (32kHz = 32768 ticks per second) */
+    uint32_t microseconds = (elapsed_ticks * 1000000) / 32768;
+
+    /* Return microseconds within current second (0-999999) */
+    return microseconds % 1000000;
+}
+
+uint32_t juxta_vitals_get_rel_microseconds(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !ctx->initialized || !ctx->microsecond_tracking_enabled)
+    {
+        return 0;
+    }
+
+    /* Calculate microsecond offset from RTC0 counter */
+    uint32_t current_rtc_ticks = NRF_RTC0->COUNTER;
+    uint32_t elapsed_ticks = current_rtc_ticks - ctx->microsecond_reference;
+
+    /* Convert ticks to microseconds (32kHz = 32768 ticks per second) */
+    uint32_t microseconds = (elapsed_ticks * 1000000) / 32768;
+
+    /* Return total microseconds since BLE sync (no modulo - full 32-bit range) */
+    return microseconds;
+}
+
+uint32_t juxta_vitals_get_rel_microseconds_to_unix(struct juxta_vitals_ctx *ctx)
+{
+    if (!ctx || !ctx->initialized || !ctx->microsecond_tracking_enabled)
+    {
+        return 0;
+    }
+
+    /* Calculate microsecond offset from RTC0 counter */
+    uint32_t current_rtc_ticks = NRF_RTC0->COUNTER;
+    uint32_t elapsed_ticks = current_rtc_ticks - ctx->microsecond_reference;
+
+    /* Convert ticks to microseconds (32kHz = 32768 ticks per second) */
+    uint32_t microseconds = (elapsed_ticks * 1000000) / 32768;
+
+    /* Return microseconds within current second (0-999999) */
+    return microseconds % 1000000;
 }
 
 uint32_t juxta_vitals_get_date_yyyymmdd(struct juxta_vitals_ctx *ctx)

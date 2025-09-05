@@ -1696,18 +1696,25 @@ int juxta_framfs_decode_adc_burst_record(const uint8_t *buffer,
                                          size_t buffer_size,
                                          struct juxta_framfs_adc_burst_record *record)
 {
-    if (!buffer || !record || buffer_size < 8)
+    if (!buffer || !record || buffer_size < 12)
     {
         return JUXTA_FRAMFS_ERROR;
     }
 
-    /* Decode fixed fields */
-    record->start_time_us = ((uint32_t)buffer[0] << 24) |
-                            ((uint32_t)buffer[1] << 16) |
-                            ((uint32_t)buffer[2] << 8) |
-                            buffer[3];
-    record->data_length = (buffer[4] << 8) | buffer[5];
-    record->duration_us = (buffer[6] << 8) | buffer[7];
+    /* Decode new 12-byte header format */
+    uint32_t unix_timestamp = ((uint32_t)buffer[0] << 24) |
+                              ((uint32_t)buffer[1] << 16) |
+                              ((uint32_t)buffer[2] << 8) |
+                              buffer[3];
+    uint32_t microsecond_offset = ((uint32_t)buffer[4] << 24) |
+                                  ((uint32_t)buffer[5] << 16) |
+                                  ((uint32_t)buffer[6] << 8) |
+                                  buffer[7];
+    record->data_length = (buffer[8] << 8) | buffer[9];
+    record->duration_us = (buffer[10] << 8) | buffer[11];
+
+    /* Convert Unix timestamp + microsecond offset to start_time_us for compatibility */
+    record->start_time_us = (unix_timestamp * 1000000) + microsecond_offset;
 
     /* Validate data length */
     if (record->data_length == 0)
@@ -1717,21 +1724,22 @@ int juxta_framfs_decode_adc_burst_record(const uint8_t *buffer,
     }
 
     /* Calculate required buffer size */
-    size_t required_size = 8 + record->data_length;
+    size_t required_size = 12 + record->data_length;
     if (buffer_size < required_size)
     {
         LOG_WRN("Buffer too small: %zu < %zu", buffer_size, required_size);
         return JUXTA_FRAMFS_ERROR_SIZE;
     }
 
-    /* Note: Data is available at buffer + 8, but we can't copy to flexible array member */
-    /* Caller should access data directly from buffer + 8 */
+    /* Note: Data is available at buffer + 12, but we can't copy to flexible array member */
+    /* Caller should access data directly from buffer + 12 */
 
     return (int)required_size;
 }
 
 int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
-                                       uint32_t start_time_us,
+                                       uint32_t unix_timestamp,
+                                       uint32_t microsecond_offset,
                                        const uint8_t *samples,
                                        uint16_t sample_count,
                                        uint32_t duration_us)
@@ -1778,7 +1786,7 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
     }
 
     /* Calculate total record size and check FRAM bounds */
-    uint32_t record_size = 8 + sample_count;
+    uint32_t record_size = 12 + sample_count; /* Extended header: 12 bytes */
     uint32_t write_addr = entry.start_addr + entry.length;
     if (write_addr + record_size > JUXTA_FRAM_SIZE_BYTES)
     {
@@ -1786,19 +1794,23 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
         return JUXTA_FRAMFS_ERROR_FULL;
     }
 
-    /* Prepare header (8 bytes) */
-    uint8_t header[8];
-    header[0] = (start_time_us >> 24) & 0xFF; /* start_time high byte */
-    header[1] = (start_time_us >> 16) & 0xFF;
-    header[2] = (start_time_us >> 8) & 0xFF;
-    header[3] = start_time_us & 0xFF;       /* start_time low byte */
-    header[4] = (sample_count >> 8) & 0xFF; /* data_length high byte */
-    header[5] = sample_count & 0xFF;        /* data_length low byte */
-    header[6] = (duration_us >> 8) & 0xFF;  /* duration high byte */
-    header[7] = duration_us & 0xFF;         /* duration low byte */
+    /* Prepare header (12 bytes) - New format: Unix timestamp + microsecond offset + sample count + duration */
+    uint8_t header[12];
+    header[0] = (unix_timestamp >> 24) & 0xFF;     /* Unix timestamp high byte */
+    header[1] = (unix_timestamp >> 16) & 0xFF;     /* Unix timestamp mid-high byte */
+    header[2] = (unix_timestamp >> 8) & 0xFF;      /* Unix timestamp mid-low byte */
+    header[3] = unix_timestamp & 0xFF;             /* Unix timestamp low byte */
+    header[4] = (microsecond_offset >> 24) & 0xFF; /* Microsecond offset high byte */
+    header[5] = (microsecond_offset >> 16) & 0xFF; /* Microsecond offset mid-high byte */
+    header[6] = (microsecond_offset >> 8) & 0xFF;  /* Microsecond offset mid-low byte */
+    header[7] = microsecond_offset & 0xFF;         /* Microsecond offset low byte */
+    header[8] = (sample_count >> 8) & 0xFF;        /* Sample count high byte */
+    header[9] = sample_count & 0xFF;               /* Sample count low byte */
+    header[10] = (duration_us >> 8) & 0xFF;        /* Duration high byte */
+    header[11] = duration_us & 0xFF;               /* Duration low byte */
 
     /* Write header directly to FRAM */
-    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, 8);
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, 12);
     if (ret < 0)
     {
         LOG_ERR("Failed to write ADC burst header to FRAM: %d", ret);
@@ -1806,7 +1818,7 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
     }
 
     /* Write samples directly to FRAM (no intermediate buffer) */
-    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 8, samples, sample_count);
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 12, samples, sample_count);
     if (ret < 0)
     {
         LOG_ERR("Failed to write ADC burst samples to FRAM: %d", ret);

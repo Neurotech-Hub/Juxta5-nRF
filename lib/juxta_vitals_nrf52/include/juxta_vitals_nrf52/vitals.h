@@ -49,6 +49,10 @@ extern "C"
         uint32_t current_timestamp; /* Current Unix timestamp */
         uint32_t last_update_time;  /* Last update time (uptime) */
 
+        /* Microsecond precision timing */
+        uint32_t microsecond_reference;    /* RTC0 counter when timestamp was set */
+        bool microsecond_tracking_enabled; /* Whether microsecond tracking is active */
+
         /* Battery state */
         uint16_t battery_mv;     /* Battery voltage in millivolts */
         uint8_t battery_percent; /* Battery percentage (0-100) */
@@ -119,6 +123,55 @@ extern "C"
      * @return Current Unix timestamp, or 0 if not set
      */
     uint32_t juxta_vitals_get_timestamp(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Get current timestamp with microsecond precision
+     *
+     * This function returns a 64-bit timestamp combining the Unix timestamp
+     * with microsecond precision. The upper 32 bits contain the Unix timestamp
+     * (seconds since epoch), and the lower 32 bits contain microseconds.
+     *
+     * @param ctx Vitals context
+     * @return 64-bit timestamp (seconds << 32 | microseconds), or 0 if not set
+     */
+    uint64_t juxta_vitals_get_timestamp_with_microseconds(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Get microsecond offset from current Unix timestamp
+     *
+     * This function returns the number of microseconds that have elapsed
+     * since the start of the current second, based on the microsecond
+     * reference captured during BLE timestamp synchronization.
+     *
+     * @param ctx Vitals context
+     * @return Microseconds since start of current second (0-999999), or 0 if not available
+     */
+    uint32_t juxta_vitals_get_microsecond_offset(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Get relative microseconds since BLE timestamp synchronization
+     *
+     * This function returns the number of microseconds that have elapsed
+     * since the microsecond reference was captured during BLE timestamp
+     * synchronization. This provides a consistent 32-bit microsecond
+     * timestamp that's relative to the BLE sync point.
+     *
+     * @param ctx Vitals context
+     * @return Microseconds since BLE sync (0-4294967295), or 0 if not available
+     */
+    uint32_t juxta_vitals_get_rel_microseconds(struct juxta_vitals_ctx *ctx);
+
+    /**
+     * @brief Get microsecond offset within current second relative to Unix timestamp
+     *
+     * This function returns the number of microseconds within the current second
+     * (0-999999), providing microsecond precision for absolute timestamps.
+     * This is ideal for the 8-byte header format combining Unix timestamp + microseconds.
+     *
+     * @param ctx Vitals context
+     * @return Microseconds within current second (0-999999), or 0 if not available
+     */
+    uint32_t juxta_vitals_get_rel_microseconds_to_unix(struct juxta_vitals_ctx *ctx);
 
     /**
      * @brief Get current date in YYYYMMDD format

@@ -744,14 +744,16 @@ extern "C"
      * Supports up to 65535 samples per burst (uint16_t limit).
      *
      * @param ctx File system context
-     * @param start_time_us Absolute time since boot in microseconds
+     * @param unix_timestamp Unix timestamp (seconds since epoch)
+     * @param microsecond_offset Microsecond offset within current second (0-999999)
      * @param samples Array of 8-bit ADC samples
      * @param sample_count Number of samples (0-65535)
      * @param duration_us Actual measured duration in microseconds
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
-                                           uint32_t start_time_us,
+                                           uint32_t unix_timestamp,
+                                           uint32_t microsecond_offset,
                                            const uint8_t *samples,
                                            uint16_t sample_count,
                                            uint32_t duration_us);

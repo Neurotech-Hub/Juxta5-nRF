@@ -93,6 +93,13 @@ extern "C"
     void juxta_ble_set_vitals_context(struct juxta_vitals_ctx *ctx);
 
     /**
+     * @brief Set the watchdog channel ID for feeding during long operations
+     *
+     * @param channel_id Watchdog channel ID from main.c
+     */
+    void juxta_ble_set_watchdog_channel(int channel_id);
+
+    /**
      * @brief Trigger timing update callback (called when settings change)
      *
      * This function should be implemented in main.c to handle timing updates
@@ -110,6 +117,13 @@ extern "C"
      * @brief Connection terminated callback
      */
     void juxta_ble_connection_terminated(void);
+
+    /**
+     * @brief MTU updated callback
+     *
+     * @param new_mtu New MTU size after exchange
+     */
+    void juxta_ble_mtu_updated(uint16_t new_mtu);
 
     /**
      * @brief Get current service status for debugging
