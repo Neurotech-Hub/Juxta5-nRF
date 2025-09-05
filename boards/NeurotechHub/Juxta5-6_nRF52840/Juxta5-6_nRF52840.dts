@@ -89,12 +89,11 @@
 		   <&gpio0 5 GPIO_ACTIVE_LOW>;   /* Accelerometer CS */
 	
 	fram0: fram@0 {
-		compatible = "jedec,spi-nor";
+		/* FRAM is not a JEDEC SPI-NOR flash; expose as a generic SPI device */
+		compatible = "zephyr,spi-device";
 		reg = <0>;
-		spi-max-frequency = <8000000>; /* 8MHz - standard SPI clock */
-		size = <DT_SIZE_K(128)>; /* MB85RS1MTPW-G-APEWE1 is 1Mbit = 128KB */
-		has-dpd;
-		jedec-id = [04 7F 27];
+		spi-max-frequency = <8000000>;
+		label = "FRAM0";
 	};
 
 	/* LIS2DH12 accelerometer - using custom driver */
