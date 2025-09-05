@@ -1106,8 +1106,19 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
             magnet_reset_state = MAGNET_RESET_STATE_NORMAL;
             LOG_DBG("🧲 Magnet activation flag and reset state reset - entering normal operation");
 
-            /* DEBUG: Poll magnet sensor GPIO for 5 seconds to check readings */
-            // debug_magnet_sensor_polling(); // Temporarily disabled due to compilation issue
+            /* DEBUG: Check magnet sensor GPIO state after BLE disconnect */
+            LOG_INF("🧲 DEBUG: Checking magnet sensor after BLE disconnect...");
+            // Use direct GPIO access instead of device tree to avoid compilation issues
+            const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+            if (device_is_ready(gpio_dev))
+            {
+                int magnet_reading = gpio_pin_get_raw(gpio_dev, 11); // P1.11 is magnet sensor
+                LOG_INF("🧲 DEBUG: Magnet GPIO reading after BLE disconnect: %d", magnet_reading);
+            }
+            else
+            {
+                LOG_ERR("🧲 DEBUG: GPIO1 device not ready");
+            }
 
             current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
             if (framfs_ctx.initialized)
@@ -1293,8 +1304,10 @@ static void perform_graceful_reset(void)
         wdt_feed(wdt, wdt_channel_id);
     }
 
-    // Brief delay to ensure all operations complete
-    k_sleep(K_MSEC(100));
+    // Turn off LED and pause for 3 seconds to signal reset is committed
+    gpio_pin_set_dt(&led, 0);
+    LOG_INF("🔄 Reset committed - LED OFF for 3s (safe to remove magnet)");
+    k_sleep(K_SECONDS(3));
 
     LOG_INF("🔄 Force resetting device...");
 
@@ -1306,10 +1319,10 @@ static void handle_magnet_reset(void)
 {
     // Available in both operating modes for safety
 
-    // Check magnet sensor state
-    // TEMPORARILY DISABLED DUE TO COMPILATION ISSUE
-    // bool magnet_present = gpio_pin_get_dt(&magnet_sensor);
-    bool magnet_present = false; // Force false for now
+    // Check magnet sensor state - using same method as initialization
+    // Note: magnet sensor logic is inverted - HIGH = no magnet, LOW = magnet present
+    bool sensor_reading = gpio_pin_get_dt(&magnet_sensor);
+    bool magnet_present = !sensor_reading; // Invert: LOW = magnet present
     uint32_t current_time = k_uptime_get_32();
 
     switch (magnet_reset_state)
@@ -1318,6 +1331,7 @@ static void handle_magnet_reset(void)
         if (magnet_present)
         {
             LOG_INF("🧲 Magnet detected - starting reset countdown (mode %d)", current_mode);
+            LOG_INF("🧲 DEBUG: Sensor reading=%d, magnet_present=%d", sensor_reading, magnet_present);
             magnet_reset_state = MAGNET_RESET_STATE_DETECTED;
             magnet_reset_start_time = current_time;
 
@@ -1375,14 +1389,21 @@ static void handle_magnet_reset(void)
             }
             else
             {
-                // Show countdown progress with LED blinking
+                // Show countdown progress with fast LED blinking
                 uint32_t seconds_remaining = (remaining_ms + 999) / 1000; // Round up
-                if (countdown_duration % 1000 < 100)                      // Blink every second
+
+                // Log countdown every second
+                if (countdown_duration % 1000 < 100)
                 {
                     LOG_INF("🧲 Reset countdown: %u seconds remaining", seconds_remaining);
+                }
+
+                // Fast LED blinking - 200ms ON, 200ms OFF pattern
+                if ((countdown_duration % 400) < 200)
+                {
                     gpio_pin_set_dt(&led, 1); // LED ON
                 }
-                else if (countdown_duration % 1000 < 200)
+                else
                 {
                     gpio_pin_set_dt(&led, 0); // LED OFF
                 }
@@ -1845,6 +1866,29 @@ int main(void)
         k_work_submit(&state_work);
         k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT); // triggers EVENT_TIMER_EXPIRED immediately
         LOG_INF("✅ JUXTA BLE Application started in NORMAL mode (BLE bursts/motion counting)");
+
+        /* Initialize magnet sensor for reset functionality in Normal mode - same as ADC mode */
+        LOG_INF("🧲 Initializing magnet sensor for reset functionality...");
+        if (device_is_ready(magnet_sensor.port))
+        {
+            // Configure magnet sensor pin manually - same as initialization
+            int ret = gpio_pin_configure(magnet_sensor.port, magnet_sensor.pin, GPIO_INPUT); // No flags, no pull-up
+            if (ret == 0)
+            {
+                LOG_INF("🧲 Magnet sensor configured for Normal mode reset functionality");
+                // Test the magnet sensor reading immediately
+                bool magnet_reading = gpio_pin_get_dt(&magnet_sensor);
+                LOG_INF("🧲 DEBUG: Magnet sensor reading after Normal mode init: %d", magnet_reading);
+            }
+            else
+            {
+                LOG_ERR("❌ Failed to configure magnet sensor: %d", ret);
+            }
+        }
+        else
+        {
+            LOG_ERR("❌ Magnet sensor device not ready");
+        }
     }
     else if (current_mode == OPERATING_MODE_ADC_ONLY)
     {
@@ -1854,6 +1898,33 @@ int main(void)
         k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1)); // Every 1 second
         LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
         LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (1s intervals)");
+
+        /* Initialize magnet sensor for reset functionality in ADC mode - same as initialization */
+        LOG_INF("🧲 Initializing magnet sensor for reset functionality...");
+        if (device_is_ready(magnet_sensor.port))
+        {
+            // Configure magnet sensor pin manually - same as initialization
+            int ret = gpio_pin_configure(magnet_sensor.port, magnet_sensor.pin, GPIO_INPUT); // No flags, no pull-up
+            if (ret == 0)
+            {
+                LOG_INF("🧲 Magnet sensor configured for ADC mode reset functionality");
+                // Test the magnet sensor reading immediately
+                bool magnet_reading = gpio_pin_get_dt(&magnet_sensor);
+                LOG_INF("🧲 DEBUG: Magnet sensor reading after ADC mode init: %d", magnet_reading);
+            }
+            else
+            {
+                LOG_ERR("❌ Failed to configure magnet sensor: %d", ret);
+            }
+        }
+        else
+        {
+            LOG_ERR("❌ Magnet sensor device not ready");
+        }
+
+        /* Enable magnet reset functionality for ADC mode */
+        datetime_synchronized = true; // Enable magnet reset checking in main loop
+        LOG_INF("🧲 Magnet reset functionality enabled for ADC mode");
     }
     else
     {
@@ -1905,11 +1976,24 @@ int main(void)
     while (1)
     {
         // Check for magnet reset only when in normal operation (not during initialization)
-        // TEMPORARILY DISABLED FOR DEBUGGING - COMPILATION ISSUE
-        // if (datetime_synchronized)
-        // {
-        //     handle_magnet_reset();
-        // }
+        if (datetime_synchronized)
+        {
+            // Add debug to see if magnet reset is being called
+            static uint32_t debug_counter = 0;
+            if (debug_counter % 60 == 0)
+            { // Every 60 seconds (60 * 1s intervals)
+                LOG_INF("🧲 DEBUG: Magnet reset check active (call %u)", debug_counter);
+            }
+            debug_counter++;
+            handle_magnet_reset();
+
+            // If magnet reset is active, check more frequently for responsive countdown
+            if (magnet_reset_state != MAGNET_RESET_STATE_NORMAL)
+            {
+                k_sleep(K_MSEC(100)); // Check every 100ms during reset sequence
+                continue;             // Skip the 10-second sleep and heartbeat
+            }
+        }
 
         k_sleep(K_SECONDS(10));
         heartbeat_counter++;
