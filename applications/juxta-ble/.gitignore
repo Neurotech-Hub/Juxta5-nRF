@@ -1,0 +1,18 @@
+# MCUboot signing keys - keep private keys secure
+signing_keys/
+*.pem
+
+# Build artifacts
+build/
+*.bin
+*.hex
+*.elf
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

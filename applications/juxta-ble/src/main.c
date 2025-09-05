@@ -17,6 +17,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/watchdog.h>
+#include <zephyr/settings/settings.h>
 #include "juxta_vitals_nrf52/vitals.h"
 #include "juxta_framfs/framfs.h"
 #include "juxta_fram/fram.h"
@@ -508,8 +509,11 @@ static void setup_dynamic_adv_name(void)
     bt_addr_le_t addr;
     size_t count = 1;
 
-    bt_id_get(&addr, &count); // NCS v3.0.2: returns void
-    if (count > 0)
+    // NCS v3.0.2: bt_id_get returns void, but still populates the addr structure
+    bt_id_get(&addr, &count);
+
+    // Check if we got a valid address
+    if (count > 0 && !bt_addr_le_is_rpa(&addr))
     {
         snprintf(adv_name, sizeof(adv_name), "JX_%02X%02X%02X",
                  addr.a.val[3], addr.a.val[2], addr.a.val[1]);
@@ -517,8 +521,8 @@ static void setup_dynamic_adv_name(void)
     }
     else
     {
-        LOG_ERR("Failed to get BLE MAC address");
-        strcpy(adv_name, "JX_ERROR");
+        LOG_WRN("Failed to get BLE MAC address, using default");
+        strcpy(adv_name, "JX_DEFAULT");
     }
 }
 
@@ -1161,10 +1165,12 @@ static void blink_led_three_times(void)
     LOG_INF("✅ LED blink sequence completed");
 }
 
+static void enter_dfu_mode(void);
+
 static void wait_for_magnet_sensor(void) __unused;
 static void wait_for_magnet_sensor(void)
 {
-    LOG_INF("🧲 Waiting for magnet sensor to go high (active)...");
+    LOG_INF("🧲 Waiting for magnet sensor activation...");
     if (!device_is_ready(magnet_sensor.port))
     {
         LOG_ERR("❌ Magnet sensor device not ready");
@@ -1179,6 +1185,8 @@ static void wait_for_magnet_sensor(void)
     }
 
     gpio_pin_set_dt(&led, 0); // LED OFF initially
+
+    // Wait for magnet to be applied (sensor goes HIGH when magnet is present)
     while (gpio_pin_get_dt(&magnet_sensor))
     {
         LOG_INF("💤 Waiting for magnet sensor activation (debug every 1s)...");
@@ -1190,8 +1198,114 @@ static void wait_for_magnet_sensor(void)
 
         k_sleep(K_SECONDS(1));
     }
-    LOG_INF("🔔 Magnet sensor activated! Waking up...");
+
+    // Magnet detected - now measure hold duration
+    LOG_INF("🧲 Magnet detected - measuring hold duration...");
+    uint32_t magnet_start_time = k_uptime_get_32();
+
+    while (!gpio_pin_get_dt(&magnet_sensor)) // While magnet is still present
+    {
+        uint32_t hold_duration = k_uptime_get_32() - magnet_start_time;
+
+        // Check for DFU mode trigger (3+ seconds)
+        if (hold_duration > 3000)
+        {
+            LOG_INF("🔄 DFU Mode: Long magnet hold detected (>3s)");
+            blink_led_three_times(); // Visual confirmation
+            enter_dfu_mode();        // Never returns
+        }
+
+        // Fast LED pulse while measuring hold duration
+        gpio_pin_set_dt(&led, 1); // LED ON
+        k_sleep(K_MSEC(50));
+        gpio_pin_set_dt(&led, 0); // LED OFF
+        k_sleep(K_MSEC(50));
+    }
+
+    LOG_INF("🔔 Normal mode: Magnet activated (<3s)");
     blink_led_three_times();
+}
+
+/**
+ * @brief Enter DFU-only mode with minimal BLE + SMP service
+ * This function never returns - device stays in DFU mode until firmware update
+ */
+static void enter_dfu_mode(void)
+{
+    LOG_INF("🔄 Entering DFU mode - minimal BLE + SMP only");
+    LOG_INF("⚠️ DFU Mode: Hublink service will be disabled for clean MCUmgr operation");
+
+    // Initialize BLE stack for DFU
+    int ret = bt_enable(NULL);
+    if (ret)
+    {
+        LOG_ERR("❌ DFU Mode: Bluetooth init failed (err %d)", ret);
+        // Blink LED rapidly to indicate error
+        while (1)
+        {
+            gpio_pin_set_dt(&led, 1);
+            k_sleep(K_MSEC(100));
+            gpio_pin_set_dt(&led, 0);
+            k_sleep(K_MSEC(100));
+        }
+    }
+
+    LOG_INF("✅ DFU Mode: Bluetooth initialized");
+
+    // Load BLE settings for proper identity (required for SMP)
+#if defined(CONFIG_SETTINGS)
+    settings_load();
+    LOG_INF("✅ DFU Mode: BLE settings loaded");
+#endif
+
+    // Set up dynamic advertising name for DFU mode
+    setup_dynamic_adv_name();
+
+    // NOTE: Do NOT call juxta_ble_service_init() in DFU mode
+    // This prevents Hublink service registration and conflicts
+
+    // Start DFU-specific advertising (connectable, SMP service only)
+    struct bt_le_adv_param adv_param = {
+        .id = BT_ID_DEFAULT,
+        .sid = 0,
+        .secondary_max_skip = 0,
+        .options = BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
+        .interval_min = BT_GAP_ADV_FAST_INT_MIN_1,
+        .interval_max = BT_GAP_ADV_FAST_INT_MAX_1,
+        .peer = NULL,
+    };
+
+    // SMP UUID (8D53DC1D-1DB7-4CD3-868B-8A527460AA84) in little-endian byte order
+    static const uint8_t smp_uuid_le[16] = {
+        0x84, 0xAA, 0x60, 0x74, 0x27, 0x8A, 0x8B, 0x86,
+        0xD3, 0x4C, 0xB7, 0x1D, 0x1D, 0xDC, 0x53, 0x8D};
+
+    // DFU-specific advertising data (SMP service only)
+    struct bt_data adv_data[] = {
+        BT_DATA(BT_DATA_FLAGS, (uint8_t[]){BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR}, 1),
+        BT_DATA(BT_DATA_UUID128_ALL, smp_uuid_le, sizeof(smp_uuid_le)),
+        BT_DATA(BT_DATA_NAME_COMPLETE, adv_name, strlen(adv_name)),
+    };
+
+    ret = bt_le_adv_start(&adv_param, adv_data, ARRAY_SIZE(adv_data), NULL, 0);
+    if (ret < 0)
+    {
+        LOG_ERR("❌ DFU Mode: Advertising failed to start (err %d)", ret);
+    }
+    else
+    {
+        LOG_INF("🔄 DFU Mode: Advertising started as '%s' - SMP service only", adv_name);
+        LOG_INF("📱 DFU Mode: Ready for firmware upload via Nordic nRF Connect app");
+    }
+
+    // DFU mode main loop - just keep the system alive and handle DFU
+    uint32_t heartbeat_counter = 0;
+    while (1)
+    {
+        k_sleep(K_SECONDS(10));
+        heartbeat_counter++;
+        LOG_INF("🔄 DFU Mode heartbeat: %u (waiting for firmware update)", heartbeat_counter);
+    }
 }
 
 static void ten_minute_timeout(struct k_timer *timer)
@@ -1239,7 +1353,6 @@ static void datetime_sync_restart_work_handler(struct k_work *work)
 int main(void)
 {
     int ret;
-
     LOG_INF("🚀 Starting JUXTA BLE Application");
 
     /* Check for watchdog reset */
@@ -1312,6 +1425,16 @@ int main(void)
 
     LOG_INF("Bluetooth initialized for datetime sync");
 
+    // Load BLE settings to get proper identity
+    ret = settings_load();
+    if (ret)
+    {
+        LOG_WRN("Settings load failed (err %d), continuing anyway", ret);
+    }
+
+    // Give BLE stack time to fully initialize
+    k_sleep(K_MSEC(500));
+
     /* Initialize vitals early so timestamp sync can succeed */
     ret = juxta_vitals_init(&vitals_ctx, true);
     if (ret < 0)
@@ -1348,10 +1471,26 @@ int main(void)
     // Start connectable advertising and wait for datetime synchronization
     // Ensure work handler is initialized before any scheduling
     k_work_init(&datetime_sync_restart_work, datetime_sync_restart_work_handler);
-    ret = juxta_start_connectable_advertising();
+
+    // Retry connectable advertising with delays
+    int adv_retry_count = 0;
+    do
+    {
+        ret = juxta_start_connectable_advertising();
+        if (ret < 0)
+        {
+            adv_retry_count++;
+            LOG_WRN("Connectable advertising failed (err %d), retry %d/3", ret, adv_retry_count);
+            if (adv_retry_count < 3)
+            {
+                k_sleep(K_MSEC(1000)); // Wait 1 second before retry
+            }
+        }
+    } while (ret < 0 && adv_retry_count < 3);
+
     if (ret < 0)
     {
-        LOG_ERR("Failed to start connectable advertising for datetime sync: %d", ret);
+        LOG_ERR("Failed to start connectable advertising after %d retries: %d", adv_retry_count, ret);
         return ret;
     }
 

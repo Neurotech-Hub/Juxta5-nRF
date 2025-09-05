@@ -1252,6 +1252,7 @@ void juxta_ble_connection_terminated(void)
 }
 
 /* JUXTA Hublink BLE Service Definition */
+#ifndef CONFIG_JUXTA_DISABLE_HUBLINK_SERVICE
 BT_GATT_SERVICE_DEFINE(juxta_hublink_svc,
                        /* Service Declaration */
                        BT_GATT_PRIMARY_SERVICE(BT_UUID_JUXTA_HUBLINK_SERVICE),
@@ -1297,6 +1298,7 @@ BT_GATT_SERVICE_DEFINE(juxta_hublink_svc,
 
                        /* File Transfer Characteristic User Description */
                        BT_GATT_CUD("File Transfer", BT_GATT_PERM_READ), );
+#endif /* CONFIG_JUXTA_DISABLE_HUBLINK_SERVICE */
 
 /**
  * @brief Initialize the JUXTA Hublink BLE service
