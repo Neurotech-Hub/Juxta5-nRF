@@ -878,7 +878,22 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
     /* Calculate optimal chunk size based on MTU */
     size_t max_chunk_size = current_mtu - 3; /* Account for ATT header */
     size_t remaining = current_transfer_file_size - current_transfer_offset;
-    size_t chunk_size = MIN(MIN(buffer_size, max_chunk_size), remaining);
+
+    /* Use MTU-based chunk size with conservative buffer limit */
+    /* MTU 527 negotiated, but ACL buffers limited to 251 bytes */
+    /* Use smaller of: MTU-3 or buffer-safe limit */
+    size_t buffer_safe_limit = 240; /* Conservative limit within 251-byte ACL buffers */
+    size_t chunk_size = MIN(MIN(MIN(buffer_size, max_chunk_size), remaining), buffer_safe_limit);
+
+    /* Safety check: ensure chunk size doesn't exceed buffer capacity */
+    if (chunk_size > buffer_size)
+    {
+        LOG_ERR("📁 Chunk size (%zu) exceeds buffer size (%zu)", chunk_size, buffer_size);
+        return -EINVAL;
+    }
+
+    LOG_DBG("📁 Chunk calculation: MTU=%d, max_chunk=%zu, remaining=%zu, final_chunk=%zu, buffer_size=%zu",
+            current_mtu, max_chunk_size, remaining, chunk_size, buffer_size);
 
     if (chunk_size == 0)
     {
@@ -911,10 +926,16 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
     }
 
     /* Read file chunk for regular files */
+    LOG_DBG("📁 Reading file chunk: %s, offset=%u, size=%zu",
+            current_transfer_filename, current_transfer_offset, chunk_size);
+
     int ret = juxta_framfs_read(framfs_ctx, current_transfer_filename,
                                 current_transfer_offset, buffer, chunk_size);
+    LOG_DBG("📁 File read result: ret=%d", ret);
+
     if (ret < 0)
     {
+        LOG_ERR("📁 File read failed: %d", ret);
         return handle_file_error(ret, "read_file_chunk", current_transfer_filename);
     }
 
@@ -992,6 +1013,7 @@ static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr
     indication_pending = true;
     indication_timeout = k_uptime_get_32() + 5000; /* 5s */
 
+    LOG_DBG("📤 Attempting to send indication: %u bytes", len);
     int ret = bt_gatt_indicate(conn, params);
     if (ret < 0)
     {
@@ -1000,7 +1022,7 @@ static int send_indication(struct bt_conn *conn, const struct bt_gatt_attr *attr
         return ret;
     }
 
-    LOG_DBG("📤 Indication sent: %u bytes", len);
+    LOG_DBG("📤 Indication sent successfully: %u bytes", len);
     return 0;
 }
 
@@ -1169,15 +1191,22 @@ static ssize_t write_filename_char(struct bt_conn *conn, const struct bt_gatt_at
             /* Send first chunk via file transfer characteristic */
             if (file_transfer_char_attr && conn)
             {
+                LOG_INF("📁 Starting file transfer for: %s (size: %d bytes)",
+                        filename_request, current_transfer_file_size);
+
                 size_t bytes_read = 0;
                 ret = get_file_transfer_chunk(file_transfer_chunk, sizeof(file_transfer_chunk), &bytes_read);
+                LOG_INF("📁 First chunk result: ret=%d, bytes_read=%zu", ret, bytes_read);
+
                 if (ret == 0 && bytes_read > 0)
                 {
+                    LOG_INF("📁 Sending first chunk: %zu bytes", bytes_read);
                     send_indication(conn, file_transfer_char_attr, file_transfer_chunk, bytes_read);
                 }
                 else
                 {
                     /* File is empty or error - send EOF */
+                    LOG_INF("📁 File transfer error or empty - sending EOF");
                     const char *eof = "EOF";
                     send_indication(conn, file_transfer_char_attr, eof, strlen(eof));
                     file_transfer_state = FILE_TRANSFER_STATE_COMPLETE;

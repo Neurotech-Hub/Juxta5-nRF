@@ -15,6 +15,7 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/device.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/random/random.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/watchdog.h>
@@ -196,6 +197,19 @@ static bool state_system_ready = false;
 static struct k_timer adc_timer;
 static struct k_work adc_work;
 
+// Magnet reset state for ADC mode
+typedef enum
+{
+    MAGNET_RESET_STATE_NORMAL = 0,
+    MAGNET_RESET_STATE_DETECTED,
+    MAGNET_RESET_STATE_COUNTING,
+    MAGNET_RESET_STATE_RESETTING
+} magnet_reset_state_t;
+
+static magnet_reset_state_t magnet_reset_state = MAGNET_RESET_STATE_NORMAL;
+static uint32_t magnet_reset_start_time = 0;
+static bool adc_operations_paused = false;
+
 /* Static buffers for ADC sampling to avoid sysworkq stack overflow */
 #define ADC_MAX_SAMPLES 1000
 static int32_t adc_samples_buffer[ADC_MAX_SAMPLES];
@@ -204,6 +218,9 @@ static uint8_t adc_scaled_buffer[ADC_MAX_SAMPLES];
 /* Operating mode definitions */
 #define OPERATING_MODE_NORMAL 0x00   /* State machine/BLE bursts/motion counting */
 #define OPERATING_MODE_ADC_ONLY 0x01 /* Purely ADC recordings */
+
+/* Global operating mode variable */
+static uint8_t current_mode = OPERATING_MODE_NORMAL;
 
 #define ADV_BURST_DURATION_MS 100
 #define SCAN_BURST_DURATION_MS 500
@@ -483,6 +500,12 @@ static void adc_timer_callback(struct k_timer *timer)
     // Only submit work, do not call FRAMFS functions in ISR context
     k_work_submit(&adc_work);
 }
+
+// Magnet reset functions for both operating modes
+static void pause_all_operations(void);
+static void resume_all_operations(void);
+static void handle_magnet_reset(void);
+static void perform_graceful_reset(void);
 
 /* Definition: simple record logger (BOOT/CONNECTED/NO_ACTIVITY/ERROR) */
 static void juxta_log_simple(uint8_t type)
@@ -1076,7 +1099,17 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
                 LOG_DBG("State system not ready yet; skipping resume on disconnect");
                 return;
             }
-            uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
+
+            /* Reset magnet activation flag since we're now in normal operation */
+            magnet_activated = false;
+            /* Reset magnet reset state machine to prevent false positives */
+            magnet_reset_state = MAGNET_RESET_STATE_NORMAL;
+            LOG_DBG("🧲 Magnet activation flag and reset state reset - entering normal operation");
+
+            /* DEBUG: Poll magnet sensor GPIO for 5 seconds to check readings */
+            // debug_magnet_sensor_polling(); // Temporarily disabled due to compilation issue
+
+            current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
             if (framfs_ctx.initialized)
             {
                 juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
@@ -1160,9 +1193,9 @@ static int juxta_start_connectable_advertising(void)
     return ret;
 }
 
-// Magnet sensor and LED definitions using Zephyr device tree (currently unused)
-static const struct gpio_dt_spec magnet_sensor __unused = GPIO_DT_SPEC_GET(DT_PATH(gpio_keys, magnet_sensor), gpios);
-static const struct gpio_dt_spec led __unused = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
+// Magnet sensor and LED definitions using Zephyr device tree
+static const struct gpio_dt_spec magnet_sensor = GPIO_DT_SPEC_GET(DT_PATH(gpio_keys, magnet_sensor), gpios);
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
 
 static void blink_led_three_times(void) __unused;
 static void blink_led_three_times(void)
@@ -1179,9 +1212,193 @@ static void blink_led_three_times(void)
     LOG_INF("✅ LED blink sequence completed");
 }
 
+// Magnet reset functions for both operating modes
+static void pause_all_operations(void)
+{
+    if (adc_operations_paused)
+    {
+        return; // Already paused
+    }
+
+    LOG_INF("⏸️ Pausing all operations for magnet reset");
+
+    // Stop operations based on current mode
+    if (current_mode == OPERATING_MODE_ADC_ONLY)
+    {
+        // Stop ADC timer
+        k_timer_stop(&adc_timer);
+        LOG_INF("⏸️ ADC timer stopped");
+    }
+    else if (current_mode == OPERATING_MODE_NORMAL)
+    {
+        // Stop state machine timer
+        k_timer_stop(&state_timer);
+        LOG_INF("⏸️ State machine timer stopped");
+    }
+
+    // Mark operations as paused
+    adc_operations_paused = true;
+
+    LOG_INF("✅ All operations paused");
+}
+
+static void resume_all_operations(void)
+{
+    if (!adc_operations_paused)
+    {
+        return; // Not paused
+    }
+
+    LOG_INF("▶️ Resuming all operations after magnet reset cancelled");
+
+    // Restart operations based on current mode
+    if (current_mode == OPERATING_MODE_ADC_ONLY)
+    {
+        // Restart ADC timer
+        k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1));
+        LOG_INF("▶️ ADC timer restarted");
+    }
+    else if (current_mode == OPERATING_MODE_NORMAL)
+    {
+        // Restart state machine timer
+        k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT);
+        LOG_INF("▶️ State machine timer restarted");
+    }
+
+    // Mark operations as resumed
+    adc_operations_paused = false;
+
+    LOG_INF("✅ All operations resumed");
+}
+
+static void perform_graceful_reset(void)
+{
+    LOG_INF("🔄 Performing graceful reset after 5s magnet hold");
+
+    // Ensure all operations are stopped based on current mode
+    if (current_mode == OPERATING_MODE_ADC_ONLY)
+    {
+        k_timer_stop(&adc_timer);
+        LOG_INF("🔄 ADC timer stopped for reset");
+    }
+    else if (current_mode == OPERATING_MODE_NORMAL)
+    {
+        k_timer_stop(&state_timer);
+        LOG_INF("🔄 State machine timer stopped for reset");
+    }
+
+    // Feed watchdog one last time
+    if (wdt && wdt_channel_id >= 0)
+    {
+        wdt_feed(wdt, wdt_channel_id);
+    }
+
+    // Brief delay to ensure all operations complete
+    k_sleep(K_MSEC(100));
+
+    LOG_INF("🔄 Force resetting device...");
+
+    // Force reset the device
+    sys_reboot(SYS_REBOOT_COLD);
+}
+
+static void handle_magnet_reset(void)
+{
+    // Available in both operating modes for safety
+
+    // Check magnet sensor state
+    // TEMPORARILY DISABLED DUE TO COMPILATION ISSUE
+    // bool magnet_present = gpio_pin_get_dt(&magnet_sensor);
+    bool magnet_present = false; // Force false for now
+    uint32_t current_time = k_uptime_get_32();
+
+    switch (magnet_reset_state)
+    {
+    case MAGNET_RESET_STATE_NORMAL:
+        if (magnet_present)
+        {
+            LOG_INF("🧲 Magnet detected - starting reset countdown (mode %d)", current_mode);
+            magnet_reset_state = MAGNET_RESET_STATE_DETECTED;
+            magnet_reset_start_time = current_time;
+
+            // Pause all operations immediately
+            pause_all_operations();
+
+            // Turn on LED to indicate magnet detected
+            gpio_pin_set_dt(&led, 1);
+        }
+        break;
+
+    case MAGNET_RESET_STATE_DETECTED:
+        if (!magnet_present)
+        {
+            // Magnet released before countdown started
+            LOG_INF("🧲 Magnet released - cancelling reset");
+            magnet_reset_state = MAGNET_RESET_STATE_NORMAL;
+            resume_all_operations();
+            gpio_pin_set_dt(&led, 0);
+        }
+        else
+        {
+            // Start countdown after brief delay
+            uint32_t hold_duration = current_time - magnet_reset_start_time;
+            if (hold_duration > 500) // 500ms debounce
+            {
+                LOG_INF("🧲 Magnet hold confirmed - starting 5s countdown");
+                magnet_reset_state = MAGNET_RESET_STATE_COUNTING;
+                magnet_reset_start_time = current_time;
+            }
+        }
+        break;
+
+    case MAGNET_RESET_STATE_COUNTING:
+        if (!magnet_present)
+        {
+            // Magnet released during countdown
+            LOG_INF("🧲 Magnet released during countdown - cancelling reset");
+            magnet_reset_state = MAGNET_RESET_STATE_NORMAL;
+            resume_all_operations();
+            gpio_pin_set_dt(&led, 0);
+        }
+        else
+        {
+            // Check if 5 seconds have passed
+            uint32_t countdown_duration = current_time - magnet_reset_start_time;
+            uint32_t remaining_ms = 5000 - countdown_duration;
+
+            if (countdown_duration >= 5000)
+            {
+                // 5 seconds reached - trigger reset
+                LOG_INF("🧲 5s magnet hold completed - triggering reset");
+                magnet_reset_state = MAGNET_RESET_STATE_RESETTING;
+                perform_graceful_reset();
+            }
+            else
+            {
+                // Show countdown progress with LED blinking
+                uint32_t seconds_remaining = (remaining_ms + 999) / 1000; // Round up
+                if (countdown_duration % 1000 < 100)                      // Blink every second
+                {
+                    LOG_INF("🧲 Reset countdown: %u seconds remaining", seconds_remaining);
+                    gpio_pin_set_dt(&led, 1); // LED ON
+                }
+                else if (countdown_duration % 1000 < 200)
+                {
+                    gpio_pin_set_dt(&led, 0); // LED OFF
+                }
+            }
+        }
+        break;
+
+    case MAGNET_RESET_STATE_RESETTING:
+        // This state should not be reached as perform_graceful_reset() calls sys_reboot()
+        break;
+    }
+}
+
 static void enter_dfu_mode(void);
 
-static void wait_for_magnet_sensor(void) __unused;
+static void wait_for_magnet_sensor(void);
 static void wait_for_magnet_sensor(void)
 {
     LOG_INF("🧲 Waiting for magnet sensor activation...");
@@ -1221,8 +1438,8 @@ static void wait_for_magnet_sensor(void)
     {
         uint32_t hold_duration = k_uptime_get_32() - magnet_start_time;
 
-        // Check for DFU mode trigger (3+ seconds)
-        if (hold_duration > 3000)
+        // Check for DFU mode trigger (5+ seconds)
+        if (hold_duration > 5000)
         {
             LOG_INF("🔄 DFU Mode: Long magnet hold detected (>3s)");
             blink_led_three_times(); // Visual confirmation
@@ -1611,7 +1828,7 @@ int main(void)
     juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_BOOT);
 
     /* Start appropriate mode based on operating mode setting */
-    uint8_t current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
+    current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
     if (framfs_ctx.initialized)
     {
         juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
@@ -1687,6 +1904,13 @@ int main(void)
     uint32_t heartbeat_counter = 0;
     while (1)
     {
+        // Check for magnet reset only when in normal operation (not during initialization)
+        // TEMPORARILY DISABLED FOR DEBUGGING - COMPILATION ISSUE
+        // if (datetime_synchronized)
+        // {
+        //     handle_magnet_reset();
+        // }
+
         k_sleep(K_SECONDS(10));
         heartbeat_counter++;
         LOG_INF("System heartbeat: %u (uptime: %u seconds)",
