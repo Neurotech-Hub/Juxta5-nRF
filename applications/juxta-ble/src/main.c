@@ -1266,7 +1266,7 @@ static void resume_all_operations(void)
     if (current_mode == OPERATING_MODE_ADC_ONLY)
     {
         // Restart ADC timer
-        k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1));
+        k_timer_start(&adc_timer, K_SECONDS(5), K_SECONDS(5));
         LOG_INF("▶️ ADC timer restarted");
     }
     else if (current_mode == OPERATING_MODE_NORMAL)
@@ -1895,9 +1895,9 @@ int main(void)
         /* Mode 1: Start ADC timer for pure ADC recordings - no state machine needed */
         k_work_init(&adc_work, adc_work_handler);
         k_timer_init(&adc_timer, adc_timer_callback, NULL);
-        k_timer_start(&adc_timer, K_SECONDS(1), K_SECONDS(1)); // Every 1 second
+        k_timer_start(&adc_timer, K_SECONDS(5), K_SECONDS(5)); // Every 5 seconds
         LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
-        LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (1s intervals)");
+        LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (5s intervals)");
 
         /* Initialize magnet sensor for reset functionality in ADC mode - same as initialization */
         LOG_INF("🧲 Initializing magnet sensor for reset functionality...");
