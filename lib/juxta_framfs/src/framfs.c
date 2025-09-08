@@ -477,6 +477,9 @@ int juxta_framfs_read(struct juxta_framfs_context *ctx,
 
     /* Read data from FRAM */
     uint32_t read_addr = entry.start_addr + offset;
+    LOG_INF("📁 FRAMFS READ: file=%s, entry.start_addr=0x%06X, offset=%u, read_addr=0x%06X, length=%zu",
+            filename, (unsigned)entry.start_addr, (unsigned)offset, (unsigned)read_addr, length);
+
     ret = juxta_fram_read(ctx->fram_dev, read_addr, buffer, length);
     if (ret < 0)
     {
@@ -484,7 +487,16 @@ int juxta_framfs_read(struct juxta_framfs_context *ctx,
         return ret;
     }
 
-    LOG_DBG("Read %zu bytes from %s at offset %d", length, filename, offset);
+    LOG_INF("📁 FRAMFS READ SUCCESS: read %zu bytes from FRAM addr 0x%06X", length, (unsigned)read_addr);
+
+    /* Log first few bytes for debugging */
+    if (length >= 12 && offset == 0)
+    {
+        LOG_INF("📁 FRAMFS READ DATA (first 12 bytes): %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                buffer[0], buffer[1], buffer[2], buffer[3],
+                buffer[4], buffer[5], buffer[6], buffer[7],
+                buffer[8], buffer[9], buffer[10], buffer[11]);
+    }
     return (int)length;
 }
 
@@ -1540,30 +1552,46 @@ int juxta_framfs_ensure_current_file(struct juxta_framfs_ctx *ctx)
                                              JUXTA_FRAMFS_TYPE_SENSOR_LOG);
         if (ret == JUXTA_FRAMFS_ERROR_EXISTS)
         {
-            /* File already exists, try to use it if it's not active */
+            /* File already exists - check if we should reactivate or create fresh */
             int existing_index = framfs_find_file(ctx->fs_ctx, ctx->current_filename);
             if (existing_index >= 0)
             {
-                /* Check if the existing file is active */
                 struct juxta_framfs_entry entry;
                 ret = framfs_read_entry(ctx->fs_ctx, existing_index, &entry);
-                if (ret >= 0 && (entry.flags & JUXTA_FRAMFS_FLAG_ACTIVE))
+                if (ret >= 0)
                 {
-                    /* File is already active, use it */
-                    ctx->fs_ctx->active_file_index = existing_index;
-                    LOG_INF("Using existing active file: %s", ctx->current_filename);
-                    return JUXTA_FRAMFS_OK;
-                }
-                else
-                {
-                    /* File exists but is not active, make it active */
-                    entry.flags |= JUXTA_FRAMFS_FLAG_ACTIVE;
-                    ret = framfs_write_entry(ctx->fs_ctx, existing_index, &entry);
-                    if (ret >= 0)
+                    if (entry.flags & JUXTA_FRAMFS_FLAG_ACTIVE)
                     {
+                        /* File is already active, use it */
                         ctx->fs_ctx->active_file_index = existing_index;
-                        LOG_INF("Reactivated existing file: %s", ctx->current_filename);
+                        LOG_INF("Using existing active file: %s", ctx->current_filename);
                         return JUXTA_FRAMFS_OK;
+                    }
+                    else
+                    {
+                        /* File exists but is not active - reset it to start fresh */
+                        LOG_INF("Resetting existing file to start fresh: %s", ctx->current_filename);
+
+                        /* Read current header to get accurate next_data_addr */
+                        int header_ret = framfs_read_header(ctx->fs_ctx);
+                        if (header_ret < 0)
+                        {
+                            LOG_ERR("Failed to read header for file reset: %d", header_ret);
+                            return header_ret;
+                        }
+
+                        entry.start_addr = ctx->fs_ctx->header.next_data_addr;
+                        entry.length = 0;
+                        entry.flags = JUXTA_FRAMFS_FLAG_VALID | JUXTA_FRAMFS_FLAG_ACTIVE;
+
+                        ret = framfs_write_entry(ctx->fs_ctx, existing_index, &entry);
+                        if (ret >= 0)
+                        {
+                            ctx->fs_ctx->active_file_index = existing_index;
+                            LOG_INF("Reset and reactivated file: %s (new addr 0x%06X)",
+                                    ctx->current_filename, entry.start_addr);
+                            return JUXTA_FRAMFS_OK;
+                        }
                     }
                 }
             }
@@ -1794,6 +1822,10 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
         return JUXTA_FRAMFS_ERROR_FULL;
     }
 
+    LOG_DBG("📊 FRAMFS: Storing ADC burst - timestamp=%u, μs_offset=%u, samples=%u, duration=%u us",
+            (unsigned)unix_timestamp, (unsigned)microsecond_offset,
+            (unsigned)sample_count, (unsigned)duration_us);
+
     /* Prepare header (12 bytes) - New format: Unix timestamp + microsecond offset + sample count + duration */
     uint8_t header[12];
     header[0] = (unix_timestamp >> 24) & 0xFF;     /* Unix timestamp high byte */
@@ -1810,20 +1842,25 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
     header[11] = duration_us & 0xFF;               /* Duration low byte */
 
     /* Write header directly to FRAM */
+    LOG_INF("📊 FRAMFS: Writing header to FRAM addr 0x%06X", (unsigned)write_addr);
     ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, 12);
     if (ret < 0)
     {
         LOG_ERR("Failed to write ADC burst header to FRAM: %d", ret);
         return ret;
     }
+    LOG_INF("📊 FRAMFS: Header written successfully");
 
     /* Write samples directly to FRAM (no intermediate buffer) */
+    LOG_INF("📊 FRAMFS: Writing %u samples to FRAM addr 0x%06X",
+            (unsigned)sample_count, (unsigned)(write_addr + 12));
     ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 12, samples, sample_count);
     if (ret < 0)
     {
         LOG_ERR("Failed to write ADC burst samples to FRAM: %d", ret);
         return ret;
     }
+    LOG_INF("📊 FRAMFS: Samples written successfully");
 
     /* Update entry with new length */
     entry.length += record_size;

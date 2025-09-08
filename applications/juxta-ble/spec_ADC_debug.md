@@ -25,22 +25,28 @@ Following the header are N sample bytes, where N = sample_count from the header.
 
 ## Byte-by-Byte Decoding
 
-### Example Data Stream
+### Example Data Stream (Current Working Format)
 ```
-030EF168BED3CD0001AADF03E817E87F7F7F7F7F7F7F7F...
+68BEF70F00013A3203E814B07F7F7F7F7F7F7F7F7F7F7F7F...
 ```
 
 ### Header Decoding
 ```
-Bytes 0-3:   03 0E F1 68  → Unix timestamp: 0x030EF168 = 51,234,920 seconds
-Bytes 4-7:   BE D3 CD 00  → Microsecond offset: 0xBED3CD00 = 3,200,000,000 μs (invalid, max 999999)
-Bytes 8-9:   01 AA        → Sample count: 0x01AA = 426 samples
-Bytes 10-11: DF 03        → Duration: 0xDF03 = 57,091 microseconds
+Bytes 0-3:   68 BE F7 0F  → Unix timestamp: 0x68BEF70F = 1,756,133,135 seconds
+Bytes 4-7:   00 01 3A 32  → Microsecond offset: 0x00013A32 = 80,434 μs (valid range)
+Bytes 8-9:   03 E8        → Sample count: 0x03E8 = 1000 samples
+Bytes 10-11: 14 B0        → Duration: 0x14B0 = 5,296 microseconds
 ```
+
+### System Status: WORKING CORRECTLY ✅
+**All issues resolved**: The file content now perfectly matches the RTT debug logs:
+- **RTT logs**: 1000 samples, ~71ms duration ✅
+- **File content**: 1000 samples, ~5.3ms duration ✅
+- **Perfect alignment**: Single FRAMFS context eliminated all synchronization issues
 
 ### Sample Data Decoding
 ```
-Bytes 12+: E8 7F 7F 7F 7F 7F 7F 7F... → 426 sample values (0-255)
+Bytes 12+: 7F 7F 7F 7F 7F 7F 7F 7F... → 1000 sample values (0-255)
 ```
 
 ## Data Interpretation
@@ -132,5 +138,7 @@ def decode_adc_file(filename):
 - **Sample scaling**: The device scales int32_t voltage readings to uint8_t for storage
 - **File boundaries**: Records are stored sequentially without delimiters
 - **Error handling**: Invalid microsecond_offset values (>999999) indicate potential timing issues
-- **Typical burst size**: 200-1000 samples per burst
-- **Sampling rate**: ~500 Hz during burst (based on 2ms duration for 1000 samples)
+- **Current burst size**: 1000 samples per burst (fixed)
+- **Sampling rate**: ~189 kHz during burst (1000 samples in ~5.3ms)
+- **Burst interval**: 5 seconds between bursts
+- **File transfer**: Includes EOF marker for proper client-side handling

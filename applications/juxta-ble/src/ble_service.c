@@ -862,6 +862,8 @@ static int start_file_transfer(const char *filename)
 
     LOG_INF("📁 Started file transfer: %s (%d bytes, MTU: %d)",
             filename, entry.length, current_mtu);
+    LOG_INF("📁 File entry details: start_addr=0x%06X, length=%d, flags=0x%02X, type=0x%02X",
+            (unsigned)entry.start_addr, entry.length, entry.flags, entry.file_type);
     return 0;
 }
 
@@ -926,12 +928,21 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
     }
 
     /* Read file chunk for regular files */
-    LOG_DBG("📁 Reading file chunk: %s, offset=%u, size=%zu",
+    LOG_INF("📁 Reading file chunk: %s, offset=%u, size=%zu",
             current_transfer_filename, current_transfer_offset, chunk_size);
 
+    /* Limit chunk size for hex conversion (each byte becomes 2 hex chars) */
+    size_t binary_chunk_size = chunk_size / 2; /* Half size to account for hex expansion */
+    uint8_t binary_buffer[512];                /* Temporary buffer for binary data */
+
+    if (binary_chunk_size > sizeof(binary_buffer))
+    {
+        binary_chunk_size = sizeof(binary_buffer);
+    }
+
     int ret = juxta_framfs_read(framfs_ctx, current_transfer_filename,
-                                current_transfer_offset, buffer, chunk_size);
-    LOG_DBG("📁 File read result: ret=%d", ret);
+                                current_transfer_offset, binary_buffer, binary_chunk_size);
+    LOG_INF("📁 File read result: ret=%d", ret);
 
     if (ret < 0)
     {
@@ -939,8 +950,20 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         return handle_file_error(ret, "read_file_chunk", current_transfer_filename);
     }
 
+    /* Convert binary data to hex string */
+    for (int i = 0; i < ret; i++)
+    {
+        snprintf((char *)buffer + (i * 2), 3, "%02X", binary_buffer[i]);
+    }
+
     current_transfer_offset += ret;
-    *bytes_read = ret;
+    *bytes_read = ret * 2; /* Hex string is twice the size */
+
+    if (current_transfer_offset == ret && ret > 0)
+    {
+        /* Log first few bytes of first chunk for debugging */
+        LOG_INF("📁 First chunk hex data (first 32 chars): %.32s", (char *)buffer);
+    }
 
     /* Feed watchdog during file transfer operations */
     feed_watchdog();
@@ -1096,6 +1119,10 @@ static void file_transfer_indication_confirmed(struct bt_conn *conn, struct bt_g
             /* Continue with next chunk or complete transfer */
             if (current_transfer_offset >= current_transfer_file_size)
             {
+                /* Transfer complete - send EOF marker */
+                LOG_INF("📁 File transfer complete, sending EOF marker");
+                const char *eof = "EOF";
+                send_indication(current_conn, file_transfer_char_attr, eof, strlen(eof));
                 file_transfer_state = FILE_TRANSFER_STATE_COMPLETE;
                 end_file_transfer();
             }

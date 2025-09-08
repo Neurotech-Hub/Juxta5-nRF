@@ -198,5 +198,8 @@ int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
     *actual_samples = sample_count;                    /* Always equals max_samples now */
     *duration_us = (duration_ticks * 1000000) / 32768; /* Convert ticks to microseconds */
 
+    LOG_DBG("📊 ADC burst completed: requested=%u, actual=%u, duration=%u us",
+            (unsigned)max_samples, (unsigned)sample_count, (unsigned)*duration_us);
+
     return 0;
 }

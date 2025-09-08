@@ -16,6 +16,7 @@
 #include <zephyr/device.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/reboot.h>
+#include <stdlib.h>
 #include <zephyr/random/random.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/watchdog.h>
@@ -459,6 +460,9 @@ static void adc_work_handler(struct k_work *work)
     int ret = juxta_adc_burst_sample(samples, ADC_MAX_SAMPLES, &actual_samples, &duration_us);
     if (ret == 0 && actual_samples > 0)
     {
+        LOG_DBG("📊 ADC work handler: received actual_samples=%u, duration=%u us",
+                (unsigned)actual_samples, (unsigned)duration_us);
+
         // Get Unix timestamp and microsecond offset using the new vitals helper functions
         uint32_t unix_timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
         uint32_t microsecond_offset = juxta_vitals_get_rel_microseconds_to_unix(&vitals_ctx);
@@ -466,6 +470,8 @@ static void adc_work_handler(struct k_work *work)
         // Convert int32_t samples to uint8_t for storage (scale appropriately) using static buffer
         uint8_t *scaled_samples = adc_scaled_buffer;
         uint32_t count = (actual_samples > ADC_MAX_SAMPLES) ? ADC_MAX_SAMPLES : actual_samples;
+
+        LOG_DBG("📊 ADC work handler: using count=%u for storage", (unsigned)count);
         for (uint32_t i = 0; i < count; i++)
         {
             // Scale int32_t voltage (mV) to uint8_t (0-255 range)
@@ -478,15 +484,61 @@ static void adc_work_handler(struct k_work *work)
             scaled_samples[i] = (uint8_t)scaled;
         }
 
-        ret = juxta_framfs_append_adc_burst_data(&time_ctx, unix_timestamp, microsecond_offset, scaled_samples, (uint16_t)count, duration_us);
-        if (ret == 0)
+        /* Get current date for filename */
+        uint32_t current_date = juxta_vitals_get_file_date_yymmdd(&vitals_ctx);
+        char current_filename[8];
+        snprintf(current_filename, sizeof(current_filename), "%06u", current_date);
+
+        /* Ensure correct file is active - create if doesn't exist */
+        ret = juxta_framfs_create_active(&framfs_ctx, current_filename, JUXTA_FRAMFS_TYPE_ADC_BURST);
+        if (ret < 0 && ret != JUXTA_FRAMFS_ERROR_EXISTS)
         {
-            LOG_INF("📊 ADC burst saved: %u samples, %u us", (unsigned)count, (unsigned)duration_us);
+            LOG_ERR("📊 Failed to create ADC file: %d", ret);
+            return;
         }
-        else
+
+        /* Create ADC burst record */
+        uint8_t header[12];
+        header[0] = (unix_timestamp >> 24) & 0xFF;
+        header[1] = (unix_timestamp >> 16) & 0xFF;
+        header[2] = (unix_timestamp >> 8) & 0xFF;
+        header[3] = unix_timestamp & 0xFF;
+        header[4] = (microsecond_offset >> 24) & 0xFF;
+        header[5] = (microsecond_offset >> 16) & 0xFF;
+        header[6] = (microsecond_offset >> 8) & 0xFF;
+        header[7] = microsecond_offset & 0xFF;
+        header[8] = (count >> 8) & 0xFF;
+        header[9] = count & 0xFF;
+        header[10] = (duration_us >> 8) & 0xFF;
+        header[11] = duration_us & 0xFF;
+
+        /* Write header first */
+        ret = juxta_framfs_append(&framfs_ctx, header, 12);
+        if (ret < 0)
         {
-            LOG_ERR("📊 Failed to record ADC burst: %d", ret);
+            LOG_ERR("📊 Failed to write ADC header: %d", ret);
+            return;
         }
+
+        /* Write samples */
+        LOG_INF("📊 About to write %u sample bytes to FRAMFS", (unsigned)count);
+        ret = juxta_framfs_append(&framfs_ctx, scaled_samples, count);
+        if (ret < 0)
+        {
+            LOG_ERR("📊 Failed to write ADC samples: %d", ret);
+            return;
+        }
+        LOG_INF("📊 Successfully wrote %u sample bytes to FRAMFS", (unsigned)count);
+
+        /* Check final file state */
+        struct juxta_framfs_entry final_entry;
+        if (juxta_framfs_get_file_info(&framfs_ctx, current_filename, &final_entry) == 0)
+        {
+            LOG_INF("📊 Final file state: start_addr=0x%06X, length=%d, total_record_size=%u",
+                    (unsigned)final_entry.start_addr, final_entry.length, (unsigned)(12 + count));
+        }
+
+        LOG_INF("📊 ADC burst saved: %u samples, %u us", (unsigned)count, (unsigned)duration_us);
     }
     else
     {
@@ -525,10 +577,6 @@ static void juxta_log_simple(uint8_t type)
 }
 
 /* Wrapper to provide YYMMDD date for framfs time API using vitals */
-static uint32_t juxta_vitals_get_file_date_wrapper(void)
-{
-    return juxta_vitals_get_file_date(&vitals_ctx);
-}
 
 static void setup_dynamic_adv_name(void)
 {
@@ -1041,6 +1089,13 @@ static void connected(struct bt_conn *conn, uint8_t err)
     LOG_INF("🔗 Connected to peer device");
     ble_connected = true; // Mark as connected
 
+    /* Disable watchdog during BLE operations to prevent resets during file transfers */
+    if (wdt && wdt_channel_id >= 0)
+    {
+        k_timer_stop(&wdt_feed_timer);
+        LOG_INF("🛡️ Watchdog feed timer stopped during BLE connection");
+    }
+
     // Stop any ongoing advertising or scanning (guarded)
     (void)juxta_stop_advertising();
     (void)juxta_stop_scanning();
@@ -1063,6 +1118,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
     ble_connected = false; // Mark as disconnected
     ble_state = BLE_STATE_IDLE;
+
+    /* Re-enable watchdog after BLE operations complete */
+    if (wdt && wdt_channel_id >= 0)
+    {
+        k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
+        LOG_INF("🛡️ Watchdog feed timer restarted after BLE disconnection");
+    }
 
     /* Notify BLE service of disconnection */
     juxta_ble_connection_terminated();
@@ -1790,14 +1852,8 @@ int main(void)
     /* Link vitals context to BLE service for timestamp synchronization */
     juxta_ble_set_vitals_context(&vitals_ctx);
 
-    /* Initialize time-aware file system after vitals are ready */
-    LOG_INF("📁 Initializing time-aware file system...");
-    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
-    if (ret < 0)
-    {
-        LOG_ERR("Time-aware framfs init failed: %d", ret);
-        return ret;
-    }
+    /* Skip time-aware wrapper - use framfs_ctx directly for ADC data */
+    LOG_INF("📁 Using single framfs context for both ADC and file transfer");
 
     init_randomization();
     k_work_init(&state_work, state_work_handler);
