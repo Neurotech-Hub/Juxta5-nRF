@@ -10,6 +10,7 @@
 #include <zephyr/drivers/adc.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/irq.h>
 #include <string.h>
 #include <hal/nrf_rtc.h>
 #include <hal/nrf_saadc.h>
@@ -143,8 +144,11 @@ int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
     uint32_t start_ticks = NRF_RTC0->COUNTER;
     uint32_t sample_count = 0;
 
-    /* Perform burst sampling for approximately 2ms */
-    while (sample_count < max_samples)
+    /* Disable interrupts during critical sampling for consistent timing */
+    unsigned int key = irq_lock();
+
+    /* Perform fixed sample count burst sampling */
+    for (uint32_t i = 0; i < max_samples; i++)
     {
         int32_t voltage_mv;
         int ret = juxta_adc_read_differential(&voltage_mv);
@@ -156,20 +160,42 @@ int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
         }
         else
         {
-            /* Continue sampling even if one sample fails */
-            continue;
+            /* Use previous sample value if ADC read fails */
+            if (sample_count > 0)
+            {
+                samples[sample_count] = samples[sample_count - 1];
+            }
+            else
+            {
+                samples[sample_count] = 0; /* Default to 0 if no previous sample */
+            }
+            sample_count++;
         }
 
         /* Minimal delay - let ADC conversion time dominate */
         k_busy_wait(5); /* 5μs delay */
     }
 
+    /* Re-enable interrupts */
+    irq_unlock(key);
+
     /* End timing */
     uint32_t end_ticks = NRF_RTC0->COUNTER;
-    uint32_t duration_ticks = end_ticks - start_ticks;
+
+    /* Handle RTC0 rollover (24-bit counter: 0xFFFFFF + 1 = 0x000000) */
+    uint32_t duration_ticks;
+    if (end_ticks >= start_ticks)
+    {
+        duration_ticks = end_ticks - start_ticks;
+    }
+    else
+    {
+        /* Rollover occurred during sampling */
+        duration_ticks = (0x1000000 - start_ticks) + end_ticks;
+    }
 
     /* Calculate actual duration */
-    *actual_samples = sample_count;
+    *actual_samples = sample_count;                    /* Always equals max_samples now */
     *duration_us = (duration_ticks * 1000000) / 32768; /* Convert ticks to microseconds */
 
     return 0;

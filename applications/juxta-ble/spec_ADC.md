@@ -1,7 +1,23 @@
 # Specification for OPERATING_MODE_ADC_ONLY
 
 ## Overview
-The ADC-only mode provides continuous, high-precision data logging for electric fish discharge analysis. This mode requires microsecond-level timing precision over extended periods (24+ hours) to enable accurate pulse reconstruction and synchronization with external data sources.
+The ADC-only mode provides high-precision data logging for electric fish discharge analysis with multiple sampling strategies. This mode requires microsecond-level timing precision over extended periods (24+ hours) to enable accurate pulse reconstruction and synchronization with external data sources.
+
+## ADC Sampling Modes
+
+The system supports two distinct ADC sampling modes:
+
+### 1. Timer-Based Burst Mode (Current Implementation)
+- **Purpose**: Regular sampling bursts for general monitoring
+- **Trigger**: Fixed timer intervals (currently 5 seconds)
+- **Data**: Complete burst of samples with precise timing
+- **Use Case**: Baseline monitoring and system validation
+
+### 2. Threshold-Based Event Mode (New)
+- **Purpose**: Capture electric fish discharge events with configurable output
+- **Trigger**: Threshold crossing on absolute differential signal
+- **Data**: Configurable output format (peaks only or full waveform)
+- **Use Case**: Event detection, counting, and waveform analysis
 
 ## Timing Requirements
 
@@ -38,6 +54,47 @@ Byte 10-11: Duration (burst duration in microseconds)
 - **Burst size**: Configurable (typically 1000-4000 samples)
 - **Sample rate**: Configurable (typically 1-10 kHz)
 
+## Threshold-Based Event Mode
+
+### Unified Implementation
+Both single-event and peri-event modes use the same underlying implementation with different configuration parameters:
+
+#### Core Process
+1. **Continuous sampling**: ADC samples into configurable buffer
+2. **Threshold monitoring**: Real-time comparison of |signal| vs threshold
+3. **Event detection**: When threshold crossed, capture buffer contents
+4. **Data output**: Store either peaks only or complete waveform
+
+#### Configuration Modes
+
+##### Single Event Mode (Peak Detection)
+- **Buffer size**: 200 samples (captures most EOD events)
+- **Output**: Min/max peak values only
+- **Storage**: 2 bytes per event (peak positive + peak negative)
+- **Use case**: Event counting and amplitude distribution analysis
+
+##### Peri-Event Mode (Waveform Capture)
+- **Buffer size**: 1000-4000 samples (configurable)
+- **Output**: Complete waveform data
+- **Storage**: Full buffer contents
+- **Use case**: Detailed pulse shape analysis and debugging
+
+##### Timer Mode (Current Behavior)
+- **Threshold**: 0 mV (always triggers)
+- **Debounce**: 5000ms (5-second intervals)
+- **Output**: Complete burst waveform
+- **Use case**: Baseline monitoring and system validation
+
+#### Data Structures
+```
+Header (12 bytes): Same as current burst header
+Event Type (1 byte): 0x01=peri-event, 0x02=single event
+Peak Positive (1 byte): Maximum positive amplitude (single event only)
+Peak Negative (1 byte): Maximum negative amplitude (single event only)
+Trigger Index (2 bytes): Position of threshold crossing (peri-event only)
+Samples (N bytes): Complete waveform (peri-event only)
+```
+
 ## Implementation Details
 
 ### Vitals Integration
@@ -53,19 +110,146 @@ Byte 10-11: Duration (burst duration in microseconds)
 - **Rollover handling**: Automatic detection and correction
 - **Precision**: ~30.5μs resolution
 
+### ADC Hardware Considerations
+
+#### nRF52840 SAADC Capabilities
+- **Maximum sample rate**: ~200 kHz (limited by conversion time)
+- **Resolution**: 12-bit (4096 levels)
+- **Differential inputs**: AIN0/AIN1 (P0.02/P0.03)
+- **Reference voltage**: Internal 0.6V with 1/6 gain = 3.6V range
+- **Conversion time**: ~5μs per sample
+
+#### High-Speed Sampling Limitations
+- **Practical limit**: ~100-200 kHz maximum continuous sampling
+- **Alternative approach**: Use timer-based sampling with optimized timing
+- **Buffer management**: Static buffers to avoid memory allocation issues
+
+### Implementation Strategy
+
+#### Phase 1: Threshold-Based Event Mode
+- **Unified implementation**: Single codebase for all threshold-based modes
+- **Configurable buffer**: 200 samples (single event) to 4000 samples (peri-event)
+- **Threshold detection**: Software-based threshold comparison
+- **Output modes**: Peaks only or complete waveform
+- **Timer mode**: Threshold=0, debounce=5000ms (recreates current behavior)
+
+#### Phase 2: DMA Optimization (Advanced)
+- **Hardware acceleration**: Use nRF52840 EasyDMA for automatic data transfer
+- **PPI integration**: Hardware-based timer triggering
+- **Reduced CPU overhead**: ~80% reduction in CPU usage for data transfer
+- **Power optimization**: Lower power consumption during continuous sampling
+
+#### Technical Challenges and Solutions
+
+##### Challenge 1: High-Speed Sampling
+- **Problem**: nRF52840 SAADC limited to ~200 kHz
+- **Solution**: Use timer-driven sampling with optimized conversion timing
+- **Trade-off**: Accept lower sample rates for reliable operation
+
+##### Challenge 2: Real-Time Threshold Detection
+- **Problem**: Software threshold detection may miss fast events
+- **Solution**: Use hardware comparator if available, or optimized software detection
+- **Fallback**: Accept some missed events for system stability
+
+##### Challenge 3: Memory Management
+- **Problem**: Continuous sampling requires large buffers
+- **Solution**: Static buffer allocation, careful memory management
+- **Optimization**: Use DMA if available for efficient data transfer
+
+##### Challenge 4: Power Consumption
+- **Problem**: Continuous high-rate sampling consumes significant power
+- **Solution**: Configurable sample rates, sleep modes between events
+- **Balance**: Trade-off between detection sensitivity and battery life
+
+##### Challenge 5: DMA Implementation Complexity
+- **Problem**: nRF52840 DMA requires coordination of multiple peripherals
+- **Solution**: Use EasyDMA with PPI for hardware-based triggering
+- **Implementation**: Phase 4 optimization after basic modes are working
+- **Benefits**: 80% reduction in CPU overhead, lower power consumption
+
+### DMA Implementation Details (Phase 4)
+
+#### nRF52840 EasyDMA Configuration
+- **Hardware support**: Built-in EasyDMA for SAADC data transfer
+- **Buffer management**: Double buffering for continuous operation
+- **Interrupt handling**: DMA completion interrupts for data processing
+- **Memory efficiency**: Automatic data transfer without CPU intervention
+
+#### PPI (Programmable Peripheral Interconnect) Setup
+- **Timer triggering**: Hardware timer triggers SAADC START task
+- **No CPU overhead**: Hardware-based sampling trigger
+- **Precise timing**: Eliminates software timing jitter
+- **Power efficiency**: CPU can sleep between data processing
+
+#### Implementation Requirements
+```c
+// Zephyr configuration additions needed
+CONFIG_DMA=y
+CONFIG_DMA_NRFX=y
+CONFIG_PPI=y
+CONFIG_TIMER=y
+CONFIG_ADC_NRFX_SAADC_OPTIMIZED_MODE=y
+
+// Hardware components
+- SAADC with EasyDMA enabled
+- Timer for sampling rate control
+- PPI channels for hardware triggering
+- Double buffer for continuous operation
+```
+
+#### Expected Performance Gains
+- **CPU usage**: 80% reduction in data transfer overhead
+- **Power consumption**: 60% reduction during continuous sampling
+- **Timing precision**: Hardware-based triggering eliminates jitter
+- **Implementation time**: 10-14 days (advanced optimization)
+
 ### Data Storage
 - **File system**: juxta_framfs with time-aware naming
 - **Append mode**: New bursts appended to current date file
 - **Memory management**: Automatic file switching based on date changes
 - **Export capability**: Complete timestamp reconstruction possible
 
+## Configuration
+
+### ADC Mode Configuration
+```c
+typedef enum {
+    ADC_MODE_TIMER_BURST = 0,    // Current timer-based bursts
+    ADC_MODE_THRESHOLD_EVENT = 1 // Threshold-based event detection
+} adc_mode_t;
+
+typedef struct {
+    adc_mode_t mode;
+    uint32_t threshold_mv;       // Threshold in millivolts (0 = always trigger)
+    uint16_t buffer_size;        // Buffer size (200 for peaks, 1000+ for waveform)
+    uint32_t debounce_ms;        // Debounce time between events
+    bool output_peaks_only;      // true = peaks only, false = full waveform
+} adc_config_t;
+```
+
+### Implementation
+The threshold-based event mode uses a unified implementation with configurable parameters:
+- **Single event mode**: `buffer_size=200`, `output_peaks_only=true`
+- **Peri-event mode**: `buffer_size=1000+`, `output_peaks_only=false`  
+- **Timer mode**: `threshold_mv=0`, `debounce_ms=5000`, `output_peaks_only=false`
+
+See `juxta_adc` library for complete API reference.
+
 ## Use Cases
 
 ### Electric Fish Discharge Analysis
-- **Pulse reconstruction**: Microsecond precision enables accurate pulse shape analysis
-- **Multi-channel sync**: Relative timing allows synchronization with video/audio data
-- **Long-term monitoring**: 24+ hour capability for extended field studies
-- **Signal processing**: High precision enables advanced signal analysis techniques
+
+#### Timer-Based Burst Mode
+- **Baseline monitoring**: Regular sampling for system validation
+- **Environmental assessment**: General signal level monitoring
+- **System health**: Continuous operation verification
+
+#### Threshold-Based Event Mode
+- **Event counting**: High-frequency discharge event detection
+- **Amplitude distribution**: Statistical analysis of discharge strengths
+- **Behavioral studies**: Long-term event rate monitoring
+- **Pulse reconstruction**: Complete waveform capture for detailed analysis
+- **Power efficiency**: Configurable storage (2 bytes per event for peaks, full waveform for analysis)
 
 ### Data Export and Analysis
 - **Absolute timestamps**: Unix timestamp + microsecond offset provides complete timing
@@ -97,224 +281,24 @@ Byte 10-11: Duration (burst duration in microseconds)
 
 ### Python Decoding Strategy
 
-The following Python code demonstrates how to decode and analyze ADC burst data from the device:
+The ADC data uses a simple binary format with 12-byte headers followed by sample data. Key decoding steps:
 
-```python
-import struct
-import numpy as np
-from datetime import datetime, timezone
-import matplotlib.pyplot as plt
-
-def decode_adc_burst_header(header_bytes):
-    """
-    Decode 12-byte ADC burst header
-    
-    Args:
-        header_bytes: 12-byte header data
-        
-    Returns:
-        dict: Decoded header information
-    """
-    if len(header_bytes) != 12:
-        raise ValueError("Header must be exactly 12 bytes")
-    
-    # Unpack header using big-endian format
-    unix_timestamp, microsecond_offset, sample_count, duration_us = struct.unpack('>IIHH', header_bytes)
-    
-    # Convert to absolute timestamp with microsecond precision
-    absolute_timestamp = unix_timestamp + (microsecond_offset / 1_000_000.0)
-    
-    return {
-        'unix_timestamp': unix_timestamp,
-        'microsecond_offset': microsecond_offset,
-        'absolute_timestamp': absolute_timestamp,
-        'sample_count': sample_count,
-        'duration_us': duration_us,
-        'datetime': datetime.fromtimestamp(absolute_timestamp, tz=timezone.utc)
-    }
-
-def decode_adc_burst_data(file_data, offset=0):
-    """
-    Decode complete ADC burst record from file data
-    
-    Args:
-        file_data: Raw file data from device
-        offset: Starting offset in file
-        
-    Returns:
-        dict: Complete burst information including samples
-    """
-    # Read header
-    header_bytes = file_data[offset:offset + 12]
-    header = decode_adc_burst_header(header_bytes)
-    
-    # Read samples
-    sample_start = offset + 12
-    sample_end = sample_start + header['sample_count']
-    raw_samples = file_data[sample_start:sample_end]
-    
-    # Convert raw samples to voltage (assuming -2000mV to +2000mV range)
-    # Raw samples are 0-255, need to scale back to voltage range
-    voltage_samples = ((raw_samples / 255.0) * 4000.0) - 2000.0
-    
-    header['raw_samples'] = raw_samples
-    header['voltage_samples'] = voltage_samples
-    header['next_offset'] = sample_end
-    
-    return header
-
-def process_adc_file(filename):
-    """
-    Process entire ADC file and extract all bursts
-    
-    Args:
-        filename: Path to ADC file from device
-        
-    Returns:
-        list: List of decoded burst records
-    """
-    with open(filename, 'rb') as f:
-        file_data = f.read()
-    
-    bursts = []
-    offset = 0
-    
-    while offset < len(file_data) - 12:  # Need at least 12 bytes for header
-        try:
-            burst = decode_adc_burst_data(file_data, offset)
-            bursts.append(burst)
-            offset = burst['next_offset']
-        except (ValueError, struct.error) as e:
-            print(f"Error decoding burst at offset {offset}: {e}")
-            break
-    
-    return bursts
-
-def analyze_electric_fish_pulses(bursts):
-    """
-    Analyze electric fish discharge pulses from ADC data
-    
-    Args:
-        bursts: List of decoded burst records
-        
-    Returns:
-        dict: Analysis results
-    """
-    all_pulses = []
-    pulse_timestamps = []
-    
-    for burst in bursts:
-        samples = burst['voltage_samples']
-        timestamp = burst['absolute_timestamp']
-        
-        # Simple pulse detection (threshold-based)
-        threshold = np.std(samples) * 2  # 2x standard deviation
-        pulse_indices = np.where(np.abs(samples) > threshold)[0]
-        
-        if len(pulse_indices) > 0:
-            # Group consecutive pulse indices
-            pulse_groups = []
-            current_group = [pulse_indices[0]]
-            
-            for i in range(1, len(pulse_indices)):
-                if pulse_indices[i] - pulse_indices[i-1] <= 5:  # Within 5 samples
-                    current_group.append(pulse_indices[i])
-                else:
-                    pulse_groups.append(current_group)
-                    current_group = [pulse_indices[i]]
-            pulse_groups.append(current_group)
-            
-            # Extract pulse characteristics
-            for group in pulse_groups:
-                if len(group) >= 3:  # Minimum pulse width
-                    pulse_start = group[0]
-                    pulse_end = group[-1]
-                    pulse_samples = samples[pulse_start:pulse_end+1]
-                    
-                    pulse_info = {
-                        'timestamp': timestamp + (pulse_start / len(samples)) * (burst['duration_us'] / 1_000_000.0),
-                        'amplitude': np.max(np.abs(pulse_samples)),
-                        'duration_samples': len(pulse_samples),
-                        'duration_us': len(pulse_samples) * (burst['duration_us'] / len(samples)),
-                        'shape': pulse_samples
-                    }
-                    all_pulses.append(pulse_info)
-                    pulse_timestamps.append(pulse_info['timestamp'])
-    
-    return {
-        'pulses': all_pulses,
-        'pulse_timestamps': pulse_timestamps,
-        'total_pulses': len(all_pulses),
-        'pulse_rate': len(all_pulses) / ((pulse_timestamps[-1] - pulse_timestamps[0]) / 3600) if len(pulse_timestamps) > 1 else 0
-    }
-
-def plot_adc_data(bursts, max_bursts=10):
-    """
-    Plot ADC data for visualization
-    
-    Args:
-        bursts: List of decoded burst records
-        max_bursts: Maximum number of bursts to plot
-    """
-    fig, axes = plt.subplots(min(len(bursts), max_bursts), 1, figsize=(12, 2*min(len(bursts), max_bursts)))
-    if max_bursts == 1:
-        axes = [axes]
-    
-    for i, burst in enumerate(bursts[:max_bursts]):
-        samples = burst['voltage_samples']
-        time_axis = np.linspace(0, burst['duration_us'] / 1000, len(samples))  # Time in ms
-        
-        axes[i].plot(time_axis, samples)
-        axes[i].set_title(f"Burst {i+1}: {burst['datetime'].strftime('%H:%M:%S.%f')[:-3]}")
-        axes[i].set_xlabel('Time (ms)')
-        axes[i].set_ylabel('Voltage (mV)')
-        axes[i].grid(True)
-    
-    plt.tight_layout()
-    plt.show()
-
-# Example usage
-if __name__ == "__main__":
-    # Process ADC file
-    bursts = process_adc_file("250120")  # YYMMDD format filename
-    
-    # Analyze electric fish pulses
-    analysis = analyze_electric_fish_pulses(bursts)
-    
-    print(f"Total pulses detected: {analysis['total_pulses']}")
-    print(f"Pulse rate: {analysis['pulse_rate']:.2f} pulses/hour")
-    
-    # Plot first few bursts
-    plot_adc_data(bursts, max_bursts=5)
-    
-    # Export pulse data for further analysis
-    pulse_data = []
-    for pulse in analysis['pulses']:
-        pulse_data.append({
-            'timestamp': pulse['timestamp'],
-            'amplitude_mv': pulse['amplitude'],
-            'duration_us': pulse['duration_us']
-        })
-    
-    # Save to CSV for external analysis
-    import pandas as pd
-    df = pd.DataFrame(pulse_data)
-    df.to_csv('electric_fish_pulses.csv', index=False)
-```
+1. **Header parsing**: Extract Unix timestamp, microsecond offset, sample count, and duration
+2. **Sample conversion**: Convert 8-bit samples (0-255) back to voltage range (-2000mV to +2000mV)
+3. **Event processing**: Handle both peak-only and full waveform data formats
+4. **Analysis**: Pulse detection, amplitude distribution, and timing analysis
 
 ### Data Export and Integration
 
-The decoded data can be easily integrated with other analysis tools:
-
-1. **CSV Export**: Pulse timestamps and characteristics for statistical analysis
-2. **MATLAB Integration**: Direct import of voltage samples for signal processing
-3. **Video Synchronization**: Use pulse signatures for frame-accurate video sync
-4. **Database Storage**: Store pulse data for long-term behavioral analysis
+- **CSV Export**: Pulse timestamps and characteristics for statistical analysis
+- **MATLAB Integration**: Direct import of voltage samples for signal processing  
+- **Video Synchronization**: Use pulse signatures for frame-accurate video sync
+- **Database Storage**: Store pulse data for long-term behavioral analysis
 
 ### Key Features
 
 - **Microsecond precision**: Exact timing for pulse reconstruction
-- **Automatic pulse detection**: Threshold-based pulse identification
+- **Configurable output**: Peaks only or complete waveforms
 - **Multi-format export**: CSV, NumPy arrays, and visualization
 - **Video sync ready**: Timestamps compatible with video frame rates
 - **Scalable processing**: Handles 24+ hour datasets efficiently

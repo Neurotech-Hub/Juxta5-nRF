@@ -212,7 +212,11 @@ int juxta_vitals_set_timestamp(struct juxta_vitals_ctx *ctx, uint32_t timestamp)
     ctx->current_timestamp = timestamp;
     rtc_start_time = k_uptime_get_32();
 
-    LOG_INF("Timestamp set to %u (uptime: %u ms)", timestamp, rtc_start_time);
+    /* Set microsecond reference for RTC0-based timing */
+    ctx->microsecond_reference = NRF_RTC0->COUNTER;
+    ctx->microsecond_tracking_enabled = true;
+
+    LOG_INF("Timestamp set to %u (uptime: %u ms, RTC0: %u)", timestamp, rtc_start_time, ctx->microsecond_reference);
     return JUXTA_VITALS_OK;
 }
 
