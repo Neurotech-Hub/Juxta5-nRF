@@ -940,6 +940,13 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         binary_chunk_size = sizeof(binary_buffer);
     }
 
+    /* Ensure we don't read past file boundary */
+    size_t remaining_bytes = current_transfer_file_size - current_transfer_offset;
+    if (binary_chunk_size > remaining_bytes)
+    {
+        binary_chunk_size = remaining_bytes;
+    }
+
     int ret = juxta_framfs_read(framfs_ctx, current_transfer_filename,
                                 current_transfer_offset, binary_buffer, binary_chunk_size);
     LOG_INF("📁 File read result: ret=%d", ret);
