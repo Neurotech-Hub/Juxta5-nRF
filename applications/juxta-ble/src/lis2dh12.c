@@ -310,6 +310,37 @@ int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperatu
     return 0;
 }
 
+/**
+ * @brief Get temperature reading from global LIS2DH device
+ * Public interface for motion system temperature access
+ */
+int lis2dh12_get_temperature(int8_t *temperature)
+{
+    if (!temperature)
+    {
+        return -EINVAL;
+    }
+
+    if (!g_lis2dh12_dev || !g_lis2dh12_dev->initialized)
+    {
+        LOG_WRN("LIS2DH device not initialized for temperature reading");
+        *temperature = 0; /* Default to 0 if not available */
+        return -ENODEV;
+    }
+
+    /* Read temperature using the low-resolution function */
+    int ret = lis2dh12_read_temperature_lowres(g_lis2dh12_dev, temperature);
+    if (ret < 0)
+    {
+        LOG_WRN("Failed to read LIS2DH temperature: %d", ret);
+        *temperature = 0; /* Default to 0 if read fails */
+        return ret;
+    }
+
+    LOG_DBG("LIS2DH temperature: %d°C", *temperature);
+    return 0;
+}
+
 int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
                                         uint8_t threshold, uint8_t duration)
 {

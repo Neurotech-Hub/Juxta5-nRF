@@ -1080,77 +1080,9 @@ int juxta_framfs_read_mac_table_data(struct juxta_framfs_context *ctx,
  * User Settings API Functions
  * ======================================================================== */
 
-int juxta_framfs_get_adv_interval(struct juxta_framfs_context *ctx,
-                                  uint8_t *interval)
-{
-    if (!ctx || !ctx->initialized || !interval)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
+/* Advertising and scanning interval functions removed - now session-based only */
 
-    *interval = ctx->user_settings.adv_interval;
-    return JUXTA_FRAMFS_OK;
-}
-
-int juxta_framfs_set_adv_interval(struct juxta_framfs_context *ctx,
-                                  uint8_t interval)
-{
-    if (!ctx || !ctx->initialized)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    ctx->user_settings.adv_interval = interval;
-    return framfs_write_user_settings(ctx);
-}
-
-int juxta_framfs_get_scan_interval(struct juxta_framfs_context *ctx,
-                                   uint8_t *interval)
-{
-    if (!ctx || !ctx->initialized || !interval)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    *interval = ctx->user_settings.scan_interval;
-    return JUXTA_FRAMFS_OK;
-}
-
-int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
-                                   uint8_t interval)
-{
-    if (!ctx || !ctx->initialized)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    ctx->user_settings.scan_interval = interval;
-    return framfs_write_user_settings(ctx);
-}
-
-int juxta_framfs_get_operating_mode(struct juxta_framfs_context *ctx,
-                                    uint8_t *mode)
-{
-    if (!ctx || !ctx->initialized || !mode)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    *mode = ctx->user_settings.operating_mode;
-    return JUXTA_FRAMFS_OK;
-}
-
-int juxta_framfs_set_operating_mode(struct juxta_framfs_context *ctx,
-                                    uint8_t mode)
-{
-    if (!ctx || !ctx->initialized)
-    {
-        return JUXTA_FRAMFS_ERROR;
-    }
-
-    ctx->user_settings.operating_mode = mode;
-    return framfs_write_user_settings(ctx);
-}
+/* Operating mode functions removed - operating mode is now session-based only */
 
 int juxta_framfs_get_subject_id(struct juxta_framfs_context *ctx,
                                 char *subject_id)
@@ -1241,9 +1173,9 @@ int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx)
     memset(&ctx->user_settings, 0, sizeof(ctx->user_settings));
     ctx->user_settings.magic = JUXTA_FRAMFS_USER_SETTINGS_MAGIC;
     ctx->user_settings.version = JUXTA_FRAMFS_USER_SETTINGS_VERSION;
-    ctx->user_settings.operating_mode = 0x00;        /* Default: normal operation mode */
-    ctx->user_settings.adv_interval = 5;             /* Default: advertising every 5 seconds */
-    ctx->user_settings.scan_interval = 15;           /* Default: scanning every 15 seconds */
+    ctx->user_settings.reserved1 = 0x00;             /* Reserved (was operating_mode) */
+    ctx->user_settings.reserved2 = 0x00;             /* Reserved (was adv_interval) */
+    ctx->user_settings.reserved3 = 0x00;             /* Reserved (was scan_interval) */
     strcpy(ctx->user_settings.subject_id, "");       /* Default: empty */
     strcpy(ctx->user_settings.upload_path, "/TEST"); /* Default: /TEST */
 

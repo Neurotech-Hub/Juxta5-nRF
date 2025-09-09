@@ -113,6 +113,32 @@ extern "C"
     extern void juxta_ble_adc_config_update_trigger(void);
 
     /**
+     * @brief Get current operating mode
+     * @return Current operating mode (0xFF=undefined, 0x00=normal, 0x01=adc_only)
+     */
+    uint8_t juxta_get_current_operating_mode(void);
+
+    /**
+     * @brief Set current operating mode
+     * @param mode Operating mode to set
+     */
+    void juxta_set_operating_mode(uint8_t mode);
+
+    /**
+     * @brief Get current session intervals
+     * @param adv_interval Pointer to store advertising interval (can be NULL)
+     * @param scan_interval Pointer to store scanning interval (can be NULL)
+     */
+    void juxta_get_session_intervals(uint8_t *adv_interval, uint8_t *scan_interval);
+
+    /**
+     * @brief Set current session intervals
+     * @param adv_interval Advertising interval in seconds
+     * @param scan_interval Scanning interval in seconds
+     */
+    void juxta_set_session_intervals(uint8_t adv_interval, uint8_t scan_interval);
+
+    /**
      * @brief Connection established callback
      *
      * @param conn Bluetooth connection handle

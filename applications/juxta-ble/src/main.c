@@ -59,6 +59,10 @@ static struct k_work datetime_sync_restart_work;
 // Track whether connectable advertising is currently active
 static bool connectable_adv_active = false;
 
+// LED feedback timer for connectable advertising
+static struct k_timer connectable_adv_led_timer;
+static bool led_blink_state = false;
+
 // Hardware state
 static struct juxta_fram_device fram_dev; /* Global FRAM device for framfs */
 static bool hardware_verified = false;
@@ -217,16 +221,19 @@ static int32_t adc_samples_buffer[ADC_MAX_SAMPLES];
 static uint8_t adc_scaled_buffer[ADC_MAX_SAMPLES];
 
 /* Operating mode definitions */
-#define OPERATING_MODE_NORMAL 0x00   /* State machine/BLE bursts/motion counting */
-#define OPERATING_MODE_ADC_ONLY 0x01 /* Purely ADC recordings */
-
-/* Global operating mode variable */
-static uint8_t current_mode = OPERATING_MODE_NORMAL;
+#define OPERATING_MODE_UNDEFINED 0xFF /* Must be set via BLE */
+#define OPERATING_MODE_NORMAL 0x00    /* State machine/BLE bursts/motion counting */
+#define OPERATING_MODE_ADC_ONLY 0x01  /* Purely ADC recordings */
 
 #define ADV_BURST_DURATION_MS 100
 #define SCAN_BURST_DURATION_MS 500
 #define ADV_INTERVAL_SECONDS 5
 #define SCAN_INTERVAL_SECONDS 20
+
+/* Global session-based variables (not persisted in FRAM) */
+static uint8_t current_mode = OPERATING_MODE_UNDEFINED; /* Must be set via BLE */
+static uint8_t session_adv_interval = ADV_INTERVAL_SECONDS;
+static uint8_t session_scan_interval = SCAN_INTERVAL_SECONDS;
 #define GATEWAY_ADV_TIMEOUT_SECONDS 30
 #define WDT_TIMEOUT_MS 30000
 
@@ -330,26 +337,7 @@ __no_optimization static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uin
 
 static uint32_t get_adv_interval(void)
 {
-    uint8_t adv_interval = ADV_INTERVAL_SECONDS; /* Default fallback */
-
-    /* Get interval from framfs user settings */
-    if (framfs_ctx.initialized)
-    {
-        if (juxta_framfs_get_adv_interval(&framfs_ctx, &adv_interval) == 0)
-        {
-            LOG_DBG("📡 Using adv_interval from settings: %d", adv_interval);
-        }
-        else
-        {
-            LOG_WRN("📡 Failed to get adv_interval from settings, using default: %d", ADV_INTERVAL_SECONDS);
-            adv_interval = ADV_INTERVAL_SECONDS;
-        }
-    }
-    else
-    {
-        LOG_WRN("📡 Framfs not initialized, using default adv_interval: %d", ADV_INTERVAL_SECONDS);
-        adv_interval = ADV_INTERVAL_SECONDS;
-    }
+    uint8_t adv_interval = session_adv_interval; /* Use session variable */
 
     /* Apply motion-based interval adjustment */
     if (lis2dh12_should_use_extended_intervals())
@@ -363,26 +351,7 @@ static uint32_t get_adv_interval(void)
 
 static uint32_t get_scan_interval(void)
 {
-    uint8_t scan_interval = SCAN_INTERVAL_SECONDS; /* Default fallback */
-
-    /* Get interval from framfs user settings */
-    if (framfs_ctx.initialized)
-    {
-        if (juxta_framfs_get_scan_interval(&framfs_ctx, &scan_interval) == 0)
-        {
-            LOG_DBG("🔍 Using scan_interval from settings: %d", scan_interval);
-        }
-        else
-        {
-            LOG_WRN("🔍 Failed to get scan_interval from settings, using default: %d", SCAN_INTERVAL_SECONDS);
-            scan_interval = SCAN_INTERVAL_SECONDS;
-        }
-    }
-    else
-    {
-        LOG_WRN("🔍 Framfs not initialized, using default scan_interval: %d", SCAN_INTERVAL_SECONDS);
-        scan_interval = SCAN_INTERVAL_SECONDS;
-    }
+    uint8_t scan_interval = session_scan_interval; /* Use session variable */
 
     /* Apply motion-based interval adjustment */
     if (lis2dh12_should_use_extended_intervals())
@@ -411,6 +380,62 @@ void juxta_ble_timing_update_trigger(void)
         LOG_INF("⏰ Updated timing: adv_interval=%d, scan_interval=%d",
                 get_adv_interval(), get_scan_interval());
     }
+}
+
+/**
+ * @brief Get current operating mode
+ * Called from BLE service to report current mode
+ */
+uint8_t juxta_get_current_operating_mode(void)
+{
+    return current_mode;
+}
+
+/**
+ * @brief Set current operating mode
+ * Called from BLE service when operating mode is changed
+ */
+void juxta_set_operating_mode(uint8_t mode)
+{
+    uint8_t old_mode = current_mode;
+    current_mode = mode;
+    LOG_INF("🔧 Operating mode changed: %d → %d", old_mode, current_mode);
+
+    /* Stop LED feedback when mode is defined */
+    if (old_mode == OPERATING_MODE_UNDEFINED && mode != OPERATING_MODE_UNDEFINED)
+    {
+        k_timer_stop(&connectable_adv_led_timer);
+        led_blink_state = false;
+        /* Access LED through device tree reference */
+        const struct gpio_dt_spec led_spec = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
+        gpio_pin_set_dt(&led_spec, 0);
+        LOG_INF("💡 LED feedback stopped - operating mode now defined");
+    }
+
+    /* TODO: Handle mode transitions (start/stop timers) */
+}
+
+/**
+ * @brief Get current session intervals
+ * Called from BLE service to report current intervals
+ */
+void juxta_get_session_intervals(uint8_t *adv_interval, uint8_t *scan_interval)
+{
+    if (adv_interval)
+        *adv_interval = session_adv_interval;
+    if (scan_interval)
+        *scan_interval = session_scan_interval;
+}
+
+/**
+ * @brief Set current session intervals
+ * Called from BLE service when intervals are changed
+ */
+void juxta_set_session_intervals(uint8_t adv_interval, uint8_t scan_interval)
+{
+    session_adv_interval = adv_interval;
+    session_scan_interval = scan_interval;
+    LOG_INF("🔧 Session intervals updated: adv=%d, scan=%d", adv_interval, scan_interval);
 }
 
 /**
@@ -790,7 +815,11 @@ static void state_work_handler(struct k_work *work)
 
             /* Get temperature from LIS2DH */
             int8_t temperature = 0;
-            // TODO: Add temperature reading through motion system interface
+            if (lis2dh12_get_temperature(&temperature) != 0)
+            {
+                LOG_WRN("📊 Failed to read LIS2DH temperature, using 0°C");
+                temperature = 0; /* Default if read fails */
+            }
 
             if (juxta_scan_count > 0)
             {
@@ -1172,6 +1201,13 @@ static void connected(struct bt_conn *conn, uint8_t err)
     LOG_INF("🔗 Connected to peer device");
     ble_connected = true; // Mark as connected
 
+    /* Stop LED feedback timer during BLE connection */
+    k_timer_stop(&connectable_adv_led_timer);
+    led_blink_state = false;
+    /* Access LED through device tree reference */
+    const struct gpio_dt_spec led_spec = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
+    gpio_pin_set_dt(&led_spec, 0); /* Ensure LED is off during connection */
+
     /* Disable watchdog during BLE operations to prevent resets during file transfers - COMMENTED OUT */
     // if (wdt && wdt_channel_id >= 0)
     // {
@@ -1222,17 +1258,23 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     /* Notify BLE service of disconnection */
     juxta_ble_connection_terminated();
 
-    /* Production flow: Check if datetime was synchronized during initial boot */
-    if (magnet_activated && !datetime_synchronized)
+    /* Production flow: Check if datetime was synchronized AND operating mode is defined */
+    if (magnet_activated && (!datetime_synchronized || current_mode == OPERATING_MODE_UNDEFINED))
     {
         datetime_sync_retry_count++;
-        LOG_INF("⏰ Initial boot: Datetime not yet synchronized - scheduling connectable advertising restart (attempt %d)", datetime_sync_retry_count);
+        LOG_INF("⏰ Initial boot: Datetime=%s, Mode=%d - scheduling connectable advertising restart (attempt %d)",
+                datetime_synchronized ? "OK" : "NOT_SET", current_mode, datetime_sync_retry_count);
 
         // Limit retries to prevent infinite loops
         if (datetime_sync_retry_count > 5)
         {
-            LOG_ERR("❌ Too many datetime sync retries - proceeding to normal operation");
+            LOG_ERR("❌ Too many sync retries - proceeding to normal operation");
             datetime_synchronized = true; // Force proceed to avoid infinite loop
+            if (current_mode == OPERATING_MODE_UNDEFINED)
+            {
+                current_mode = OPERATING_MODE_NORMAL; // Force default mode
+                LOG_WRN("⚠️ Forced operating mode to NORMAL due to retry limit");
+            }
             datetime_sync_retry_count = 0;
         }
         else
@@ -1244,9 +1286,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
             }
         }
     }
-    else
+    else if (datetime_synchronized && current_mode != OPERATING_MODE_UNDEFINED)
     {
-        /* Normal operation - resume appropriate mode */
+        /* Normal operation - resume appropriate mode (only if properly configured) */
         {
             /* Avoid submitting work before state system is initialized */
             if (!state_system_ready)
@@ -1275,11 +1317,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
                 LOG_ERR("🧲 DEBUG: GPIO1 device not ready");
             }
 
-            current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
-            if (framfs_ctx.initialized)
-            {
-                juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
-            }
+            /* Operating mode is session-based only - no longer read from FRAM */
+            /* current_mode remains as set during BLE session or defaults to NORMAL */
 
             if (current_mode == OPERATING_MODE_NORMAL)
             {
@@ -1295,6 +1334,19 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
                 LOG_INF("▶️ ADC_ONLY mode resumed - ADC timer continues");
                 // ADC timer continues automatically
             }
+        }
+    }
+    else
+    {
+        /* Handle other disconnect cases - if mode is undefined, stay in connectable advertising */
+        if (current_mode == OPERATING_MODE_UNDEFINED)
+        {
+            LOG_INF("⏸️ Operating mode still undefined after disconnect - staying in connectable advertising");
+            /* Don't proceed to production initialization - stay configurable */
+        }
+        else
+        {
+            LOG_DBG("📱 Normal disconnect - device remains in current operational state");
         }
     }
 }
@@ -1387,6 +1439,12 @@ static void pause_all_operations(void)
     }
 
     LOG_INF("⏸️ Pausing all operations for magnet reset");
+
+    // Stop BLE operations immediately for both modes
+    (void)juxta_stop_advertising();
+    (void)juxta_stop_scanning();
+    ble_state = BLE_STATE_IDLE;
+    LOG_INF("⏸️ BLE operations stopped");
 
     // Stop operations based on current mode
     if (current_mode == OPERATING_MODE_ADC_ONLY)
@@ -1594,16 +1652,24 @@ static void wait_for_magnet_sensor(void)
     gpio_pin_set_dt(&led, 0); // LED OFF initially
 
     // Wait for magnet to be applied (sensor goes HIGH when magnet is present)
+    uint32_t wait_counter = 0;
     while (gpio_pin_get_dt(&magnet_sensor))
     {
-        LOG_INF("💤 Waiting for magnet sensor activation (debug every 1s)...");
-
-        // Pulse LED for 10ms to show system is alive
-        gpio_pin_set_dt(&led, 1); // LED ON
-        k_sleep(K_MSEC(10));
-        gpio_pin_set_dt(&led, 0); // LED OFF
+        /* Blink LED once every 10 seconds to indicate waiting for magnet activation */
+        if (wait_counter % 10 == 0)
+        {
+            LOG_INF("💤 Waiting for magnet sensor activation (blink every 10s)...");
+            gpio_pin_set_dt(&led, 1); // LED ON
+            k_sleep(K_MSEC(10));
+            gpio_pin_set_dt(&led, 0); // LED OFF
+        }
+        else
+        {
+            /* Just sleep without LED activity for 9 out of 10 seconds */
+        }
 
         k_sleep(K_SECONDS(1));
+        wait_counter++;
     }
 
     // Magnet detected - now measure hold duration
@@ -1720,6 +1786,25 @@ static void ten_minute_timeout(struct k_timer *timer)
     doGatewayAdvertise = false;
 }
 
+/* LED state for timer-based blinking (declared above) */
+
+/**
+ * @brief LED timer callback for connectable advertising feedback
+ */
+static void connectable_adv_led_callback(struct k_timer *timer)
+{
+    /* Toggle LED state during connectable advertising - NO k_sleep() in ISR! */
+    if (connectable_adv_active && current_mode == OPERATING_MODE_UNDEFINED)
+    {
+        /* Access LED through device tree reference */
+        const struct gpio_dt_spec led_spec = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
+
+        /* Toggle LED state every 500ms to create 1Hz blink pattern */
+        led_blink_state = !led_blink_state;
+        gpio_pin_set_dt(&led_spec, led_blink_state ? 1 : 0);
+    }
+}
+
 /**
  * @brief Callback function called when datetime is synchronized via BLE
  */
@@ -1754,6 +1839,14 @@ static void datetime_sync_restart_work_handler(struct k_work *work)
     {
         LOG_INF("🔔 Connectable advertising restarted asynchronously");
         connectable_adv_active = true;
+
+        /* Restart LED feedback timer if mode is still undefined */
+        if (current_mode == OPERATING_MODE_UNDEFINED)
+        {
+            led_blink_state = false;
+            k_timer_start(&connectable_adv_led_timer, K_MSEC(500), K_MSEC(500));
+            LOG_DBG("💡 LED feedback restarted: 1Hz blinking during connectable advertising");
+        }
     }
 }
 
@@ -1907,6 +2000,14 @@ int main(void)
     LOG_INF("🔔 Connectable advertising started - waiting for datetime synchronization...");
     connectable_adv_active = true;
 
+    /* Start LED feedback timer for connectable advertising (1Hz blinking) */
+    if (current_mode == OPERATING_MODE_UNDEFINED)
+    {
+        led_blink_state = false;
+        k_timer_start(&connectable_adv_led_timer, K_MSEC(500), K_MSEC(500));
+        LOG_DBG("💡 LED feedback started: 1Hz blinking during connectable advertising");
+    }
+
     // Wait for datetime synchronization (this will be set in the BLE service)
     while (!datetime_synchronized)
     {
@@ -1921,6 +2022,19 @@ int main(void)
     while (ble_connected)
     {
         k_sleep(K_MSEC(50));
+    }
+
+    /* Check if operating mode was set during BLE session */
+    if (current_mode == OPERATING_MODE_UNDEFINED)
+    {
+        LOG_INF("⏸️ Operating mode still undefined after disconnect - staying in connectable advertising");
+        LOG_INF("📱 Device will restart connectable advertising via disconnect handler");
+        /* Don't proceed to production initialization - let disconnect handler manage */
+        while (1)
+        {
+            k_sleep(K_SECONDS(10));
+            LOG_DBG("💤 Waiting for operating mode configuration...");
+        }
     }
 
     /* FRAM already initialized - reinitialize framfs for production use */
@@ -1968,6 +2082,9 @@ int main(void)
     // Initialize 10-minute timer (now only for gateway advertising timeout)
     k_timer_init(&ten_minute_timer, ten_minute_timeout, NULL);
 
+    // Initialize LED feedback timer for connectable advertising
+    k_timer_init(&connectable_adv_led_timer, connectable_adv_led_callback, NULL);
+
     uint32_t current_time = get_rtc_timestamp();
     last_adv_timestamp = current_time - get_adv_interval();
     last_scan_timestamp = current_time - get_scan_interval();
@@ -1996,13 +2113,9 @@ int main(void)
     {
         LOG_INF("✅ ADC system initialized successfully");
 
-        /* Test RTC0 frequency accuracy for ADC duration validation */
-        LOG_INF("🕐 Testing RTC0 frequency for ADC timing validation...");
-        ret = juxta_adc_test_rtc0_frequency();
-        if (ret < 0)
-        {
-            LOG_ERR("❌ RTC0 frequency test failed - ADC duration may be inaccurate");
-        }
+        /* RTC0 frequency test removed - was causing system hang */
+        /* ret = juxta_adc_test_rtc0_frequency(); */
+        LOG_INF("🕐 RTC0 frequency test skipped (can be called manually if needed)");
 
         /* ADC timing test removed - can be called manually if needed */
         /* ret = juxta_adc_test_timing(1000); */
@@ -2014,19 +2127,20 @@ int main(void)
     /* Log BOOT event now that hardware is verified */
     juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_BOOT);
 
-    /* Start appropriate mode based on operating mode setting */
-    current_mode = OPERATING_MODE_NORMAL; // Default to normal mode
-    if (framfs_ctx.initialized)
-    {
-        juxta_framfs_get_operating_mode(&framfs_ctx, &current_mode);
-        LOG_INF("🔧 Operating mode read from FRAMFS: %d", current_mode);
-    }
-    else
-    {
-        LOG_WRN("⚠️ FRAMFS not initialized, using default operating mode: %d", current_mode);
-    }
+    /* Operating mode is session-based only - must be set via BLE */
+    const char *mode_name = (current_mode == OPERATING_MODE_UNDEFINED) ? "UNDEFINED" : (current_mode == OPERATING_MODE_NORMAL) ? "NORMAL"
+                                                                                   : (current_mode == OPERATING_MODE_ADC_ONLY) ? "ADC_ONLY"
+                                                                                                                               : "UNKNOWN";
+    LOG_INF("🔧 Operating mode: %d (%s)", current_mode, mode_name);
 
-    if (current_mode == OPERATING_MODE_NORMAL)
+    if (current_mode == OPERATING_MODE_UNDEFINED)
+    {
+        LOG_INF("⏸️ Operating mode undefined - staying in connectable advertising until configured");
+        LOG_INF("📱 Device ready for configuration via BLE Gateway commands");
+        /* Stay in connectable advertising mode - no state machine or ADC timer started */
+        /* Device will remain configurable until operating mode is set via BLE */
+    }
+    else if (current_mode == OPERATING_MODE_NORMAL)
     {
         /* Mode 0: Start state machine for BLE bursts/motion counting */
         k_work_submit(&state_work);
@@ -2094,9 +2208,7 @@ int main(void)
     }
     else
     {
-        LOG_WRN("⚠️ Unknown operating mode: %d, defaulting to NORMAL mode", current_mode);
-        k_work_submit(&state_work);
-        k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT);
+        LOG_WRN("⚠️ Unknown operating mode: %d, staying in connectable advertising", current_mode);
     }
 
     // Initialize watchdog timer - COMMENTED OUT (not hardened)
@@ -2165,6 +2277,16 @@ int main(void)
         heartbeat_counter++;
         LOG_INF("System heartbeat: %u (uptime: %u seconds)",
                 heartbeat_counter, heartbeat_counter * 10);
+
+        /* LED feedback based on operating mode */
+        if (current_mode == OPERATING_MODE_UNDEFINED)
+        {
+            /* Blink LED once every 10s to indicate undefined mode (low power) */
+            gpio_pin_set_dt(&led, 1);
+            k_sleep(K_MSEC(50));
+            gpio_pin_set_dt(&led, 0);
+            LOG_DBG("💡 LED blink: undefined mode (10s interval)");
+        }
     }
 
     return 0;

@@ -14,6 +14,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/att.h>
 #include <zephyr/drivers/watchdog.h>
+#include <zephyr/sys/reboot.h>
 #include <hal/nrf_rtc.h>
 #include <string.h>
 #include <stdio.h>
@@ -357,16 +358,12 @@ static int generate_node_response(char *buffer, size_t buffer_size)
         battery_level = 0;
     }
 
-    /* Get operating mode from framfs user settings */
-    uint8_t operating_mode = 0x00;
-    if (framfs_ctx && framfs_ctx->initialized)
-    {
-        if (juxta_framfs_get_operating_mode(framfs_ctx, &operating_mode) != 0)
-        {
-            LOG_WRN("🎛️ Failed to get operating mode from framfs, using default");
-            operating_mode = 0x00;
-        }
-    }
+    /* Get current session operating mode from main.c */
+    uint8_t operating_mode = juxta_get_current_operating_mode();
+
+    /* Get current session intervals from main.c */
+    uint8_t adv_interval = 0, scan_interval = 0;
+    juxta_get_session_intervals(&adv_interval, &scan_interval);
 
     /* Get ADC configuration */
     struct juxta_framfs_adc_config adc_config = {0};
@@ -383,10 +380,10 @@ static int generate_node_response(char *buffer, size_t buffer_size)
         }
     }
 
-    /* Generate JSON response with ADC configuration */
+    /* Generate JSON response with session and ADC configuration */
     int written = snprintf(buffer, buffer_size,
-                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"operating_mode\":%d,\"alert\":\"%s\",\"adc_config\":{\"mode\":%d,\"threshold\":%u,\"buffer_size\":%u,\"debounce\":%u,\"peaks_only\":%s}}",
-                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, operating_mode, alert,
+                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"operating_mode\":%d,\"adv_interval\":%d,\"scan_interval\":%d,\"alert\":\"%s\",\"adc_config\":{\"mode\":%d,\"threshold\":%u,\"buffer_size\":%u,\"debounce\":%u,\"peaks_only\":%s}}",
+                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, operating_mode, adv_interval, scan_interval, alert,
                            adc_config.mode, (unsigned)adc_config.threshold_mv, adc_config.buffer_size,
                            (unsigned)adc_config.debounce_ms, adc_config.output_peaks_only ? "true" : "false");
 
@@ -456,9 +453,6 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         {
             LOG_WRN("🎛️ Failed to get current settings, using defaults");
             /* Use defaults if framfs not available */
-            settings->operating_mode = 0x00;
-            settings->adv_interval = 5;
-            settings->scan_interval = 15;
             strcpy(settings->subject_id, "");
             strcpy(settings->upload_path, "/TEST");
         }
@@ -466,9 +460,6 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
     else
     {
         /* Use defaults if framfs not available */
-        settings->operating_mode = 0x00;
-        settings->adv_interval = 5;
-        settings->scan_interval = 15;
         strcpy(settings->subject_id, "");
         strcpy(settings->upload_path, "/TEST");
     }
@@ -478,6 +469,7 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
     bool settings_changed = false;
     bool send_filenames_requested = false;
     bool clear_memory_requested = false;
+    bool reset_requested = false;
 
     /* Look for timestamp */
     p = strstr(json_cmd, "\"timestamp\":");
@@ -546,10 +538,22 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         }
     }
 
-    /* Check for command conflicts */
-    if (send_filenames_requested && clear_memory_requested)
+    /* Look for reset */
+    p = strstr(json_cmd, "\"reset\":");
+    if (p)
     {
-        LOG_ERR("❌ Command conflict: sendFilenames and clearMemory cannot be used together");
+        if (strstr(p, "\"reset\":true") || strstr(p, "\"reset\": true"))
+        {
+            reset_requested = true;
+            LOG_INF("🔄 Reset command received");
+        }
+    }
+
+    /* Check for command conflicts */
+    if ((send_filenames_requested && clear_memory_requested) ||
+        (reset_requested && (send_filenames_requested || clear_memory_requested)))
+    {
+        LOG_ERR("❌ Command conflict: reset, sendFilenames, and clearMemory are mutually exclusive");
         return -EINVAL;
     }
 
@@ -564,7 +568,34 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         }
     }
 
-    /* Look for operatingMode */
+    /* Execute reset if requested - must be last since it doesn't return */
+    if (reset_requested)
+    {
+        LOG_INF("🔄 Reset command executing - graceful disconnect and reboot");
+
+        /* Give time for BLE response to be sent before reset */
+        k_sleep(K_MSEC(100));
+
+        /* Disconnect gracefully if connected */
+        if (current_conn)
+        {
+            bt_conn_disconnect(current_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            LOG_INF("🔄 BLE disconnect initiated for reset");
+
+            /* Wait for disconnect to complete */
+            k_sleep(K_MSEC(500));
+        }
+
+        LOG_INF("🔄 Executing system reset via BLE command...");
+
+        /* Force system reset */
+        sys_reboot(SYS_REBOOT_COLD);
+
+        /* This line should never be reached */
+        return 0;
+    }
+
+    /* Look for operatingMode (session-based) */
     p = strstr(json_cmd, "\"operatingMode\":");
     if (p)
     {
@@ -572,8 +603,7 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         if (sscanf(p, "\"operatingMode\":%hhu", &operating_mode) == 1)
         {
             LOG_INF("🎛️ Operating mode command: %d", operating_mode);
-            settings->operating_mode = operating_mode;
-            settings_changed = true;
+            juxta_set_operating_mode(operating_mode);
         }
         else
         {
@@ -581,7 +611,7 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         }
     }
 
-    /* Look for advInterval */
+    /* Look for advInterval (session-based) */
     p = strstr(json_cmd, "\"advInterval\":");
     if (p)
     {
@@ -589,8 +619,9 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         if (sscanf(p, "\"advInterval\":%hhu", &adv_interval) == 1)
         {
             LOG_INF("🎛️ Advertising interval command: %d", adv_interval);
-            settings->adv_interval = adv_interval;
-            settings_changed = true;
+            uint8_t current_scan;
+            juxta_get_session_intervals(NULL, &current_scan);
+            juxta_set_session_intervals(adv_interval, current_scan);
         }
         else
         {
@@ -598,7 +629,7 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         }
     }
 
-    /* Look for scanInterval */
+    /* Look for scanInterval (session-based) */
     p = strstr(json_cmd, "\"scanInterval\":");
     if (p)
     {
@@ -606,8 +637,13 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         if (sscanf(p, "\"scanInterval\":%hhu", &scan_interval) == 1)
         {
             LOG_INF("🎛️ Scanning interval command: %d", scan_interval);
-            settings->scan_interval = scan_interval;
-            settings_changed = true;
+            uint8_t current_adv;
+            juxta_get_session_intervals(&current_adv, NULL);
+            juxta_set_session_intervals(current_adv, scan_interval);
+        }
+        else
+        {
+            LOG_WRN("🎛️ Invalid scanInterval format in command");
         }
     }
 

@@ -46,6 +46,9 @@ bool lis2dh12_should_use_extended_intervals(void);
 uint8_t lis2dh12_get_motion_count(void);
 void lis2dh12_reset_motion_count(void);
 
+/* Temperature reading function for motion system */
+int lis2dh12_get_temperature(int8_t *temperature);
+
 /* Platform functions for direct register access */
 int32_t lis2dh12_platform_read(void *handle, uint8_t reg, uint8_t *data, uint16_t len);
 int32_t lis2dh12_platform_write(void *handle, uint8_t reg, const uint8_t *data, uint16_t len);

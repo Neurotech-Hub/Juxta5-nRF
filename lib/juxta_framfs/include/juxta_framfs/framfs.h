@@ -167,9 +167,9 @@ extern "C"
     {
         uint16_t magic;                                 /* User settings magic number */
         uint8_t version;                                /* User settings version */
-        uint8_t operating_mode;                         /* Operating mode */
-        uint8_t adv_interval;                           /* Advertising interval (0-255) */
-        uint8_t scan_interval;                          /* Scanning interval (0-255) */
+        uint8_t reserved1;                              /* Reserved (was operating_mode) */
+        uint8_t reserved2;                              /* Reserved (was adv_interval) */
+        uint8_t reserved3;                              /* Reserved (was scan_interval) */
         char subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN];   /* Subject ID string */
         char upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN]; /* Upload path string */
         struct juxta_framfs_adc_config adc_config;      /* ADC configuration */
@@ -459,51 +459,9 @@ extern "C"
      * User Settings API
      * ======================================================================== */
 
-    /**
-     * @brief Get advertising interval
-     *
-     * @param ctx File system context
-     * @param interval Pointer to store advertising interval (0-255)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_get_adv_interval(struct juxta_framfs_context *ctx,
-                                      uint8_t *interval);
+    /* Advertising and scanning interval functions removed - now session-based only */
 
-    /**
-     * @brief Set advertising interval
-     *
-     * @param ctx File system context
-     * @param interval Advertising interval (0-255)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_set_adv_interval(struct juxta_framfs_context *ctx,
-                                      uint8_t interval);
-
-    /**
-     * @brief Get scanning interval
-     *
-     * @param ctx File system context
-     * @param interval Pointer to store scanning interval (0-255)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_get_scan_interval(struct juxta_framfs_context *ctx,
-                                       uint8_t *interval);
-
-    /**
-     * @brief Set scanning interval
-     *
-     * @param ctx File system context
-     * @param interval Scanning interval (0-255)
-     * @return 0 on success, negative error code on failure
-     */
-    int juxta_framfs_set_scan_interval(struct juxta_framfs_context *ctx,
-                                       uint8_t interval);
-
-    int juxta_framfs_get_operating_mode(struct juxta_framfs_context *ctx,
-                                        uint8_t *mode);
-
-    int juxta_framfs_set_operating_mode(struct juxta_framfs_context *ctx,
-                                        uint8_t mode);
+    /* Operating mode functions removed - operating mode is now session-based only */
 
     /**
      * @brief Get subject ID

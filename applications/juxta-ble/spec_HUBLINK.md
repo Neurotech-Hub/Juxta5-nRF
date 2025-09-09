@@ -11,19 +11,33 @@ Provides device status and configuration information in JSON format:
 ```json
 {
   "upload_path": "/TEST",
-  "firmware_version": "1.0.0",
+  "firmware_version": "1.0.0", 
   "battery_level": 85,
   "device_id": "JX_*",
-  "alert": ""
+  "operating_mode": 0,
+  "adv_interval": 5,
+  "scan_interval": 20,
+  "alert": "",
+  "adc_config": {
+    "mode": 0,
+    "threshold": 100,
+    "buffer_size": 1000,
+    "debounce": 5000,
+    "peaks_only": false
+  }
 }
 ```
 
 **Fields**:
-- `upload_path` (string): Base path for file uploads
+- `upload_path` (string): Base path for file uploads (persistent)
 - `firmware_version` (string): Current peripheral software version
-- `battery_level` (number): Battery level 0-255 (0 = not set, only present if > 0)
+- `battery_level` (number): Battery level 0-100 percentage
 - `device_id` (string): Hardware device identifier
-- `alert` (string): Alert message (only present if set by user, auto-clears after read)
+- `operating_mode` (number): Current session operating mode (0=NORMAL, 1=ADC_ONLY)
+- `adv_interval` (number): Current session advertising interval in seconds
+- `scan_interval` (number): Current session scanning interval in seconds  
+- `alert` (string): Alert message (reserved for future use)
+- `adc_config` (object): Current ADC configuration (persistent)
 
 **Usage**: Gateway reads this characteristic after connection to get device information and status.
 
@@ -37,11 +51,16 @@ Accepts JSON commands to control device behavior. Multiple commands can be sent 
   "timestamp": 1234567890,
   "sendFilenames": true,
   "clearMemory": true,
+  "operatingMode": 0,
   "advInterval": 5,
   "scanInterval": 15,
   "subjectId":"vole001",
   "uploadPath":"/TEST",
-  "operatingMode": 0,
+  "adcMode": 0,
+  "adcThreshold": 100,
+  "adcBufferSize": 1000,
+  "adcDebounce": 5000,
+  "adcPeaksOnly": false,
   "reset": true
 }
 ```
@@ -49,14 +68,33 @@ Accepts JSON commands to control device behavior. Multiple commands can be sent 
 This implementaion is unique from other nodes that have an internal memory card where subjectId and uploadPath would be manually set/written. Here, we must rely on the BLE connection itself.
 
 **Commands**:
-- `timestamp` (number): Unix timestamp for device synchronization
+
+**System Commands**:
+- `timestamp` (number): Unix timestamp for device synchronization (required for operation)
 - `sendFilenames` (boolean): Triggers file listing process when true
 - `clearMemory` (boolean): Clears device memory when true
-- `advInterval` (integer): set advertising burst interval, 0 means no advertising
-- `scanInterval` (integer): set scanning burst interval, 0 means no scanning
-- `subjectId` (string): should be saved internally
-- `uploadPath` (string): should be saved internally
-- `operatingMode` (integer): set device operating mode (0 = NORMAL mode with BLE bursts/motion counting, 1 = ADC_ONLY mode with pure ADC recordings)
+- `reset` (boolean): Gracefully disconnects and reboots device when true
+
+**Session Configuration** (not persisted, reset on reboot):
+- `operatingMode` (integer): Set device operating mode (0 = NORMAL mode with BLE bursts/motion counting, 1 = ADC_ONLY mode with pure ADC recordings)
+- `advInterval` (integer): Set advertising burst interval in seconds (NORMAL mode only, 0 = no advertising)
+- `scanInterval` (integer): Set scanning burst interval in seconds (NORMAL mode only, 0 = no scanning)
+
+**Persistent Configuration** (saved to FRAM):
+- `subjectId` (string): Subject identifier for data files
+- `uploadPath` (string): Base path for file uploads
+
+**ADC Configuration** (saved to FRAM):
+- `adcMode` (integer): ADC sampling mode (0 = timer bursts, 1 = threshold events)
+- `adcThreshold` (integer): Threshold in millivolts for event detection (0 = always trigger)
+- `adcBufferSize` (integer): Number of samples per burst (1-1000, limited to prevent duration overflow)
+- `adcDebounce` (integer): Interval between ADC operations in milliseconds
+- `adcPeaksOnly` (boolean): Output format for threshold mode (true = peaks only, false = full waveform)
+
+**Session vs Persistent Settings**:
+- **Session settings** (operatingMode, advInterval, scanInterval): Reset to defaults on reboot, must be reconfigured each session
+- **Persistent settings** (subjectId, uploadPath, ADC config): Saved to FRAM and retained across reboots
+- **Operating mode defaults**: NORMAL mode (0) with 5s advertising, 20s scanning intervals
 
 **Usage**: Write JSON commands to control device behavior. Device responds via callbacks.
 
@@ -98,11 +136,51 @@ This implementaion is unique from other nodes that have an internal memory card 
 
 ### 2. Connection Sequence
 1. **Connect** to device
-2. **Read Node Characteristic** to get device info
-3. **Gateway Subscribes to indications** on Filename and File Transfer characteristics
-4. **Device Writes to Gateway Characteristic** and may initiate file transfer
+2. **Read Node Characteristic** to get current device status and configuration
+3. **Subscribe to indications** on Filename and File Transfer characteristics
+4. **Configure device** via Gateway Characteristic (set operating mode, intervals, ADC config)
+5. **Synchronize timestamp** for accurate data logging
+6. **Perform file operations** (listing, transfer) as needed
 
-### 3. File Transfer Workflow
+### 3. Device Configuration Examples
+
+#### Configure for NORMAL Mode (BLE scanning/advertising)
+```json
+{
+  "timestamp": 1234567890,
+  "operatingMode": 0,
+  "advInterval": 10,
+  "scanInterval": 30,
+  "subjectId": "fish001",
+  "uploadPath": "/FIELD"
+}
+```
+
+#### Configure for ADC_ONLY Mode (high-speed data logging)
+```json
+{
+  "timestamp": 1234567890,
+  "operatingMode": 1,
+  "adcMode": 0,
+  "adcBufferSize": 1000,
+  "adcDebounce": 2000,
+  "subjectId": "fish001",
+  "uploadPath": "/LAB"
+}
+```
+
+#### Configure ADC for Event Detection
+```json
+{
+  "adcMode": 1,
+  "adcThreshold": 500,
+  "adcBufferSize": 200,
+  "adcDebounce": 1000,
+  "adcPeaksOnly": true
+}
+```
+
+### 4. File Transfer Workflow
 
 #### File Listing
 1. Gateway writes `{"sendFilenames": true}` to Gateway Characteristic
@@ -114,7 +192,7 @@ This implementaion is unique from other nodes that have an internal memory card 
 2. Gateway receives file content via File Transfer Characteristic indications
 3. Gateway monitors for "EOF" or "NFF" markers
 
-### 4. Other Details
+### 5. Other Details
 
 - Timeout: None for now, but this device must handle any disconnection gracefully (automatic cleanup) via callbacks and state management
 
