@@ -64,6 +64,28 @@ extern "C"
     int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
                                uint32_t *actual_samples, uint32_t *duration_us);
 
+    /**
+     * @brief Test function to verify ADC timing accuracy
+     *
+     * This function can be called during development to verify that the
+     * duration calculation matches expected timing based on sample count
+     * and known ADC conversion characteristics.
+     *
+     * @param expected_samples Number of samples to test with (200-2000)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_adc_test_timing(uint32_t expected_samples);
+
+    /**
+     * @brief Test RTC0 frequency accuracy using k_sleep() as reference
+     *
+     * This function tests if RTC0 is actually running at 32768 Hz by comparing
+     * its tick count against a known k_sleep() delay.
+     *
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_adc_test_rtc0_frequency(void);
+
 #ifdef __cplusplus
 }
 #endif

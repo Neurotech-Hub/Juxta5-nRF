@@ -1293,9 +1293,9 @@ int juxta_framfs_set_adc_config(struct juxta_framfs_context *ctx,
         return JUXTA_FRAMFS_ERROR;
     }
 
-    if (config->buffer_size < 1 || config->buffer_size > 4000)
+    if (config->buffer_size < 1 || config->buffer_size > 1000)
     {
-        LOG_WRN("Invalid buffer size: %d (range: 1-4000)", config->buffer_size);
+        LOG_WRN("Invalid buffer size: %d (range: 1-1000, limited to prevent duration overflow)", config->buffer_size);
         return JUXTA_FRAMFS_ERROR;
     }
 
@@ -1863,7 +1863,7 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
     }
 
     /* Calculate total record size and check FRAM bounds */
-    uint32_t record_size = 12 + sample_count; /* Extended header: 12 bytes */
+    uint32_t record_size = JUXTA_FRAMFS_ADC_HEADER_SIZE + sample_count; /* Extended header: 13 bytes */
     uint32_t write_addr = entry.start_addr + entry.length;
     if (write_addr + record_size > JUXTA_FRAM_SIZE_BYTES)
     {
@@ -1875,8 +1875,8 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
             (unsigned)unix_timestamp, (unsigned)microsecond_offset,
             (unsigned)sample_count, (unsigned)duration_us);
 
-    /* Prepare header (12 bytes) - New format: Unix timestamp + microsecond offset + sample count + duration */
-    uint8_t header[12];
+    /* Prepare header (13 bytes) - New format: Unix timestamp + microsecond offset + sample count + duration + event type */
+    uint8_t header[JUXTA_FRAMFS_ADC_HEADER_SIZE];
     header[0] = (unix_timestamp >> 24) & 0xFF;     /* Unix timestamp high byte */
     header[1] = (unix_timestamp >> 16) & 0xFF;     /* Unix timestamp mid-high byte */
     header[2] = (unix_timestamp >> 8) & 0xFF;      /* Unix timestamp mid-low byte */
@@ -1887,12 +1887,19 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
     header[7] = microsecond_offset & 0xFF;         /* Microsecond offset low byte */
     header[8] = (sample_count >> 8) & 0xFF;        /* Sample count high byte */
     header[9] = sample_count & 0xFF;               /* Sample count low byte */
-    header[10] = (duration_us >> 8) & 0xFF;        /* Duration high byte */
-    header[11] = duration_us & 0xFF;               /* Duration low byte */
+    /* Cap duration at 65535 µs (65.5ms) for 16-bit storage - overflow indicates timing issue */
+    uint32_t clamped_duration = (duration_us > 65535) ? 65535 : duration_us;
+    if (duration_us > 65535)
+    {
+        LOG_WRN("📊 Duration overflow: %u µs capped to 65535 µs (indicates slow sampling)", (unsigned)duration_us);
+    }
+    header[10] = (clamped_duration >> 8) & 0xFF;     /* Duration high byte */
+    header[11] = clamped_duration & 0xFF;            /* Duration low byte */
+    header[12] = JUXTA_FRAMFS_ADC_EVENT_TIMER_BURST; /* Event type */
 
     /* Write header directly to FRAM */
     LOG_INF("📊 FRAMFS: Writing header to FRAM addr 0x%06X", (unsigned)write_addr);
-    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, 12);
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, JUXTA_FRAMFS_ADC_HEADER_SIZE);
     if (ret < 0)
     {
         LOG_ERR("Failed to write ADC burst header to FRAM: %d", ret);
@@ -1902,8 +1909,8 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
 
     /* Write samples directly to FRAM (no intermediate buffer) */
     LOG_INF("📊 FRAMFS: Writing %u samples to FRAM addr 0x%06X",
-            (unsigned)sample_count, (unsigned)(write_addr + 12));
-    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 12, samples, sample_count);
+            (unsigned)sample_count, (unsigned)(write_addr + JUXTA_FRAMFS_ADC_HEADER_SIZE));
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + JUXTA_FRAMFS_ADC_HEADER_SIZE, samples, sample_count);
     if (ret < 0)
     {
         LOG_ERR("Failed to write ADC burst samples to FRAM: %d", ret);
@@ -2005,11 +2012,11 @@ int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
     uint32_t record_size;
     if (event_type == JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT)
     {
-        record_size = 16; /* 12-byte header + 1 event type + 2 peaks + 1 reserved */
+        record_size = JUXTA_FRAMFS_ADC_HEADER_SIZE + 3; /* 13-byte header + 2 peaks + 1 reserved */
     }
     else
     {
-        record_size = 12 + sample_count; /* 12-byte header + samples */
+        record_size = JUXTA_FRAMFS_ADC_HEADER_SIZE + sample_count; /* 13-byte header + samples */
     }
 
     uint32_t write_addr = entry.start_addr + entry.length;
@@ -2023,8 +2030,8 @@ int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
             event_type, (unsigned)unix_timestamp, (unsigned)microsecond_offset,
             (unsigned)sample_count, (unsigned)duration_us);
 
-    /* Prepare header (12 bytes) - Same format for all event types */
-    uint8_t header[12];
+    /* Prepare header (13 bytes) - Same format for all event types */
+    uint8_t header[JUXTA_FRAMFS_ADC_HEADER_SIZE];
     header[0] = (unix_timestamp >> 24) & 0xFF;
     header[1] = (unix_timestamp >> 16) & 0xFF;
     header[2] = (unix_timestamp >> 8) & 0xFF;
@@ -2035,11 +2042,18 @@ int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
     header[7] = microsecond_offset & 0xFF;
     header[8] = (sample_count >> 8) & 0xFF;
     header[9] = sample_count & 0xFF;
-    header[10] = (duration_us >> 8) & 0xFF;
-    header[11] = duration_us & 0xFF;
+    /* Cap duration at 65535 µs (65.5ms) for 16-bit storage - overflow indicates timing issue */
+    uint32_t clamped_duration = (duration_us > 65535) ? 65535 : duration_us;
+    if (duration_us > 65535)
+    {
+        LOG_WRN("📊 Duration overflow: %u µs capped to 65535 µs (indicates slow sampling)", (unsigned)duration_us);
+    }
+    header[10] = (clamped_duration >> 8) & 0xFF;
+    header[11] = clamped_duration & 0xFF;
+    header[12] = event_type; /* Event type */
 
     /* Write header to FRAM */
-    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, 12);
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, JUXTA_FRAMFS_ADC_HEADER_SIZE);
     if (ret < 0)
     {
         LOG_ERR("Failed to write ADC event header to FRAM: %d", ret);
@@ -2049,14 +2063,13 @@ int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
     /* Write event-specific data */
     if (event_type == JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT)
     {
-        /* Write event type + peaks + reserved */
-        uint8_t event_data[4];
-        event_data[0] = event_type;
-        event_data[1] = peak_positive;
-        event_data[2] = peak_negative;
-        event_data[3] = 0; /* Reserved */
+        /* Write peaks + reserved (event type now in header) */
+        uint8_t event_data[3];
+        event_data[0] = peak_positive;
+        event_data[1] = peak_negative;
+        event_data[2] = 0; /* Reserved */
 
-        ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 12, event_data, 4);
+        ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + JUXTA_FRAMFS_ADC_HEADER_SIZE, event_data, 3);
         if (ret < 0)
         {
             LOG_ERR("Failed to write ADC event data to FRAM: %d", ret);
@@ -2066,7 +2079,7 @@ int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
     else
     {
         /* Write samples for timer burst or peri-event */
-        ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 12, samples, sample_count);
+        ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + JUXTA_FRAMFS_ADC_HEADER_SIZE, samples, sample_count);
         if (ret < 0)
         {
             LOG_ERR("Failed to write ADC samples to FRAM: %d", ret);

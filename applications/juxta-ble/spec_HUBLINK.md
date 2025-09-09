@@ -41,7 +41,8 @@ Accepts JSON commands to control device behavior. Multiple commands can be sent 
   "scanInterval": 15,
   "subjectId":"vole001",
   "uploadPath":"/TEST",
-  "operatingMode": 0
+  "operatingMode": 0,
+  "reset": true
 }
 ```
 

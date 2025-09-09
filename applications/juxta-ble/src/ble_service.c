@@ -73,22 +73,22 @@ static struct juxta_framfs_context *framfs_ctx = NULL;
 /* External vitals context - will be set during initialization */
 static struct juxta_vitals_ctx *vitals_ctx = NULL;
 
-/* Watchdog device for feeding during long operations */
-static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
-static int wdt_channel_id = -1;
+/* Watchdog device for feeding during long operations - COMMENTED OUT (not hardened) */
+// static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
+// static int wdt_channel_id = -1;
 
-/* Watchdog feeding helper for long operations */
-static void feed_watchdog(void)
-{
-    if (wdt && wdt_channel_id >= 0)
-    {
-        int err = wdt_feed(wdt, wdt_channel_id);
-        if (err < 0)
-        {
-            LOG_WRN("⚠️ Failed to feed watchdog: %d", err);
-        }
-    }
-}
+/* Watchdog feeding helper for long operations - COMMENTED OUT */
+// static void feed_watchdog(void)
+// {
+//     if (wdt && wdt_channel_id >= 0)
+//     {
+//         int err = wdt_feed(wdt, wdt_channel_id);
+//         if (err < 0)
+//         {
+//             LOG_WRN("⚠️ Failed to feed watchdog: %d", err);
+//         }
+//     }
+// }
 
 /* Battery check helper for FRAM operations */
 static bool should_allow_fram_write(void)
@@ -143,13 +143,13 @@ void juxta_ble_set_vitals_context(struct juxta_vitals_ctx *ctx)
 }
 
 /**
- * @brief Set the watchdog channel ID for feeding during long operations
+ * @brief Set the watchdog channel ID for feeding during long operations - COMMENTED OUT
  */
-void juxta_ble_set_watchdog_channel(int channel_id)
-{
-    wdt_channel_id = channel_id;
-    LOG_INF("🛡️ BLE service linked to watchdog channel %d", channel_id);
-}
+// void juxta_ble_set_watchdog_channel(int channel_id)
+// {
+//     wdt_channel_id = channel_id;
+//     LOG_INF("🛡️ BLE service linked to watchdog channel %d", channel_id);
+// }
 
 /**
  * @brief Set the datetime synchronization callback
@@ -274,7 +274,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to format file system: %d", ret);
         return ret;
     }
-    feed_watchdog(); /* Feed watchdog after format operation */
+    // feed_watchdog(); /* Feed watchdog after format operation - COMMENTED OUT */
 
     /* Clear MAC address table */
     ret = juxta_framfs_mac_clear(framfs_ctx);
@@ -283,7 +283,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to clear MAC table: %d", ret);
         return ret;
     }
-    feed_watchdog(); /* Feed watchdog after MAC clear operation */
+    // feed_watchdog(); /* Feed watchdog after MAC clear operation - COMMENTED OUT */
 
     /* Clear user settings (reset to defaults) */
     ret = juxta_framfs_clear_user_settings(framfs_ctx);
@@ -292,7 +292,7 @@ static int handle_memory_clearing(void)
         LOG_ERR("🧹 Failed to clear user settings: %d", ret);
         return ret;
     }
-    feed_watchdog(); /* Feed watchdog after settings clear operation */
+    // feed_watchdog(); /* Feed watchdog after settings clear operation - COMMENTED OUT */
 
     LOG_INF("✅ Memory clearing completed successfully");
     return 0;
@@ -989,8 +989,8 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         current_transfer_offset += ret;
         *bytes_read = ret;
 
-        /* Feed watchdog during MAC table transfer operations */
-        feed_watchdog();
+        /* Feed watchdog during MAC table transfer operations - COMMENTED OUT */
+        // feed_watchdog();
 
         double progress = (double)current_transfer_offset / current_transfer_file_size * 100.0;
         LOG_DBG("📁 MAC table chunk: offset=%u/%d, bytes=%zu, progress=%.1f%%",
@@ -1058,8 +1058,8 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         LOG_INF("📁 First chunk hex data (first 32 chars): %.32s", (char *)buffer);
     }
 
-    /* Feed watchdog during file transfer operations */
-    feed_watchdog();
+    /* Feed watchdog during file transfer operations - COMMENTED OUT */
+    // feed_watchdog();
 
     double progress = (double)current_transfer_offset / current_transfer_file_size * 100.0;
     LOG_DBG("📁 File transfer chunk: offset=%u/%d, hex_bytes=%zu, progress=%.1f%%",

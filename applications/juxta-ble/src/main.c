@@ -64,23 +64,23 @@ static struct juxta_fram_device fram_dev; /* Global FRAM device for framfs */
 static bool hardware_verified = false;
 static bool watchdog_reset_detected = false; // Set true after LIS2DH + FRAM verification
 
-// Watchdog timer
-static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
-static int wdt_channel_id;
-static struct k_timer wdt_feed_timer;
+// Watchdog timer - COMMENTED OUT (not hardened)
+// static const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
+// static int wdt_channel_id;
+// static struct k_timer wdt_feed_timer;
 
-// Watchdog feed timer callback - ensures watchdog is always fed
-static void wdt_feed_timer_callback(struct k_timer *timer)
-{
-    if (wdt && wdt_channel_id >= 0)
-    {
-        int err = wdt_feed(wdt, wdt_channel_id);
-        if (err < 0)
-        {
-            LOG_ERR("Failed to feed watchdog: %d", err);
-        }
-    }
-}
+// Watchdog feed timer callback - ensures watchdog is always fed - COMMENTED OUT
+// static void wdt_feed_timer_callback(struct k_timer *timer)
+// {
+//     if (wdt && wdt_channel_id >= 0)
+//     {
+//         int err = wdt_feed(wdt, wdt_channel_id);
+//         if (err < 0)
+//         {
+//             LOG_ERR("Failed to feed watchdog: %d", err);
+//         }
+//     }
+// }
 
 /**
  * @brief Consolidated FRAM and framfs initialization function
@@ -510,8 +510,9 @@ static void adc_work_handler(struct k_work *work)
     uint32_t actual_samples;
     uint32_t duration_us;
 
-    /* Use configured buffer size (limited by static buffer) */
-    uint32_t max_samples = MIN(adc_config.buffer_size, ADC_MAX_SAMPLES);
+    /* Use configured buffer size (limited by static buffer and duration overflow protection) */
+    /* Limit to 1000 samples to prevent duration overflow (1000 * 60µs = 60ms < 65.5ms limit) */
+    uint32_t max_samples = MIN(MIN(adc_config.buffer_size, ADC_MAX_SAMPLES), 1000);
 
     int ret = juxta_adc_burst_sample(samples, max_samples, &actual_samples, &duration_us);
     if (ret == 0 && actual_samples > 0)
@@ -1171,17 +1172,17 @@ static void connected(struct bt_conn *conn, uint8_t err)
     LOG_INF("🔗 Connected to peer device");
     ble_connected = true; // Mark as connected
 
-    /* Disable watchdog during BLE operations to prevent resets during file transfers */
-    if (wdt && wdt_channel_id >= 0)
-    {
-        LOG_INF("🛡️ Disabling watchdog during BLE connection (channel %d)", wdt_channel_id);
-        k_timer_stop(&wdt_feed_timer);
-        LOG_INF("🛡️ Watchdog feed timer stopped during BLE connection");
-    }
-    else
-    {
-        LOG_WRN("🛡️ Cannot disable watchdog: wdt=%p, channel_id=%d", wdt, wdt_channel_id);
-    }
+    /* Disable watchdog during BLE operations to prevent resets during file transfers - COMMENTED OUT */
+    // if (wdt && wdt_channel_id >= 0)
+    // {
+    //     LOG_INF("🛡️ Disabling watchdog during BLE connection (channel %d)", wdt_channel_id);
+    //     k_timer_stop(&wdt_feed_timer);
+    //     LOG_INF("🛡️ Watchdog feed timer stopped during BLE connection");
+    // }
+    // else
+    // {
+    //     LOG_WRN("🛡️ Cannot disable watchdog: wdt=%p, channel_id=%d", wdt, wdt_channel_id);
+    // }
 
     // Stop any ongoing advertising or scanning (guarded)
     (void)juxta_stop_advertising();
@@ -1206,17 +1207,17 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     ble_connected = false; // Mark as disconnected
     ble_state = BLE_STATE_IDLE;
 
-    /* Re-enable watchdog after BLE operations complete */
-    if (wdt && wdt_channel_id >= 0)
-    {
-        LOG_INF("🛡️ Re-enabling watchdog after BLE disconnection (channel %d)", wdt_channel_id);
-        k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
-        LOG_INF("🛡️ Watchdog feed timer restarted after BLE disconnection");
-    }
-    else
-    {
-        LOG_WRN("🛡️ Cannot restart watchdog: wdt=%p, channel_id=%d", wdt, wdt_channel_id);
-    }
+    /* Re-enable watchdog after BLE operations complete - COMMENTED OUT */
+    // if (wdt && wdt_channel_id >= 0)
+    // {
+    //     LOG_INF("🛡️ Re-enabling watchdog after BLE disconnection (channel %d)", wdt_channel_id);
+    //     k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
+    //     LOG_INF("🛡️ Watchdog feed timer restarted after BLE disconnection");
+    // }
+    // else
+    // {
+    //     LOG_WRN("🛡️ Cannot restart watchdog: wdt=%p, channel_id=%d", wdt, wdt_channel_id);
+    // }
 
     /* Notify BLE service of disconnection */
     juxta_ble_connection_terminated();
@@ -1452,11 +1453,11 @@ static void perform_graceful_reset(void)
         LOG_INF("🔄 State machine timer stopped for reset");
     }
 
-    // Feed watchdog one last time
-    if (wdt && wdt_channel_id >= 0)
-    {
-        wdt_feed(wdt, wdt_channel_id);
-    }
+    // Feed watchdog one last time - COMMENTED OUT
+    // if (wdt && wdt_channel_id >= 0)
+    // {
+    //     wdt_feed(wdt, wdt_channel_id);
+    // }
 
     // Turn off LED and pause for 3 seconds to signal reset is committed
     gpio_pin_set_dt(&led, 0);
@@ -1850,8 +1851,8 @@ int main(void)
     }
     juxta_ble_set_vitals_context(&vitals_ctx);
 
-    /* Initialize watchdog feed timer early */
-    k_timer_init(&wdt_feed_timer, wdt_feed_timer_callback, NULL);
+    /* Initialize watchdog feed timer early - COMMENTED OUT */
+    // k_timer_init(&wdt_feed_timer, wdt_feed_timer_callback, NULL);
 
     /* FRAM already initialized early - now initialize framfs for sendFilenames */
     LOG_INF("📁 Initializing framfs context (pre-sync)...");
@@ -1994,6 +1995,17 @@ int main(void)
     else
     {
         LOG_INF("✅ ADC system initialized successfully");
+
+        /* Test RTC0 frequency accuracy for ADC duration validation */
+        LOG_INF("🕐 Testing RTC0 frequency for ADC timing validation...");
+        ret = juxta_adc_test_rtc0_frequency();
+        if (ret < 0)
+        {
+            LOG_ERR("❌ RTC0 frequency test failed - ADC duration may be inaccurate");
+        }
+
+        /* ADC timing test removed - can be called manually if needed */
+        /* ret = juxta_adc_test_timing(1000); */
     }
 
     LOG_INF("✅ Hardware verification complete (FRAM + LIS2DH + ADC)");
@@ -2087,44 +2099,44 @@ int main(void)
         k_timer_start(&state_timer, K_NO_WAIT, K_NO_WAIT);
     }
 
-    // Initialize watchdog timer
-    if (!device_is_ready(wdt))
-    {
-        LOG_ERR("Watchdog device not ready");
-        return -ENODEV;
-    }
+    // Initialize watchdog timer - COMMENTED OUT (not hardened)
+    // if (!device_is_ready(wdt))
+    // {
+    //     LOG_ERR("Watchdog device not ready");
+    //     return -ENODEV;
+    // }
 
-    struct wdt_timeout_cfg wdt_config = {
-        .window = {
-            .min = 0,
-            .max = WDT_TIMEOUT_MS,
-        },
-        .callback = NULL,
-        .flags = WDT_FLAG_RESET_SOC,
-    };
+    // struct wdt_timeout_cfg wdt_config = {
+    //     .window = {
+    //         .min = 0,
+    //         .max = WDT_TIMEOUT_MS,
+    //     },
+    //     .callback = NULL,
+    //     .flags = WDT_FLAG_RESET_SOC,
+    // };
 
-    wdt_channel_id = wdt_install_timeout(wdt, &wdt_config);
-    if (wdt_channel_id < 0)
-    {
-        LOG_ERR("Failed to install watchdog timeout: %d", wdt_channel_id);
-        return wdt_channel_id;
-    }
+    // wdt_channel_id = wdt_install_timeout(wdt, &wdt_config);
+    // if (wdt_channel_id < 0)
+    // {
+    //     LOG_ERR("Failed to install watchdog timeout: %d", wdt_channel_id);
+    //     return wdt_channel_id;
+    // }
 
-    int setup_err = wdt_setup(wdt, 0);
-    if (setup_err < 0)
-    {
-        LOG_ERR("Failed to setup watchdog: %d", setup_err);
-        return setup_err;
-    }
+    // int setup_err = wdt_setup(wdt, 0);
+    // if (setup_err < 0)
+    // {
+    //     LOG_ERR("Failed to setup watchdog: %d", setup_err);
+    //     return setup_err;
+    // }
 
-    LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
+    // LOG_INF("🛡️ Watchdog timer initialized (30s timeout)");
 
-    /* Set up BLE service watchdog feeding */
-    juxta_ble_set_watchdog_channel(wdt_channel_id);
+    /* Set up BLE service watchdog feeding - COMMENTED OUT */
+    // juxta_ble_set_watchdog_channel(wdt_channel_id);
 
-    /* Start watchdog feed timer immediately after watchdog initialization */
-    k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
-    LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
+    /* Start watchdog feed timer immediately after watchdog initialization - COMMENTED OUT */
+    // k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
+    // LOG_INF("🛡️ Watchdog feed timer started (5s intervals)");
 
     uint32_t heartbeat_counter = 0;
     while (1)

@@ -97,7 +97,7 @@ extern "C"
      *
      * @param channel_id Watchdog channel ID from main.c
      */
-    void juxta_ble_set_watchdog_channel(int channel_id);
+    // void juxta_ble_set_watchdog_channel(int channel_id); /* COMMENTED OUT - watchdog not hardened */
 
     /**
      * @brief Trigger timing update callback (called when settings change)

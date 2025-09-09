@@ -67,6 +67,9 @@ extern "C"
 #define JUXTA_FRAMFS_ADC_EVENT_PERI_EVENT 0x01   /* Peri-event waveform */
 #define JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT 0x02 /* Single event (peaks only) */
 
+/* ADC record header size */
+#define JUXTA_FRAMFS_ADC_HEADER_SIZE 13 /* 12 bytes original + 1 byte event type */
+
 /* Record type codes */
 #define JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY 0x00
 #define JUXTA_FRAMFS_RECORD_TYPE_DEVICE_MIN 0x01 /* 1 device */
