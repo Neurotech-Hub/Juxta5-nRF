@@ -413,6 +413,45 @@ void juxta_ble_timing_update_trigger(void)
     }
 }
 
+/**
+ * @brief Trigger ADC configuration update when ADC settings change
+ * Called from BLE service when ADC configuration is updated
+ */
+void juxta_ble_adc_config_update_trigger(void)
+{
+    LOG_INF("📊 ADC configuration update triggered");
+
+    /* Get new ADC configuration */
+    struct juxta_framfs_adc_config adc_config;
+    if (juxta_framfs_get_adc_config(&framfs_ctx, &adc_config) == 0)
+    {
+        LOG_INF("📊 New ADC config: mode=%d, threshold=%u mV, buffer=%u, debounce=%u ms, peaks_only=%s",
+                adc_config.mode, (unsigned)adc_config.threshold_mv, adc_config.buffer_size,
+                (unsigned)adc_config.debounce_ms, adc_config.output_peaks_only ? "true" : "false");
+
+        /* Update ADC timer interval if in ADC_ONLY mode and using timer mode */
+        if (current_mode == OPERATING_MODE_ADC_ONLY &&
+            adc_config.mode == JUXTA_FRAMFS_ADC_MODE_TIMER_BURST)
+        {
+            /* Convert debounce_ms to seconds for timer */
+            uint32_t interval_seconds = adc_config.debounce_ms / 1000;
+            if (interval_seconds < 1)
+            {
+                interval_seconds = 1; /* Minimum 1 second */
+            }
+
+            /* Restart ADC timer with new interval */
+            k_timer_stop(&adc_timer);
+            k_timer_start(&adc_timer, K_SECONDS(interval_seconds), K_SECONDS(interval_seconds));
+            LOG_INF("📊 ADC timer updated: %u second intervals", interval_seconds);
+        }
+    }
+    else
+    {
+        LOG_ERR("📊 Failed to get updated ADC configuration");
+    }
+}
+
 static void init_randomization(void)
 {
     LOG_INF("🎲 Randomization enabled for state machine timing");
@@ -505,10 +544,8 @@ static void adc_work_handler(struct k_work *work)
         if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_TIMER_BURST)
         {
             /* Timer burst mode - store all samples */
-            ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
-                                                     JUXTA_FRAMFS_ADC_EVENT_TIMER_BURST,
-                                                     scaled_samples, (uint16_t)count, duration_us,
-                                                     0, 0); /* No peaks for timer burst */
+            ret = juxta_framfs_append_adc_burst_data(&time_ctx, unix_timestamp, microsecond_offset,
+                                                     scaled_samples, (uint16_t)count, duration_us);
         }
         else if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT)
         {
@@ -618,6 +655,10 @@ static void juxta_log_simple(uint8_t type)
 }
 
 /* Wrapper to provide YYMMDD date for framfs time API using vitals */
+static uint32_t juxta_vitals_get_file_date_wrapper(void)
+{
+    return juxta_vitals_get_file_date(&vitals_ctx);
+}
 
 static void setup_dynamic_adv_name(void)
 {
@@ -1133,8 +1174,13 @@ static void connected(struct bt_conn *conn, uint8_t err)
     /* Disable watchdog during BLE operations to prevent resets during file transfers */
     if (wdt && wdt_channel_id >= 0)
     {
+        LOG_INF("🛡️ Disabling watchdog during BLE connection (channel %d)", wdt_channel_id);
         k_timer_stop(&wdt_feed_timer);
         LOG_INF("🛡️ Watchdog feed timer stopped during BLE connection");
+    }
+    else
+    {
+        LOG_WRN("🛡️ Cannot disable watchdog: wdt=%p, channel_id=%d", wdt, wdt_channel_id);
     }
 
     // Stop any ongoing advertising or scanning (guarded)
@@ -1163,8 +1209,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     /* Re-enable watchdog after BLE operations complete */
     if (wdt && wdt_channel_id >= 0)
     {
+        LOG_INF("🛡️ Re-enabling watchdog after BLE disconnection (channel %d)", wdt_channel_id);
         k_timer_start(&wdt_feed_timer, K_SECONDS(5), K_SECONDS(5));
         LOG_INF("🛡️ Watchdog feed timer restarted after BLE disconnection");
+    }
+    else
+    {
+        LOG_WRN("🛡️ Cannot restart watchdog: wdt=%p, channel_id=%d", wdt, wdt_channel_id);
     }
 
     /* Notify BLE service of disconnection */
@@ -1893,8 +1944,14 @@ int main(void)
     /* Link vitals context to BLE service for timestamp synchronization */
     juxta_ble_set_vitals_context(&vitals_ctx);
 
-    /* Skip time-aware wrapper - use framfs_ctx directly for ADC data */
-    LOG_INF("📁 Using single framfs context for both ADC and file transfer");
+    /* Initialize time-aware wrapper for compatibility with existing code */
+    LOG_INF("📁 Initializing time-aware file system...");
+    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
+    if (ret < 0)
+    {
+        LOG_ERR("Time-aware framfs init failed: %d", ret);
+        return ret;
+    }
 
     init_randomization();
     k_work_init(&state_work, state_work_handler);

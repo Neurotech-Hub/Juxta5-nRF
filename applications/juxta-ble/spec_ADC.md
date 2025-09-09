@@ -211,29 +211,84 @@ CONFIG_ADC_NRFX_SAADC_OPTIMIZED_MODE=y
 
 ## Configuration
 
-### ADC Mode Configuration
-```c
-typedef enum {
-    ADC_MODE_TIMER_BURST = 0,    // Current timer-based bursts
-    ADC_MODE_THRESHOLD_EVENT = 1 // Threshold-based event detection
-} adc_mode_t;
+### ADC Mode Selection via BLE
 
-typedef struct {
-    adc_mode_t mode;
-    uint32_t threshold_mv;       // Threshold in millivolts (0 = always trigger)
-    uint16_t buffer_size;        // Buffer size (200 for peaks, 1000+ for waveform)
-    uint32_t debounce_ms;        // Debounce time between events
-    bool output_peaks_only;      // true = peaks only, false = full waveform
-} adc_config_t;
+ADC modes are configured via the Gateway Characteristic using JSON commands. The configuration is stored in FRAMFS and persists across device resets.
+
+#### BLE Configuration Commands
+```json
+{
+  "adcMode": 1,
+  "adcThreshold": 100,
+  "adcBufferSize": 200,
+  "adcDebounce": 1000,
+  "adcPeaksOnly": true
+}
 ```
 
-### Implementation
-The threshold-based event mode uses a unified implementation with configurable parameters:
-- **Single event mode**: `buffer_size=200`, `output_peaks_only=true`
-- **Peri-event mode**: `buffer_size=1000+`, `output_peaks_only=false`  
-- **Timer mode**: `threshold_mv=0`, `debounce_ms=5000`, `output_peaks_only=false`
+#### Configuration Parameters
+- **adcMode**: 0 (timer burst) or 1 (threshold event)
+- **adcThreshold**: Threshold in millivolts (0-2000, 0 = always trigger)
+- **adcBufferSize**: Buffer size in samples (1-4000)
+- **adcDebounce**: Debounce time in milliseconds (100-60000)
+- **adcPeaksOnly**: true (peaks only) or false (full waveform)
 
-See `juxta_adc` library for complete API reference.
+#### Runtime Configuration Changes
+- **Immediate effect**: Configuration changes apply without device restart
+- **Timer updates**: ADC timer interval automatically adjusts to debounce setting
+- **Persistent storage**: Settings saved to FRAMFS and survive power cycles
+
+### ADC Mode Configuration Examples
+
+#### Timer Mode (Default)
+```json
+{"adcMode":0,"adcThreshold":0,"adcBufferSize":1000,"adcDebounce":5000,"adcPeaksOnly":false}
+```
+- **Behavior**: 1000 samples every 5 seconds (current default)
+- **Use case**: Baseline monitoring and system validation
+
+#### Single Event Mode
+```json
+{"adcMode":1,"adcThreshold":100,"adcBufferSize":200,"adcDebounce":1000,"adcPeaksOnly":true}
+```
+- **Behavior**: Detects 100mV threshold, stores peaks only, 1-second debounce
+- **Storage**: 16 bytes per event (12-byte header + 4-byte event data)
+- **Use case**: High-frequency event counting with minimal storage
+
+#### Peri-Event Mode
+```json
+{"adcMode":1,"adcThreshold":100,"adcBufferSize":1000,"adcDebounce":1000,"adcPeaksOnly":false}
+```
+- **Behavior**: Detects 100mV threshold, stores full waveform, 1-second debounce
+- **Storage**: 1012 bytes per event (12-byte header + 1000 samples)
+- **Use case**: Detailed pulse shape analysis and debugging
+
+#### High-Sensitivity Detection
+```json
+{"adcMode":1,"adcThreshold":50,"adcBufferSize":1,"adcDebounce":100,"adcPeaksOnly":true}
+```
+- **Behavior**: Very sensitive (50mV), single-point detection, 100ms debounce
+- **Storage**: 16 bytes per event
+- **Use case**: Maximum event detection sensitivity
+
+### Node Response
+The Node Characteristic returns current ADC configuration:
+```json
+{
+  "upload_path": "/TEST",
+  "firmware_version": "1.0.0",
+  "battery_level": 85,
+  "device_id": "JX_123456",
+  "operating_mode": 1,
+  "adc_config": {
+    "mode": 1,
+    "threshold": 100,
+    "buffer_size": 200,
+    "debounce": 1000,
+    "peaks_only": true
+  }
+}
+```
 
 ## Use Cases
 

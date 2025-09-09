@@ -6,10 +6,15 @@
  */
 
 #include <juxta_fram/fram.h>
+#include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(juxta_fram, CONFIG_JUXTA_FRAM_LOG_LEVEL);
+
+/* Maximum transfer size to avoid stack overflow */
+#define MAX_FRAM_TRANSFER_SIZE 512
 
 /* Internal helper functions */
 static int fram_send_command(struct juxta_fram_device *fram_dev, uint8_t cmd);
@@ -194,36 +199,47 @@ int juxta_fram_write(struct juxta_fram_device *fram_dev,
         return JUXTA_FRAM_ERROR_ADDR;
     }
 
-    /* Send Write Enable command */
-    ret = fram_write_enable(fram_dev);
-    if (ret < 0)
+    /* Use static buffer to avoid stack overflow with large transfers */
+    static uint8_t write_tx_buf[4 + MAX_FRAM_TRANSFER_SIZE]; /* cmd + 3-byte address + data */
+
+    /* Handle large transfers by chunking */
+    size_t bytes_written = 0;
+    while (bytes_written < length)
     {
-        return ret;
-    }
+        size_t chunk_size = MIN(length - bytes_written, MAX_FRAM_TRANSFER_SIZE);
+        uint32_t chunk_address = address + bytes_written;
 
-    /* Small delay between commands */
-    k_usleep(30);
+        /* Send Write Enable command for each chunk */
+        ret = fram_write_enable(fram_dev);
+        if (ret < 0)
+        {
+            return ret;
+        }
 
-    /* Prepare write command with address and data */
-    uint8_t tx_buf[4 + length]; /* cmd + 3-byte address + data */
-    tx_buf[0] = JUXTA_FRAM_CMD_WRITE;
-    tx_buf[1] = (address >> 16) & 0xFF; /* Address byte 2 (MSB) */
-    tx_buf[2] = (address >> 8) & 0xFF;  /* Address byte 1 */
-    tx_buf[3] = address & 0xFF;         /* Address byte 0 (LSB) */
-    memcpy(&tx_buf[4], data, length);
+        /* Small delay between commands */
+        k_usleep(30);
 
-    const struct spi_buf tx_buf_desc = {
-        .buf = tx_buf,
-        .len = sizeof(tx_buf)};
-    const struct spi_buf_set tx = {
-        .buffers = &tx_buf_desc,
-        .count = 1};
+        write_tx_buf[0] = JUXTA_FRAM_CMD_WRITE;
+        write_tx_buf[1] = (chunk_address >> 16) & 0xFF; /* Address byte 2 (MSB) */
+        write_tx_buf[2] = (chunk_address >> 8) & 0xFF;  /* Address byte 1 */
+        write_tx_buf[3] = chunk_address & 0xFF;         /* Address byte 0 (LSB) */
+        memcpy(&write_tx_buf[4], data + bytes_written, chunk_size);
 
-    ret = spi_write(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx);
-    if (ret < 0)
-    {
-        LOG_ERR("Failed to write FRAM data: %d", ret);
-        return JUXTA_FRAM_ERROR_SPI;
+        const struct spi_buf tx_buf_desc = {
+            .buf = write_tx_buf,
+            .len = 4 + chunk_size};
+        const struct spi_buf_set tx = {
+            .buffers = &tx_buf_desc,
+            .count = 1};
+
+        ret = spi_write(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to write FRAM data chunk: %d", ret);
+            return JUXTA_FRAM_ERROR_SPI;
+        }
+
+        bytes_written += chunk_size;
     }
 
     LOG_DBG("Wrote %zu bytes to FRAM address 0x%06X", length, address);
@@ -248,38 +264,47 @@ int juxta_fram_read(struct juxta_fram_device *fram_dev,
         return JUXTA_FRAM_ERROR_ADDR;
     }
 
-    /* Prepare read command with address */
-    uint8_t tx_buf[4 + length]; /* cmd + 3-byte address + dummy bytes */
-    uint8_t rx_buf[4 + length];
+    /* Use static buffers to avoid stack overflow with large transfers */
+    static uint8_t read_tx_buf[4 + MAX_FRAM_TRANSFER_SIZE]; /* cmd + 3-byte address + dummy bytes */
+    static uint8_t read_rx_buf[4 + MAX_FRAM_TRANSFER_SIZE];
 
-    tx_buf[0] = JUXTA_FRAM_CMD_READ;
-    tx_buf[1] = (address >> 16) & 0xFF; /* Address byte 2 (MSB) */
-    tx_buf[2] = (address >> 8) & 0xFF;  /* Address byte 1 */
-    tx_buf[3] = address & 0xFF;         /* Address byte 0 (LSB) */
-    memset(&tx_buf[4], 0x00, length);   /* Dummy bytes for data reception */
-
-    const struct spi_buf tx_buf_desc = {
-        .buf = tx_buf,
-        .len = sizeof(tx_buf)};
-    const struct spi_buf rx_buf_desc = {
-        .buf = rx_buf,
-        .len = sizeof(rx_buf)};
-    const struct spi_buf_set tx = {
-        .buffers = &tx_buf_desc,
-        .count = 1};
-    const struct spi_buf_set rx = {
-        .buffers = &rx_buf_desc,
-        .count = 1};
-
-    ret = spi_transceive(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx, &rx);
-    if (ret < 0)
+    /* Handle large transfers by chunking */
+    size_t bytes_read = 0;
+    while (bytes_read < length)
     {
-        LOG_ERR("Failed to read FRAM data: %d", ret);
-        return JUXTA_FRAM_ERROR_SPI;
-    }
+        size_t chunk_size = MIN(length - bytes_read, MAX_FRAM_TRANSFER_SIZE);
+        uint32_t chunk_address = address + bytes_read;
 
-    /* Copy received data (skip command and address bytes) */
-    memcpy(data, &rx_buf[4], length);
+        read_tx_buf[0] = JUXTA_FRAM_CMD_READ;
+        read_tx_buf[1] = (chunk_address >> 16) & 0xFF; /* Address byte 2 (MSB) */
+        read_tx_buf[2] = (chunk_address >> 8) & 0xFF;  /* Address byte 1 */
+        read_tx_buf[3] = chunk_address & 0xFF;         /* Address byte 0 (LSB) */
+        memset(&read_tx_buf[4], 0x00, chunk_size);     /* Dummy bytes for data reception */
+
+        const struct spi_buf tx_buf_desc = {
+            .buf = read_tx_buf,
+            .len = 4 + chunk_size};
+        const struct spi_buf rx_buf_desc = {
+            .buf = read_rx_buf,
+            .len = 4 + chunk_size};
+        const struct spi_buf_set tx = {
+            .buffers = &tx_buf_desc,
+            .count = 1};
+        const struct spi_buf_set rx = {
+            .buffers = &rx_buf_desc,
+            .count = 1};
+
+        ret = spi_transceive(fram_dev->spi_dev, &fram_dev->spi_cfg, &tx, &rx);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to read FRAM data chunk: %d", ret);
+            return JUXTA_FRAM_ERROR_SPI;
+        }
+
+        /* Copy received data (skip command and address bytes) */
+        memcpy(data + bytes_read, &read_rx_buf[4], chunk_size);
+        bytes_read += chunk_size;
+    }
 
     LOG_DBG("Read %zu bytes from FRAM address 0x%06X", length, address);
     return JUXTA_FRAM_OK;

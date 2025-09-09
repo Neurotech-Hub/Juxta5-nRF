@@ -368,10 +368,27 @@ static int generate_node_response(char *buffer, size_t buffer_size)
         }
     }
 
-    /* Generate JSON response */
+    /* Get ADC configuration */
+    struct juxta_framfs_adc_config adc_config = {0};
+    if (framfs_ctx && framfs_ctx->initialized)
+    {
+        if (juxta_framfs_get_adc_config(framfs_ctx, &adc_config) != 0)
+        {
+            /* Use defaults if read fails */
+            adc_config.mode = JUXTA_FRAMFS_ADC_MODE_TIMER_BURST;
+            adc_config.threshold_mv = 0;
+            adc_config.buffer_size = 1000;
+            adc_config.debounce_ms = 5000;
+            adc_config.output_peaks_only = false;
+        }
+    }
+
+    /* Generate JSON response with ADC configuration */
     int written = snprintf(buffer, buffer_size,
-                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"operating_mode\":%d,\"alert\":\"%s\"}",
-                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, operating_mode, alert);
+                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"operating_mode\":%d,\"alert\":\"%s\",\"adc_config\":{\"mode\":%d,\"threshold\":%u,\"buffer_size\":%u,\"debounce\":%u,\"peaks_only\":%s}}",
+                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, operating_mode, alert,
+                           adc_config.mode, (unsigned)adc_config.threshold_mv, adc_config.buffer_size,
+                           (unsigned)adc_config.debounce_ms, adc_config.output_peaks_only ? "true" : "false");
 
     if (written >= buffer_size)
     {
@@ -622,6 +639,72 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         }
     }
 
+    /* Look for ADC configuration commands */
+    p = strstr(json_cmd, "\"adcMode\":");
+    if (p)
+    {
+        uint8_t adc_mode;
+        if (sscanf(p, "\"adcMode\":%hhu", &adc_mode) == 1)
+        {
+            LOG_INF("🎛️ ADC mode command: %d", adc_mode);
+            settings->adc_config.mode = adc_mode;
+            settings_changed = true;
+        }
+    }
+
+    p = strstr(json_cmd, "\"adcThreshold\":");
+    if (p)
+    {
+        uint32_t adc_threshold;
+        if (sscanf(p, "\"adcThreshold\":%u", &adc_threshold) == 1)
+        {
+            LOG_INF("🎛️ ADC threshold command: %u mV", adc_threshold);
+            settings->adc_config.threshold_mv = adc_threshold;
+            settings_changed = true;
+        }
+    }
+
+    p = strstr(json_cmd, "\"adcBufferSize\":");
+    if (p)
+    {
+        uint16_t adc_buffer_size;
+        if (sscanf(p, "\"adcBufferSize\":%hu", &adc_buffer_size) == 1)
+        {
+            LOG_INF("🎛️ ADC buffer size command: %u", adc_buffer_size);
+            settings->adc_config.buffer_size = adc_buffer_size;
+            settings_changed = true;
+        }
+    }
+
+    p = strstr(json_cmd, "\"adcDebounce\":");
+    if (p)
+    {
+        uint32_t adc_debounce;
+        if (sscanf(p, "\"adcDebounce\":%u", &adc_debounce) == 1)
+        {
+            LOG_INF("🎛️ ADC debounce command: %u ms", adc_debounce);
+            settings->adc_config.debounce_ms = adc_debounce;
+            settings_changed = true;
+        }
+    }
+
+    p = strstr(json_cmd, "\"adcPeaksOnly\":");
+    if (p)
+    {
+        if (strstr(p, "\"adcPeaksOnly\":true") || strstr(p, "\"adcPeaksOnly\": true"))
+        {
+            LOG_INF("🎛️ ADC peaks only: true");
+            settings->adc_config.output_peaks_only = true;
+            settings_changed = true;
+        }
+        else if (strstr(p, "\"adcPeaksOnly\":false") || strstr(p, "\"adcPeaksOnly\": false"))
+        {
+            LOG_INF("🎛️ ADC peaks only: false");
+            settings->adc_config.output_peaks_only = false;
+            settings_changed = true;
+        }
+    }
+
     if (settings_changed)
     {
         LOG_INF("🎛️ Settings updated - saving to framfs");
@@ -639,6 +722,9 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
 
                 /* Trigger timing update in main.c */
                 juxta_ble_timing_update_trigger();
+
+                /* Trigger ADC configuration update if ADC settings changed */
+                juxta_ble_adc_config_update_trigger();
 
                 return 0;
             }
@@ -877,35 +963,20 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         return -1;
     }
 
-    /* Calculate optimal chunk size based on MTU */
-    size_t max_chunk_size = current_mtu - 3; /* Account for ATT header */
-    size_t remaining = current_transfer_file_size - current_transfer_offset;
-
-    /* Use MTU-based chunk size with conservative buffer limit */
-    /* MTU 527 negotiated, but ACL buffers limited to 251 bytes */
-    /* Use smaller of: MTU-3 or buffer-safe limit */
-    size_t buffer_safe_limit = 240; /* Conservative limit within 251-byte ACL buffers */
-    size_t chunk_size = MIN(MIN(MIN(buffer_size, max_chunk_size), remaining), buffer_safe_limit);
-
-    /* Safety check: ensure chunk size doesn't exceed buffer capacity */
-    if (chunk_size > buffer_size)
-    {
-        LOG_ERR("📁 Chunk size (%zu) exceeds buffer size (%zu)", chunk_size, buffer_size);
-        return -EINVAL;
-    }
-
-    LOG_DBG("📁 Chunk calculation: MTU=%d, max_chunk=%zu, remaining=%zu, final_chunk=%zu, buffer_size=%zu",
-            current_mtu, max_chunk_size, remaining, chunk_size, buffer_size);
-
-    if (chunk_size == 0)
-    {
-        *bytes_read = 0;
-        return 0; /* Transfer complete */
-    }
-
     /* Check if this is MAC table transfer */
     if (strcmp(current_transfer_filename, "MACIDX") == 0)
     {
+        /* Calculate remaining bytes for MAC table */
+        size_t remaining = current_transfer_file_size - current_transfer_offset;
+        if (remaining == 0)
+        {
+            *bytes_read = 0;
+            return 0; /* Transfer complete */
+        }
+
+        /* Use conservative 240-byte chunks for MAC table */
+        size_t chunk_size = MIN(MIN(buffer_size, 240), remaining);
+
         /* Read MAC table chunk */
         int ret = juxta_framfs_read_mac_table_data(framfs_ctx, current_transfer_offset,
                                                    buffer, chunk_size);
@@ -927,25 +998,33 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
         return 0;
     }
 
-    /* Read file chunk for regular files */
-    LOG_INF("📁 Reading file chunk: %s, offset=%u, size=%zu",
-            current_transfer_filename, current_transfer_offset, chunk_size);
-
-    /* Limit chunk size for hex conversion (each byte becomes 2 hex chars) */
-    size_t binary_chunk_size = chunk_size / 2; /* Half size to account for hex expansion */
-    uint8_t binary_buffer[512];                /* Temporary buffer for binary data */
-
-    if (binary_chunk_size > sizeof(binary_buffer))
+    /* For regular files: calculate remaining BINARY bytes */
+    size_t remaining_binary_bytes = current_transfer_file_size - current_transfer_offset;
+    if (remaining_binary_bytes == 0)
     {
-        binary_chunk_size = sizeof(binary_buffer);
+        *bytes_read = 0;
+        return 0; /* Transfer complete */
     }
 
-    /* Ensure we don't read past file boundary */
-    size_t remaining_bytes = current_transfer_file_size - current_transfer_offset;
-    if (binary_chunk_size > remaining_bytes)
+    /* Target 240-byte hex strings, so read 120 binary bytes */
+    size_t target_binary_chunk = 120; /* Will become 240 hex chars */
+    uint8_t binary_buffer[512];       /* Temporary buffer for binary data */
+
+    /* Limit binary chunk size to what's remaining and buffer capacity */
+    size_t binary_chunk_size = MIN(MIN(target_binary_chunk, remaining_binary_bytes), sizeof(binary_buffer));
+
+    LOG_DBG("📁 Chunk calculation: remaining_binary=%zu, target_binary=%zu, final_binary=%zu, will_be_hex=%zu",
+            remaining_binary_bytes, target_binary_chunk, binary_chunk_size, binary_chunk_size * 2);
+
+    /* Safety check: ensure hex output won't exceed buffer */
+    if (binary_chunk_size * 2 > buffer_size)
     {
-        binary_chunk_size = remaining_bytes;
+        LOG_ERR("📁 Hex output (%zu) would exceed buffer size (%zu)", binary_chunk_size * 2, buffer_size);
+        return -EINVAL;
     }
+
+    LOG_INF("📁 Reading file chunk: %s, offset=%u, binary_size=%zu (will be %zu hex chars)",
+            current_transfer_filename, current_transfer_offset, binary_chunk_size, binary_chunk_size * 2);
 
     int ret = juxta_framfs_read(framfs_ctx, current_transfer_filename,
                                 current_transfer_offset, binary_buffer, binary_chunk_size);
@@ -955,6 +1034,13 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
     {
         LOG_ERR("📁 File read failed: %d", ret);
         return handle_file_error(ret, "read_file_chunk", current_transfer_filename);
+    }
+
+    if (ret == 0)
+    {
+        /* No more data to read */
+        *bytes_read = 0;
+        return 0;
     }
 
     /* Convert binary data to hex string */
@@ -976,7 +1062,7 @@ static int get_file_transfer_chunk(uint8_t *buffer, size_t buffer_size, size_t *
     feed_watchdog();
 
     double progress = (double)current_transfer_offset / current_transfer_file_size * 100.0;
-    LOG_DBG("📁 File transfer chunk: offset=%u/%d, bytes=%zu, progress=%.1f%%",
+    LOG_DBG("📁 File transfer chunk: offset=%u/%d, hex_bytes=%zu, progress=%.1f%%",
             current_transfer_offset, current_transfer_file_size, *bytes_read, progress);
     return 0;
 }

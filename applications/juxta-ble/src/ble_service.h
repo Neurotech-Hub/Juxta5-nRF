@@ -107,6 +107,12 @@ extern "C"
     extern void juxta_ble_timing_update_trigger(void);
 
     /**
+     * @brief Trigger ADC configuration update when ADC settings change
+     * This function should be implemented in main.c to handle ADC config updates
+     */
+    extern void juxta_ble_adc_config_update_trigger(void);
+
+    /**
      * @brief Connection established callback
      *
      * @param conn Bluetooth connection handle
