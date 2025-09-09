@@ -484,61 +484,19 @@ static void adc_work_handler(struct k_work *work)
             scaled_samples[i] = (uint8_t)scaled;
         }
 
-        /* Get current date for filename */
-        uint32_t current_date = juxta_vitals_get_file_date_yymmdd(&vitals_ctx);
-        char current_filename[8];
-        snprintf(current_filename, sizeof(current_filename), "%06u", current_date);
-
-        /* Ensure correct file is active - create if doesn't exist */
-        ret = juxta_framfs_create_active(&framfs_ctx, current_filename, JUXTA_FRAMFS_TYPE_ADC_BURST);
-        if (ret < 0 && ret != JUXTA_FRAMFS_ERROR_EXISTS)
+        /* Use enhanced ADC event function with timer burst type */
+        ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
+                                                 JUXTA_FRAMFS_ADC_EVENT_TIMER_BURST,
+                                                 scaled_samples, (uint16_t)count, duration_us,
+                                                 0, 0); /* No peaks for timer burst */
+        if (ret == 0)
         {
-            LOG_ERR("📊 Failed to create ADC file: %d", ret);
-            return;
+            LOG_INF("📊 ADC burst saved: %u samples, %u us", (unsigned)count, (unsigned)duration_us);
         }
-
-        /* Create ADC burst record */
-        uint8_t header[12];
-        header[0] = (unix_timestamp >> 24) & 0xFF;
-        header[1] = (unix_timestamp >> 16) & 0xFF;
-        header[2] = (unix_timestamp >> 8) & 0xFF;
-        header[3] = unix_timestamp & 0xFF;
-        header[4] = (microsecond_offset >> 24) & 0xFF;
-        header[5] = (microsecond_offset >> 16) & 0xFF;
-        header[6] = (microsecond_offset >> 8) & 0xFF;
-        header[7] = microsecond_offset & 0xFF;
-        header[8] = (count >> 8) & 0xFF;
-        header[9] = count & 0xFF;
-        header[10] = (duration_us >> 8) & 0xFF;
-        header[11] = duration_us & 0xFF;
-
-        /* Write header first */
-        ret = juxta_framfs_append(&framfs_ctx, header, 12);
-        if (ret < 0)
+        else
         {
-            LOG_ERR("📊 Failed to write ADC header: %d", ret);
-            return;
+            LOG_ERR("📊 Failed to record ADC burst: %d", ret);
         }
-
-        /* Write samples */
-        LOG_INF("📊 About to write %u sample bytes to FRAMFS", (unsigned)count);
-        ret = juxta_framfs_append(&framfs_ctx, scaled_samples, count);
-        if (ret < 0)
-        {
-            LOG_ERR("📊 Failed to write ADC samples: %d", ret);
-            return;
-        }
-        LOG_INF("📊 Successfully wrote %u sample bytes to FRAMFS", (unsigned)count);
-
-        /* Check final file state */
-        struct juxta_framfs_entry final_entry;
-        if (juxta_framfs_get_file_info(&framfs_ctx, current_filename, &final_entry) == 0)
-        {
-            LOG_INF("📊 Final file state: start_addr=0x%06X, length=%d, total_record_size=%u",
-                    (unsigned)final_entry.start_addr, final_entry.length, (unsigned)(12 + count));
-        }
-
-        LOG_INF("📊 ADC burst saved: %u samples, %u us", (unsigned)count, (unsigned)duration_us);
     }
     else
     {

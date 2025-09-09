@@ -1887,4 +1887,167 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
     return JUXTA_FRAMFS_OK;
 }
 
+int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
+                                       uint32_t unix_timestamp,
+                                       uint32_t microsecond_offset,
+                                       uint8_t event_type,
+                                       const uint8_t *samples,
+                                       uint16_t sample_count,
+                                       uint32_t duration_us,
+                                       uint8_t peak_positive,
+                                       uint8_t peak_negative)
+{
+    if (!ctx || !ctx->fs_ctx || !ctx->fs_ctx->initialized)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Validate parameters based on event type */
+    if (event_type == JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT)
+    {
+        /* Single event mode: no samples, just peaks */
+        if (samples != NULL || sample_count != 0)
+        {
+            LOG_WRN("Single event mode should not have samples");
+            return JUXTA_FRAMFS_ERROR;
+        }
+    }
+    else
+    {
+        /* Timer burst or peri-event: must have samples */
+        if (!samples || sample_count == 0)
+        {
+            LOG_WRN("Timer burst/peri-event mode requires samples");
+            return JUXTA_FRAMFS_ERROR;
+        }
+    }
+
+    /* Ensure correct file is active */
+    int ret = juxta_framfs_ensure_current_file(ctx);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Check active file */
+    if (ctx->fs_ctx->active_file_index < 0)
+    {
+        LOG_WRN("No active file for append operation");
+        return JUXTA_FRAMFS_ERROR_NO_ACTIVE;
+    }
+
+    /* Read current active file entry */
+    struct juxta_framfs_entry entry;
+    ret = framfs_read_entry(ctx->fs_ctx, ctx->fs_ctx->active_file_index, &entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read active file entry: %d", ret);
+        return ret;
+    }
+
+    /* Verify it's still active */
+    if (!(entry.flags & JUXTA_FRAMFS_FLAG_ACTIVE))
+    {
+        LOG_WRN("File is not active: %s", entry.filename);
+        return JUXTA_FRAMFS_ERROR_READ_ONLY;
+    }
+
+    /* Calculate record size based on event type */
+    uint32_t record_size;
+    if (event_type == JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT)
+    {
+        record_size = 16; /* 12-byte header + 1 event type + 2 peaks + 1 reserved */
+    }
+    else
+    {
+        record_size = 12 + sample_count; /* 12-byte header + samples */
+    }
+
+    uint32_t write_addr = entry.start_addr + entry.length;
+    if (write_addr + record_size > JUXTA_FRAM_SIZE_BYTES)
+    {
+        LOG_WRN("ADC event would exceed FRAM size");
+        return JUXTA_FRAMFS_ERROR_FULL;
+    }
+
+    LOG_DBG("📊 FRAMFS: Storing ADC event - type=%u, timestamp=%u, μs_offset=%u, samples=%u, duration=%u us",
+            event_type, (unsigned)unix_timestamp, (unsigned)microsecond_offset,
+            (unsigned)sample_count, (unsigned)duration_us);
+
+    /* Prepare header (12 bytes) - Same format for all event types */
+    uint8_t header[12];
+    header[0] = (unix_timestamp >> 24) & 0xFF;
+    header[1] = (unix_timestamp >> 16) & 0xFF;
+    header[2] = (unix_timestamp >> 8) & 0xFF;
+    header[3] = unix_timestamp & 0xFF;
+    header[4] = (microsecond_offset >> 24) & 0xFF;
+    header[5] = (microsecond_offset >> 16) & 0xFF;
+    header[6] = (microsecond_offset >> 8) & 0xFF;
+    header[7] = microsecond_offset & 0xFF;
+    header[8] = (sample_count >> 8) & 0xFF;
+    header[9] = sample_count & 0xFF;
+    header[10] = (duration_us >> 8) & 0xFF;
+    header[11] = duration_us & 0xFF;
+
+    /* Write header to FRAM */
+    ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr, header, 12);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to write ADC event header to FRAM: %d", ret);
+        return ret;
+    }
+
+    /* Write event-specific data */
+    if (event_type == JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT)
+    {
+        /* Write event type + peaks + reserved */
+        uint8_t event_data[4];
+        event_data[0] = event_type;
+        event_data[1] = peak_positive;
+        event_data[2] = peak_negative;
+        event_data[3] = 0; /* Reserved */
+
+        ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 12, event_data, 4);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to write ADC event data to FRAM: %d", ret);
+            return ret;
+        }
+    }
+    else
+    {
+        /* Write samples for timer burst or peri-event */
+        ret = juxta_fram_write(ctx->fs_ctx->fram_dev, write_addr + 12, samples, sample_count);
+        if (ret < 0)
+        {
+            LOG_ERR("Failed to write ADC samples to FRAM: %d", ret);
+            return ret;
+        }
+    }
+
+    /* Update entry with new length */
+    entry.length += record_size;
+    ret = framfs_write_entry(ctx->fs_ctx, ctx->fs_ctx->active_file_index, &entry);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to update file entry: %d", ret);
+        return ret;
+    }
+
+    /* Update header statistics */
+    ctx->fs_ctx->header.total_data_size += record_size;
+    ctx->fs_ctx->header.next_data_addr = write_addr + record_size;
+    ret = framfs_write_header(ctx->fs_ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to update header: %d", ret);
+        return ret;
+    }
+
+    LOG_DBG("Appended ADC event: type=%u, %d bytes to %s (total: %d bytes)",
+            event_type, record_size, entry.filename, entry.length);
+
+    return JUXTA_FRAMFS_OK;
+}
+
 /* Legacy compatibility functions removed for now - focus on primary API */

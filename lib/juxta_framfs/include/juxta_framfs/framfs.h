@@ -58,6 +58,15 @@ extern "C"
 #define JUXTA_FRAMFS_TYPE_ADC_BURST 0x03
 #define JUXTA_FRAMFS_TYPE_COMPRESSED 0x80 /* High bit = compressed */
 
+/* ADC mode definitions */
+#define JUXTA_FRAMFS_ADC_MODE_TIMER_BURST 0x00     /* Timer-based bursts (current) */
+#define JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT 0x01 /* Threshold-based event detection */
+
+/* ADC event types */
+#define JUXTA_FRAMFS_ADC_EVENT_TIMER_BURST 0x00  /* Timer-based burst */
+#define JUXTA_FRAMFS_ADC_EVENT_PERI_EVENT 0x01   /* Peri-event waveform */
+#define JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT 0x02 /* Single event (peaks only) */
+
 /* Record type codes */
 #define JUXTA_FRAMFS_RECORD_TYPE_NO_ACTIVITY 0x00
 #define JUXTA_FRAMFS_RECORD_TYPE_DEVICE_MIN 0x01 /* 1 device */
@@ -174,6 +183,20 @@ extern "C"
     {
         uint16_t minute; /* 0-1439 for full day */
         uint8_t type;    /* Record type */
+    } __packed;
+
+    /**
+     * @brief ADC configuration structure
+     *
+     * Used to configure ADC sampling modes
+     */
+    struct juxta_framfs_adc_config
+    {
+        uint8_t mode;           /* ADC mode (timer burst or threshold event) */
+        uint32_t threshold_mv;  /* Threshold in millivolts (0 = always trigger) */
+        uint16_t buffer_size;   /* Buffer size (200 for peaks, 1000+ for waveform) */
+        uint32_t debounce_ms;   /* Debounce time between events */
+        bool output_peaks_only; /* true = peaks only, false = full waveform */
     } __packed;
 
     /**
@@ -757,6 +780,32 @@ extern "C"
                                            const uint8_t *samples,
                                            uint16_t sample_count,
                                            uint32_t duration_us);
+
+    /**
+     * @brief Append ADC event with configurable format (ENHANCED API)
+     *
+     * Supports different event types: timer bursts, peri-events, single events
+     *
+     * @param ctx File system context
+     * @param unix_timestamp Unix timestamp (seconds since epoch)
+     * @param microsecond_offset Microsecond offset within current second (0-999999)
+     * @param event_type Event type (0x00=timer, 0x01=peri-event, 0x02=single)
+     * @param samples Array of 8-bit ADC samples (NULL for single events)
+     * @param sample_count Number of samples (0 for single events)
+     * @param duration_us Actual measured duration in microseconds
+     * @param peak_positive Peak positive amplitude (single events only)
+     * @param peak_negative Peak negative amplitude (single events only)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
+                                           uint32_t unix_timestamp,
+                                           uint32_t microsecond_offset,
+                                           uint8_t event_type,
+                                           const uint8_t *samples,
+                                           uint16_t sample_count,
+                                           uint32_t duration_us,
+                                           uint8_t peak_positive,
+                                           uint8_t peak_negative);
 
     /**
      * @brief Get current active filename
