@@ -455,8 +455,10 @@ void juxta_ble_adc_config_update_trigger(void)
                 (unsigned)adc_config.debounce_ms, adc_config.output_peaks_only ? "true" : "false");
 
         /* Update ADC timer interval if in ADC_ONLY mode and using timer mode */
+        /* Only update timer if hardware is verified and system is ready */
         if (current_mode == OPERATING_MODE_ADC_ONLY &&
-            adc_config.mode == JUXTA_FRAMFS_ADC_MODE_TIMER_BURST)
+            adc_config.mode == JUXTA_FRAMFS_ADC_MODE_TIMER_BURST &&
+            hardware_verified && state_system_ready && !ble_connected)
         {
             /* Convert debounce_ms to seconds for timer */
             uint32_t interval_seconds = adc_config.debounce_ms / 1000;
@@ -469,6 +471,10 @@ void juxta_ble_adc_config_update_trigger(void)
             k_timer_stop(&adc_timer);
             k_timer_start(&adc_timer, K_SECONDS(interval_seconds), K_SECONDS(interval_seconds));
             LOG_INF("📊 ADC timer updated: %u second intervals", interval_seconds);
+        }
+        else
+        {
+            LOG_DBG("📊 ADC timer update deferred - hardware not ready or BLE connected");
         }
     }
     else
