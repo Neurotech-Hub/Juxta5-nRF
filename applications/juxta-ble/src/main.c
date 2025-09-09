@@ -452,16 +452,33 @@ static void adc_work_handler(struct k_work *work)
         return;
     }
 
+    /* Get ADC configuration */
+    struct juxta_framfs_adc_config adc_config;
+    int config_ret = juxta_framfs_get_adc_config(&framfs_ctx, &adc_config);
+    if (config_ret < 0)
+    {
+        LOG_ERR("📊 Failed to get ADC config, using defaults");
+        /* Use default timer burst mode */
+        adc_config.mode = JUXTA_FRAMFS_ADC_MODE_TIMER_BURST;
+        adc_config.threshold_mv = 0;
+        adc_config.buffer_size = 1000;
+        adc_config.debounce_ms = 5000;
+        adc_config.output_peaks_only = false;
+    }
+
     // Trigger ADC burst sampling into static buffer
     int32_t *samples = adc_samples_buffer; // Use static buffer to avoid stack usage
     uint32_t actual_samples;
     uint32_t duration_us;
 
-    int ret = juxta_adc_burst_sample(samples, ADC_MAX_SAMPLES, &actual_samples, &duration_us);
+    /* Use configured buffer size (limited by static buffer) */
+    uint32_t max_samples = MIN(adc_config.buffer_size, ADC_MAX_SAMPLES);
+
+    int ret = juxta_adc_burst_sample(samples, max_samples, &actual_samples, &duration_us);
     if (ret == 0 && actual_samples > 0)
     {
-        LOG_DBG("📊 ADC work handler: received actual_samples=%u, duration=%u us",
-                (unsigned)actual_samples, (unsigned)duration_us);
+        LOG_DBG("📊 ADC work handler: mode=%d, actual_samples=%u, duration=%u us",
+                adc_config.mode, (unsigned)actual_samples, (unsigned)duration_us);
 
         // Get Unix timestamp and microsecond offset using the new vitals helper functions
         uint32_t unix_timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
@@ -469,7 +486,7 @@ static void adc_work_handler(struct k_work *work)
 
         // Convert int32_t samples to uint8_t for storage (scale appropriately) using static buffer
         uint8_t *scaled_samples = adc_scaled_buffer;
-        uint32_t count = (actual_samples > ADC_MAX_SAMPLES) ? ADC_MAX_SAMPLES : actual_samples;
+        uint32_t count = (actual_samples > max_samples) ? max_samples : actual_samples;
 
         LOG_DBG("📊 ADC work handler: using count=%u for storage", (unsigned)count);
         for (uint32_t i = 0; i < count; i++)
@@ -484,18 +501,84 @@ static void adc_work_handler(struct k_work *work)
             scaled_samples[i] = (uint8_t)scaled;
         }
 
-        /* Use enhanced ADC event function with timer burst type */
-        ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
-                                                 JUXTA_FRAMFS_ADC_EVENT_TIMER_BURST,
-                                                 scaled_samples, (uint16_t)count, duration_us,
-                                                 0, 0); /* No peaks for timer burst */
-        if (ret == 0)
+        /* Process based on ADC mode */
+        if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_TIMER_BURST)
         {
-            LOG_INF("📊 ADC burst saved: %u samples, %u us", (unsigned)count, (unsigned)duration_us);
+            /* Timer burst mode - store all samples */
+            ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
+                                                     JUXTA_FRAMFS_ADC_EVENT_TIMER_BURST,
+                                                     scaled_samples, (uint16_t)count, duration_us,
+                                                     0, 0); /* No peaks for timer burst */
         }
-        else
+        else if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT)
         {
-            LOG_ERR("📊 Failed to record ADC burst: %d", ret);
+            /* Threshold event mode - check for threshold crossing */
+            bool threshold_crossed = false;
+            uint8_t peak_positive = 0;
+            uint8_t peak_negative = 255;
+
+            /* Find peaks and check threshold */
+            for (uint32_t i = 0; i < count; i++)
+            {
+                int32_t voltage_mv = samples[i];
+                uint8_t scaled_sample = scaled_samples[i];
+
+                /* Check threshold crossing (absolute value) */
+                if (adc_config.threshold_mv > 0 && abs(voltage_mv) > (int32_t)adc_config.threshold_mv)
+                {
+                    threshold_crossed = true;
+                }
+
+                /* Track peaks */
+                if (scaled_sample > peak_positive)
+                {
+                    peak_positive = scaled_sample;
+                }
+                if (scaled_sample < peak_negative)
+                {
+                    peak_negative = scaled_sample;
+                }
+            }
+
+            /* Store event if threshold crossed or always trigger (threshold = 0) */
+            if (threshold_crossed || adc_config.threshold_mv == 0)
+            {
+                if (adc_config.output_peaks_only)
+                {
+                    /* Single event mode - store peaks only */
+                    ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
+                                                             JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT,
+                                                             NULL, 0, duration_us,
+                                                             peak_positive, peak_negative);
+                    if (ret == 0)
+                    {
+                        LOG_INF("📊 ADC event saved: peaks [%u, %u], threshold=%u mV",
+                                peak_positive, peak_negative, (unsigned)adc_config.threshold_mv);
+                    }
+                }
+                else
+                {
+                    /* Peri-event mode - store full waveform */
+                    ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
+                                                             JUXTA_FRAMFS_ADC_EVENT_PERI_EVENT,
+                                                             scaled_samples, (uint16_t)count, duration_us,
+                                                             peak_positive, peak_negative);
+                    if (ret == 0)
+                    {
+                        LOG_INF("📊 ADC peri-event saved: %u samples, peaks [%u, %u], threshold=%u mV",
+                                (unsigned)count, peak_positive, peak_negative, (unsigned)adc_config.threshold_mv);
+                    }
+                }
+            }
+            else
+            {
+                LOG_DBG("📊 No threshold crossing detected (threshold=%u mV)", (unsigned)adc_config.threshold_mv);
+            }
+        }
+
+        if (ret < 0)
+        {
+            LOG_ERR("📊 Failed to record ADC data: %d", ret);
         }
     }
     else

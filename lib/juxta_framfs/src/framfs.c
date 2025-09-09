@@ -1255,8 +1255,57 @@ int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx)
         return ret;
     }
 
+    /* Initialize ADC configuration with defaults */
+    ctx->user_settings.adc_config.mode = JUXTA_FRAMFS_ADC_MODE_TIMER_BURST;
+    ctx->user_settings.adc_config.threshold_mv = 0;          /* 0 = always trigger (timer mode) */
+    ctx->user_settings.adc_config.buffer_size = 1000;        /* Default buffer size */
+    ctx->user_settings.adc_config.debounce_ms = 5000;        /* 5 second intervals (timer mode) */
+    ctx->user_settings.adc_config.output_peaks_only = false; /* Full waveform */
+
     LOG_INF("User settings cleared successfully");
     return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_get_adc_config(struct juxta_framfs_context *ctx,
+                                struct juxta_framfs_adc_config *config)
+{
+    if (!ctx || !ctx->initialized || !config)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    *config = ctx->user_settings.adc_config;
+    return JUXTA_FRAMFS_OK;
+}
+
+int juxta_framfs_set_adc_config(struct juxta_framfs_context *ctx,
+                                const struct juxta_framfs_adc_config *config)
+{
+    if (!ctx || !ctx->initialized || !config)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Validate configuration */
+    if (config->mode > JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT)
+    {
+        LOG_WRN("Invalid ADC mode: %d", config->mode);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    if (config->buffer_size < 1 || config->buffer_size > 4000)
+    {
+        LOG_WRN("Invalid buffer size: %d (range: 1-4000)", config->buffer_size);
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    ctx->user_settings.adc_config = *config;
+
+    LOG_INF("📊 ADC config updated: mode=%d, threshold=%u mV, buffer=%u, debounce=%u ms, peaks_only=%s",
+            config->mode, (unsigned)config->threshold_mv, config->buffer_size,
+            (unsigned)config->debounce_ms, config->output_peaks_only ? "true" : "false");
+
+    return framfs_write_user_settings(ctx);
 }
 
 /* ========================================================================

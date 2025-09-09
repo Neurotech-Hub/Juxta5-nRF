@@ -144,7 +144,21 @@ extern "C"
     } __packed;
 
     /**
-     * @brief User settings structure (36 bytes)
+     * @brief ADC configuration structure
+     *
+     * Used to configure ADC sampling modes
+     */
+    struct juxta_framfs_adc_config
+    {
+        uint8_t mode;           /* ADC mode (timer burst or threshold event) */
+        uint32_t threshold_mv;  /* Threshold in millivolts (0 = always trigger) */
+        uint16_t buffer_size;   /* Buffer size (200 for peaks, 1000+ for waveform) */
+        uint32_t debounce_ms;   /* Debounce time between events */
+        bool output_peaks_only; /* true = peaks only, false = full waveform */
+    } __packed;
+
+    /**
+     * @brief User settings structure (48 bytes)
      */
     struct juxta_framfs_user_settings
     {
@@ -155,6 +169,7 @@ extern "C"
         uint8_t scan_interval;                          /* Scanning interval (0-255) */
         char subject_id[JUXTA_FRAMFS_SUBJECT_ID_LEN];   /* Subject ID string */
         char upload_path[JUXTA_FRAMFS_UPLOAD_PATH_LEN]; /* Upload path string */
+        struct juxta_framfs_adc_config adc_config;      /* ADC configuration */
     } __packed;
 
     /**
@@ -183,20 +198,6 @@ extern "C"
     {
         uint16_t minute; /* 0-1439 for full day */
         uint8_t type;    /* Record type */
-    } __packed;
-
-    /**
-     * @brief ADC configuration structure
-     *
-     * Used to configure ADC sampling modes
-     */
-    struct juxta_framfs_adc_config
-    {
-        uint8_t mode;           /* ADC mode (timer burst or threshold event) */
-        uint32_t threshold_mv;  /* Threshold in millivolts (0 = always trigger) */
-        uint16_t buffer_size;   /* Buffer size (200 for peaks, 1000+ for waveform) */
-        uint32_t debounce_ms;   /* Debounce time between events */
-        bool output_peaks_only; /* true = peaks only, false = full waveform */
     } __packed;
 
     /**
@@ -568,6 +569,26 @@ extern "C"
      * @return 0 on success, negative error code on failure
      */
     int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx);
+
+    /**
+     * @brief Get ADC configuration
+     *
+     * @param ctx File system context
+     * @param config Pointer to store ADC configuration
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_adc_config(struct juxta_framfs_context *ctx,
+                                    struct juxta_framfs_adc_config *config);
+
+    /**
+     * @brief Set ADC configuration
+     *
+     * @param ctx File system context
+     * @param config ADC configuration to set
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_set_adc_config(struct juxta_framfs_context *ctx,
+                                    const struct juxta_framfs_adc_config *config);
 
     /* ========================================================================
      * Data Encoding/Decoding API
