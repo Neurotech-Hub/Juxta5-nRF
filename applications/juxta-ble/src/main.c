@@ -231,7 +231,8 @@ static struct k_thread adc_threshold_thread;
 static K_THREAD_STACK_DEFINE(adc_threshold_stack, 2048);
 static volatile bool adc_threshold_thread_active = false;
 /* removed: superseded by next_allowed_trigger_ms */
-static uint32_t next_allowed_trigger_ms = 0; /* Absolute time gate for trigger */
+static uint32_t next_allowed_trigger_ms = 0;             /* Absolute time gate for trigger */
+static uint32_t next_allowed_trigger_ms_last_logged = 0; /* For change detection */
 
 // Magnet reset state for ADC mode
 typedef enum
@@ -1082,11 +1083,19 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
 
-    LOG_INF("📊 Threshold detection thread started");
+    static uint32_t thread_instance = 0;
+    thread_instance++;
+    LOG_INF("📊 Threshold detection thread started (instance %u)", thread_instance);
     uint32_t scan_position = 0;
+    uint32_t loop_count = 0;
 
     while (adc_threshold_thread_active)
     {
+        loop_count++;
+        if (loop_count % 100 == 1)
+        { // Log every 100th iteration to avoid spam
+            LOG_INF("📊 Threshold thread loop iteration %u", loop_count);
+        }
         /* Get current ADC configuration */
         struct juxta_framfs_adc_config adc_config;
         if (juxta_framfs_get_adc_config(&framfs_ctx, &adc_config) != 0)
@@ -1095,6 +1104,16 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
             adc_config.threshold_mv = 0;
             adc_config.debounce_ms = 5000;
             adc_config.output_peaks_only = false;
+            LOG_WRN("📊 Failed to read ADC config, using defaults");
+        }
+        else
+        {
+            // Only log config read every 100th iteration to reduce spam
+            if (loop_count % 100 == 1)
+            {
+                LOG_INF("📊 ADC config read: threshold=%u mV, debounce=%u ms, mode=%d",
+                        (unsigned)adc_config.threshold_mv, (unsigned)adc_config.debounce_ms, adc_config.mode);
+            }
         }
         /* Guard against zero debounce to avoid divide-by-zero in any conversions */
         if (adc_config.debounce_ms == 0)
@@ -1115,30 +1134,70 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
 
         /* Check if enough samples available for processing */
         /* Require at least one full window worth of samples in the ring */
+        // Only log every 100th iteration to reduce spam
+        if (loop_count % 100 == 1)
+        {
+            LOG_INF("📊 Thread loop: ring_count=%u, window_samples=%u", adc_ring_count, window_samples);
+        }
         if (adc_ring_count >= window_samples)
         {
             /* Check debounce timer */
             uint32_t current_time = k_uptime_get_32();
+            if (next_allowed_trigger_ms != next_allowed_trigger_ms_last_logged)
+            {
+                LOG_INF("📊 next_allowed_trigger_ms changed: %u -> %u", next_allowed_trigger_ms_last_logged, next_allowed_trigger_ms);
+                next_allowed_trigger_ms_last_logged = next_allowed_trigger_ms;
+            }
+            // Only log debounce check when it changes state or every 100th iteration
+            if (loop_count % 100 == 1 || current_time >= next_allowed_trigger_ms)
+            {
+                LOG_INF("📊 Debounce check: current=%u ms, next_allowed=%u ms, delta=%d ms",
+                        current_time, next_allowed_trigger_ms, (int32_t)(current_time - next_allowed_trigger_ms));
+            }
             if (current_time >= next_allowed_trigger_ms)
             {
+                LOG_INF("📊 DEBOUNCE EXPIRED - allowing trigger");
+
+                /* Update debounce timer FIRST - this prevents rapid re-triggering */
+                next_allowed_trigger_ms = current_time + adc_config.debounce_ms;
+                LOG_INF("📊 Debounce timer updated: next_allowed=%u ms (current=%u + debounce=%u)",
+                        next_allowed_trigger_ms, current_time, (unsigned)adc_config.debounce_ms);
+
                 /* Search for threshold crossing or timer trigger */
                 uint32_t trigger_pos = UINT32_MAX;
+                bool trigger_found = false;
 
-                if (adc_config.threshold_mv > 0)
+                if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT)
                 {
                     /* Threshold mode - search for crossing */
+                    LOG_INF("📊 Using threshold mode: searching for %u mV crossing", (unsigned)adc_config.threshold_mv);
                     trigger_pos = adc_ring_find_trigger(scan_position, ADC_DMA_BLOCK_SIZE, adc_config.threshold_mv);
+                    trigger_found = (trigger_pos != UINT32_MAX);
+
+                    /* Debug: Show some sample values to understand signal levels */
+                    if (trigger_found && adc_ring_count > 0)
+                    {
+                        uint32_t debug_pos = adc_ring_head;
+                        LOG_INF("📊 Sample values around trigger: [%d, %d, %d, %d, %d] mV",
+                                adc_ring_buffer[debug_pos % ADC_RING_BUFFER_SIZE],
+                                adc_ring_buffer[(debug_pos + 1) % ADC_RING_BUFFER_SIZE],
+                                adc_ring_buffer[(debug_pos + 2) % ADC_RING_BUFFER_SIZE],
+                                adc_ring_buffer[(debug_pos + 3) % ADC_RING_BUFFER_SIZE],
+                                adc_ring_buffer[(debug_pos + 4) % ADC_RING_BUFFER_SIZE]);
+                    }
                 }
                 else
                 {
-                    /* Timer mode (threshold = 0) - always trigger */
+                    /* Timer mode (mode = 0) - always trigger, but still respect debounce */
+                    LOG_INF("📊 Using timer mode: mode=%d, always triggering (with debounce)", adc_config.mode);
                     trigger_pos = adc_ring_head; /* Use current position */
+                    trigger_found = true;        /* Always trigger in timer mode */
                 }
 
-                if (trigger_pos != UINT32_MAX)
+                if (trigger_found)
                 {
                     /* Trigger found - extract and save data */
-                    LOG_DBG("🎯 Peri-event trigger at position %u", trigger_pos);
+                    LOG_INF("🎯 Peri-event trigger at position %u", trigger_pos);
 
                     /* Extract centered data around trigger */
                     static int16_t extracted_samples[ADC_MAX_SAMPLES];
@@ -1148,10 +1207,15 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
                     {
                         /* Phase C1: Process extracted peri-event data */
                         adc_process_peri_event_data(extracted_samples, extracted_count, &adc_config);
-
-                        /* Update debounce absolute gate */
-                        next_allowed_trigger_ms = current_time + adc_config.debounce_ms;
                     }
+                }
+            }
+            else
+            {
+                // Only log debounce active every 100th iteration to reduce spam
+                if (loop_count % 100 == 1)
+                {
+                    LOG_INF("📊 DEBOUNCE ACTIVE - blocking trigger (delta=%d ms)", (int32_t)(current_time - next_allowed_trigger_ms));
                 }
             }
         }
