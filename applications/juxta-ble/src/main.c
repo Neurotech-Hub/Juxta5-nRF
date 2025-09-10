@@ -26,11 +26,35 @@
 #include "juxta_fram/fram.h"
 #include "ble_service.h"
 #include "adc.h"
+#include <zephyr/drivers/adc.h>
+#include <zephyr/devicetree.h>
+
+/*
+ * Optional NRFX headers for SAADC/TIMER/PPI hardware DMA path.
+ * These are only included when the corresponding Kconfig options are enabled
+ * to avoid build breaks during phased integration.
+ */
+#if IS_ENABLED(CONFIG_NRFX_SAADC)
+#include <nrfx_saadc.h>
+#include <hal/nrf_saadc.h>
+#endif
+#if IS_ENABLED(CONFIG_NRFX_TIMER1) || IS_ENABLED(CONFIG_NRFX_TIMER2)
+#include <nrfx_timer.h>
+#endif
+#if IS_ENABLED(CONFIG_NRFX_PPI)
+#include <nrfx_ppi.h>
+#endif
 #include <stdio.h>
 #include <time.h>
 #include "lis2dh12.h"
 
+/* Forward declare ring-buffer feeder for early users */
+static void adc_ring_add_samples(const int16_t *samples, uint32_t count);
+
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
+
+/* Forward declaration to avoid implicit calls before static definition */
+static void adc_ring_add_samples(const int16_t *samples, uint32_t count);
 
 typedef enum
 {
@@ -199,8 +223,15 @@ static struct k_timer state_timer;
 static bool state_system_ready = false;
 
 // ADC timer for mode 1 (ADC_ONLY mode)
-static struct k_timer adc_timer;
+static struct k_timer adc_k_timer;
 static struct k_work adc_work;
+
+/* Phase B1: Threshold detection thread for peri-event capture */
+static struct k_thread adc_threshold_thread;
+static K_THREAD_STACK_DEFINE(adc_threshold_stack, 2048);
+static volatile bool adc_threshold_thread_active = false;
+/* removed: superseded by next_allowed_trigger_ms */
+static uint32_t next_allowed_trigger_ms = 0; /* Absolute time gate for trigger */
 
 // Magnet reset state for ADC mode
 typedef enum
@@ -217,8 +248,167 @@ static bool adc_operations_paused = false;
 
 /* Static buffers for ADC sampling to avoid sysworkq stack overflow */
 #define ADC_MAX_SAMPLES 1000
-static int32_t adc_samples_buffer[ADC_MAX_SAMPLES];
 static uint8_t adc_scaled_buffer[ADC_MAX_SAMPLES];
+
+/* Phase A1: DMA Ring Buffer Configuration for 10kSPS peri-event capture */
+#define ADC_RING_BUFFER_SIZE 1000 /* 0.1s history at 10kSPS (~2KB RAM) */
+#define ADC_DMA_BLOCK_SIZE 100    /* 1ms per block at 100kSPS */
+#define ADC_TARGET_RATE_HZ 100000 /* Target 100kSPS sampling rate */
+#define ADC_INTERVAL_US 10        /* 10µs between samples for 100kSPS */
+
+/* Ring buffer storage (Phase A1: just variables) */
+static int16_t adc_ring_buffer[ADC_RING_BUFFER_SIZE];
+static volatile uint32_t adc_ring_head = 0;  /* Write position (ISR updates) */
+static volatile uint32_t adc_ring_tail = 0;  /* Read position (thread updates) */
+static volatile uint32_t adc_ring_count = 0; /* Number of samples in buffer */
+
+/* DMA ping-pong buffers (Phase A1: ready for hardware implementation) */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+static int16_t adc_dma_buf0[ADC_DMA_BLOCK_SIZE];
+static int16_t adc_dma_buf1[ADC_DMA_BLOCK_SIZE];
+#pragma GCC diagnostic pop
+static volatile bool adc_dma_active = false;
+#if IS_ENABLED(CONFIG_ADC)
+static bool vitals_batt_disabled_for_adc = false;
+#endif
+
+#if IS_ENABLED(CONFIG_ADC)
+/* Zephyr ADC async capture thread (uses Zephyr SAADC driver) */
+static struct k_thread zephyr_adc_thread;
+static K_THREAD_STACK_DEFINE(zephyr_adc_stack, 2048);
+static volatile bool zephyr_adc_thread_active = false;
+static const struct device *adc_dev_main = NULL;
+static bool zephyr_adc_configured = false;
+static void adc_ring_add_samples(const int16_t *samples, uint32_t count);
+static int zephyr_adc_configure_channel(void)
+{
+    adc_dev_main = DEVICE_DT_GET(DT_NODELABEL(adc));
+    if (!device_is_ready(adc_dev_main))
+    {
+        LOG_ERR("📊 Zephyr ADC device not ready");
+        return -ENODEV;
+    }
+
+    struct adc_channel_cfg cfg = {0};
+    cfg.gain = ADC_GAIN_1_6;
+    cfg.reference = ADC_REF_INTERNAL;
+    cfg.acquisition_time = ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3);
+    cfg.channel_id = 0;
+    cfg.differential = 1;
+    cfg.input_positive = SAADC_CH_PSELP_PSELP_AnalogInput1;
+    cfg.input_negative = SAADC_CH_PSELN_PSELN_AnalogInput0;
+
+    int ret = adc_channel_setup(adc_dev_main, &cfg);
+    if (ret)
+    {
+        LOG_ERR("📊 adc_channel_setup failed: %d", ret);
+        return ret;
+    }
+    zephyr_adc_configured = true;
+    LOG_INF("📊 Zephyr ADC channel configured (diff AIN1-AIN0)");
+    return 0;
+}
+
+static void zephyr_adc_thread_entry(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+    int16_t local_buf[ADC_DMA_BLOCK_SIZE];
+    int16_t mv_buf[ADC_DMA_BLOCK_SIZE];
+
+    while (zephyr_adc_thread_active)
+    {
+        if (!zephyr_adc_configured)
+        {
+            if (zephyr_adc_configure_channel() != 0)
+            {
+                k_sleep(K_MSEC(100));
+                continue;
+            }
+        }
+
+        struct adc_sequence seq = {0};
+        seq.channels = BIT(0);
+        seq.buffer = local_buf;
+        seq.buffer_size = sizeof(local_buf);
+        seq.resolution = 12;
+        seq.oversampling = 0;
+        struct adc_sequence_options opts = {0};
+        opts.interval_us = ADC_INTERVAL_US;
+        opts.extra_samplings = ADC_DMA_BLOCK_SIZE - 1;
+        seq.options = &opts;
+
+        struct k_poll_signal sig;
+        struct k_poll_event evt;
+        k_poll_signal_init(&sig);
+        k_poll_event_init(&evt, K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &sig);
+
+        int ret = adc_read_async(adc_dev_main, &seq, &sig);
+        if (ret == 0)
+        {
+            int pret = k_poll(&evt, 1, K_MSEC(20));
+            if (pret == 0 && sig.signaled)
+            {
+                k_poll_signal_reset(&sig);
+                /* Convert raw SAADC counts to millivolts for thresholding and storage
+                 * SAADC: 12-bit, gain=1/6, Vref=0.6V → full-scale ≈ ±3.6V, LSB ≈ 3600/2048 mV
+                 */
+                for (uint32_t i = 0; i < ADC_DMA_BLOCK_SIZE; i++)
+                {
+                    int32_t mv = (int32_t)local_buf[i] * 3600 / 2048; /* differential signed */
+                    if (mv > 2000)
+                        mv = 2000; /* limit to expected app range */
+                    if (mv < -2000)
+                        mv = -2000;
+                    mv_buf[i] = (int16_t)mv;
+                }
+                adc_ring_add_samples(mv_buf, ADC_DMA_BLOCK_SIZE);
+            }
+            else
+            {
+                LOG_WRN("📊 adc_read_async wait timeout or not signaled (pret=%d)", pret);
+            }
+        }
+        else
+        {
+            LOG_WRN("📊 adc_read_async failed: %d", ret);
+            k_sleep(K_USEC(50));
+        }
+        /* Yield to allow other work */
+        k_yield();
+    }
+    LOG_INF("📊 Zephyr ADC capture thread stopped");
+}
+#endif /* CONFIG_ADC */
+
+#if IS_ENABLED(CONFIG_NRFX_SAADC) && !IS_ENABLED(CONFIG_ADC)
+/* SAADC EasyDMA buffers (ping-pong) */
+static int16_t saadc_buf0[ADC_DMA_BLOCK_SIZE];
+static int16_t saadc_buf1[ADC_DMA_BLOCK_SIZE];
+/* SAADC event handler */
+static void saadc_evt_handler(nrfx_saadc_evt_t const *p_event);
+#endif
+
+#if IS_ENABLED(CONFIG_NRFX_SAADC) && !IS_ENABLED(CONFIG_ADC)
+#if IS_ENABLED(CONFIG_NRFX_TIMER2)
+static const nrfx_timer_t adc_hw_timer = NRFX_TIMER_INSTANCE(2);
+#elif IS_ENABLED(CONFIG_NRFX_TIMER1)
+static const nrfx_timer_t adc_hw_timer = NRFX_TIMER_INSTANCE(1);
+#endif
+
+#if IS_ENABLED(CONFIG_NRFX_PPI)
+static nrf_ppi_channel_t adc_ppi_sample_ch;       /* TIMER COMPARE -> SAADC SAMPLE */
+static nrf_ppi_channel_t adc_ppi_start_on_end_ch; /* SAADC END -> SAADC START */
+#endif
+#endif
+
+/* Forward declarations for ring buffer system */
+static void adc_ring_add_samples(const int16_t *samples, uint32_t count);
+static void adc_process_peri_event_data(const int16_t *raw_samples, uint32_t sample_count,
+                                        const struct juxta_framfs_adc_config *config);
+static void adc_stop_threshold_thread(void);
 
 /* Operating mode definitions */
 #define OPERATING_MODE_UNDEFINED 0xFF /* Must be set via BLE */
@@ -468,8 +658,8 @@ void juxta_ble_adc_config_update_trigger(void)
             }
 
             /* Restart ADC timer with new interval */
-            k_timer_stop(&adc_timer);
-            k_timer_start(&adc_timer, K_SECONDS(interval_seconds), K_SECONDS(interval_seconds));
+            k_timer_stop(&adc_k_timer);
+            k_timer_start(&adc_k_timer, K_SECONDS(interval_seconds), K_SECONDS(interval_seconds));
             LOG_INF("📊 ADC timer updated: %u second intervals", interval_seconds);
         }
         else
@@ -495,6 +685,607 @@ static uint32_t get_rtc_timestamp(void)
     return timestamp;
 }
 
+/* Phase A2: Ring buffer management functions */
+static void adc_ring_add_samples(const int16_t *samples, uint32_t count)
+{
+    /* Add samples to ring buffer with overflow handling */
+    for (uint32_t i = 0; i < count; i++)
+    {
+        adc_ring_buffer[adc_ring_head] = samples[i];
+        adc_ring_head = (adc_ring_head + 1) % ADC_RING_BUFFER_SIZE;
+
+        if (adc_ring_count < ADC_RING_BUFFER_SIZE)
+        {
+            adc_ring_count++;
+        }
+        else
+        {
+            /* Buffer full - advance tail to drop oldest sample */
+            adc_ring_tail = (adc_ring_tail + 1) % ADC_RING_BUFFER_SIZE;
+        }
+    }
+}
+
+static uint32_t adc_ring_extract_centered(uint32_t trigger_pos, int16_t *output, uint32_t output_size)
+{
+    /* Extract samples centered around trigger position */
+    if (adc_ring_count < output_size)
+    {
+        LOG_DBG("📊 Not enough samples: have %u, need %u", adc_ring_count, output_size);
+        return 0; /* Not enough samples in buffer */
+    }
+
+    uint32_t half_samples = output_size / 2;
+    uint32_t start_pos = (trigger_pos + ADC_RING_BUFFER_SIZE - half_samples) % ADC_RING_BUFFER_SIZE;
+
+    LOG_DBG("📊 Extracting: trigger_pos=%u, start_pos=%u, samples=%u, ring_count=%u",
+            trigger_pos, start_pos, output_size, adc_ring_count);
+
+    for (uint32_t i = 0; i < output_size; i++)
+    {
+        uint32_t src_pos = (start_pos + i) % ADC_RING_BUFFER_SIZE;
+        output[i] = adc_ring_buffer[src_pos];
+
+        /* Debug: Check for suspicious values */
+        if (i < 10 && (output[i] == 127 || output[i] == 0))
+        {
+            LOG_DBG("📊 Sample[%u] from pos[%u]: %d (suspicious?)", i, src_pos, output[i]);
+        }
+    }
+
+    return output_size;
+}
+
+static uint32_t adc_ring_find_trigger(uint32_t start_offset, uint32_t search_count, int32_t threshold_mv)
+{
+    /* Search for threshold crossing in ring buffer */
+    for (uint32_t i = 0; i < search_count && i < adc_ring_count; i++)
+    {
+        uint32_t pos = (start_offset + i) % ADC_RING_BUFFER_SIZE;
+        int16_t sample = adc_ring_buffer[pos];
+
+        /* Convert to mV and check threshold */
+        int32_t voltage_mv = sample; /* Will need proper conversion */
+        if (abs(voltage_mv) > threshold_mv)
+        {
+            return pos; /* Return position of trigger */
+        }
+    }
+    return UINT32_MAX; /* No trigger found */
+}
+
+/* Phase A3: DMA callback implementation */
+/* Phase E1: Enhanced DMA callback implementation (ready for hardware DMA) */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+static void adc_dma_callback(const struct device *dev, uint32_t channel, int status, void *user_data)
+{
+    ARG_UNUSED(dev);
+    ARG_UNUSED(channel);
+
+    if (status != 0)
+    {
+        LOG_ERR("📊 DMA callback error: %d", status);
+        return;
+    }
+
+    /* Determine which buffer completed */
+    int16_t *completed_buffer = (int16_t *)user_data;
+
+    /* Add completed DMA block to ring buffer */
+    adc_ring_add_samples(completed_buffer, ADC_DMA_BLOCK_SIZE);
+
+    /* Optional: Log ring buffer status periodically for debugging */
+    static uint32_t callback_count = 0;
+    callback_count++;
+    if (callback_count % 100 == 0) /* Log every 100 callbacks (~1 second at 10kSPS) */
+    {
+        LOG_DBG("📊 DMA callback #%u: ring buffer count=%u, head=%u",
+                callback_count, adc_ring_count, adc_ring_head);
+    }
+
+    /* Re-queue the same buffer for next DMA transfer */
+    /* TODO: Implement DMA re-queuing when DMA configuration is complete */
+}
+#pragma GCC diagnostic pop
+
+/* Simplified DMA configuration using existing ADC setup */
+static int adc_configure_dma_sampling(void)
+{
+    /*
+     * Phase 1 scaffolding:
+     * - Do not hard-require NRFX at build time
+     * - When NRFX is enabled, prepare minimal SAADC instance
+     * - Otherwise, succeed no-op so the rest of the app runs
+     */
+
+    LOG_INF("📊 adc_configure_dma_sampling: enter");
+
+    if (!juxta_adc_is_ready())
+    {
+        LOG_ERR("📊 ADC not initialized for DMA configuration");
+        return -ENODEV;
+    }
+
+#if IS_ENABLED(CONFIG_NRFX_SAADC)
+    /* Initialize SAADC once */
+    static bool saadc_initialized = false;
+    if (!saadc_initialized)
+    {
+        /* In NCS v3.0.2, nrfx_saadc_init takes interrupt priority only */
+        LOG_INF("📊 adc_configure_dma_sampling: calling nrfx_saadc_init");
+        nrfx_err_t e = nrfx_saadc_init(NRFX_SAADC_DEFAULT_CONFIG_IRQ_PRIORITY);
+        if (e != NRFX_SUCCESS && e != NRFX_ERROR_ALREADY)
+        {
+            LOG_ERR("📊 nrfx_saadc_init failed: %d", e);
+            return -EIO;
+        }
+
+        /* Channel 0 differential AIN1/AIN0 */
+        nrfx_saadc_channel_t ch = NRFX_SAADC_DEFAULT_CHANNEL_DIFFERENTIAL(
+            NRF_SAADC_INPUT_AIN1, /* P0.03 */
+            NRF_SAADC_INPUT_AIN0, /* P0.02 */
+            0 /* channel index */);
+        /* Adjust defaults */
+        ch.channel_config.gain = NRF_SAADC_GAIN1_6;
+        ch.channel_config.reference = NRF_SAADC_REFERENCE_INTERNAL;
+        ch.channel_config.acq_time = NRF_SAADC_ACQTIME_10US;
+        /* Note: NCS v3.0.2 SAADC channel struct does not expose an event handler field */
+
+        LOG_INF("📊 adc_configure_dma_sampling: configuring SAADC channel 0 (diff AIN1-AIN0)");
+        nrfx_err_t ce = nrfx_saadc_channel_config(&ch);
+        if (ce != NRFX_SUCCESS)
+        {
+            LOG_ERR("📊 nrfx_saadc_channel_config failed: %d", ce);
+            return -EIO;
+        }
+
+        saadc_initialized = true;
+        LOG_INF("📊 NRFX SAADC configured (Phase 1)");
+    }
+#else
+    LOG_INF("📊 NRFX SAADC not enabled - running without DMA (Phase 1)");
+#endif
+
+    LOG_INF("📊 adc_configure_dma_sampling: exit");
+    return 0;
+}
+
+/* Real nRF52840 SAADC DMA start implementation */
+static int adc_start_dma_sampling(void)
+{
+    if (adc_dma_active)
+    {
+        LOG_WRN("📊 DMA sampling already active");
+        return 0;
+    }
+
+    LOG_INF("📊 adc_start_dma_sampling: calling adc_configure_dma_sampling");
+    int ret = adc_configure_dma_sampling();
+    if (ret < 0)
+    {
+        LOG_ERR("📊 adc_start_dma_sampling: adc_configure_dma_sampling failed: %d", ret);
+        return ret;
+    }
+    LOG_INF("📊 adc_start_dma_sampling: adc_configure_dma_sampling ok");
+
+    /* Reset and initialize ring buffer */
+    adc_ring_head = 0;
+    adc_ring_tail = 0;
+    adc_ring_count = 0;
+    for (int i = 0; i < ADC_RING_BUFFER_SIZE; i++)
+    {
+        adc_ring_buffer[i] = 0;
+    }
+
+#if IS_ENABLED(CONFIG_NRFX_SAADC) && !IS_ENABLED(CONFIG_ADC)
+    LOG_INF("📊 adc_start_dma_sampling: Phase 2 wiring begin (TIMER1->PPI->SAADC)");
+
+    /* Try to configure TIMER for external sampling; fall back to SAADC internal timer on failure */
+    bool use_internal_timer = false;
+    nrfx_timer_config_t tcfg = NRFX_TIMER_DEFAULT_CONFIG(NRF_TIMER_FREQ_1MHz);
+    nrfx_err_t te = nrfx_timer_init(&adc_hw_timer, &tcfg, NULL);
+    if (te != NRFX_SUCCESS && te != NRFX_ERROR_ALREADY)
+    {
+        LOG_WRN("📊 nrfx_timer_init failed (%d) - falling back to SAADC internal timer", te);
+        use_internal_timer = true;
+    }
+    else
+    {
+        uint32_t ticks = nrfx_timer_us_to_ticks(&adc_hw_timer, 1000000UL / ADC_TARGET_RATE_HZ);
+        nrfx_timer_clear(&adc_hw_timer);
+        nrfx_timer_extended_compare(&adc_hw_timer, NRF_TIMER_CC_CHANNEL0, ticks,
+                                    NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, false);
+    }
+
+    /* Advanced mode: external SAMPLE via PPI */
+    uint32_t ch_mask = BIT(0);
+    nrfx_saadc_adv_config_t adv_cfg = NRFX_SAADC_DEFAULT_ADV_CONFIG;
+    adv_cfg.internal_timer_cc = use_internal_timer ? (uint16_t)(16000000UL / ADC_TARGET_RATE_HZ) : 0;
+    if (use_internal_timer && adv_cfg.internal_timer_cc < 80)
+    {
+        adv_cfg.internal_timer_cc = 80; /* Hardware lower bound */
+    }
+    adv_cfg.start_on_end = false;
+    nrfx_err_t se = nrfx_saadc_advanced_mode_set(ch_mask, NRF_SAADC_RESOLUTION_12BIT, &adv_cfg, saadc_evt_handler);
+    if (se != NRFX_SUCCESS)
+    {
+        LOG_ERR("📊 nrfx_saadc_advanced_mode_set failed: %d", se);
+        return -EIO;
+    }
+
+    /* Queue first buffer; second will be supplied on BUF_REQ */
+    nrfx_err_t be = nrfx_saadc_buffer_set(saadc_buf0, ADC_DMA_BLOCK_SIZE);
+    if (be != NRFX_SUCCESS)
+    {
+        LOG_ERR("📊 nrfx_saadc_buffer_set buf0 failed: %d", be);
+        return -EIO;
+    }
+    LOG_INF("📊 SAADC buffer0 armed (%d samples)", ADC_DMA_BLOCK_SIZE);
+
+    if (!use_internal_timer)
+    {
+        /* PPI: TIMER COMPARE0 -> SAADC SAMPLE */
+        nrfx_err_t pe = nrfx_ppi_channel_alloc(&adc_ppi_sample_ch);
+        if (pe != NRFX_SUCCESS)
+        {
+            LOG_ERR("📊 nrfx_ppi_channel_alloc(sample) failed: %d", pe);
+            return -EIO;
+        }
+        uint32_t eep = nrfx_timer_compare_event_address_get(&adc_hw_timer, NRF_TIMER_CC_CHANNEL0);
+        uint32_t tep = nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_SAMPLE);
+        pe = nrfx_ppi_channel_assign(adc_ppi_sample_ch, eep, tep);
+        if (pe != NRFX_SUCCESS)
+        {
+            LOG_ERR("📊 nrfx_ppi_channel_assign(sample) failed: %d", pe);
+            return -EIO;
+        }
+
+        /* PPI: SAADC END -> SAADC START */
+        pe = nrfx_ppi_channel_alloc(&adc_ppi_start_on_end_ch);
+        if (pe != NRFX_SUCCESS)
+        {
+            LOG_ERR("📊 nrfx_ppi_channel_alloc(start_on_end) failed: %d", pe);
+            return -EIO;
+        }
+        uint32_t eep2 = nrf_saadc_event_address_get(NRF_SAADC, NRF_SAADC_EVENT_END);
+        uint32_t tep2 = nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_START);
+        pe = nrfx_ppi_channel_assign(adc_ppi_start_on_end_ch, eep2, tep2);
+        if (pe != NRFX_SUCCESS)
+        {
+            LOG_ERR("📊 nrfx_ppi_channel_assign(start_on_end) failed: %d", pe);
+            return -EIO;
+        }
+    }
+
+    /* Kick off SAADC mode and enable PPI channels and TIMER1 */
+    nrfx_err_t mt = nrfx_saadc_mode_trigger();
+    if (mt != NRFX_SUCCESS)
+    {
+        LOG_ERR("📊 nrfx_saadc_mode_trigger failed: %d", mt);
+        return -EIO;
+    }
+
+    if (!use_internal_timer)
+    {
+        (void)nrfx_ppi_channel_enable(adc_ppi_sample_ch);
+        (void)nrfx_ppi_channel_enable(adc_ppi_start_on_end_ch);
+        nrfx_timer_enable(&adc_hw_timer);
+        LOG_INF("📊 Phase 2 active: TIMER->PPI->SAADC wired at %u Hz", ADC_TARGET_RATE_HZ);
+    }
+    else
+    {
+        LOG_INF("📊 Phase 2 active: SAADC internal timer at ~%u Hz (CC=%u)",
+                ADC_TARGET_RATE_HZ, adv_cfg.internal_timer_cc);
+    }
+#else
+    LOG_INF("📊 Zephyr ADC driver active (CONFIG_ADC=y) - skipping nrfx SAADC DMA start");
+#endif
+
+    adc_dma_active = true;
+    LOG_INF("📊 adc_start_dma_sampling: done (adc_dma_active=%d)", adc_dma_active);
+    return 0;
+}
+
+/* Real nRF52840 SAADC DMA stop implementation */
+static int adc_stop_dma_sampling(void)
+{
+    if (!adc_dma_active)
+    {
+        LOG_WRN("📊 DMA sampling not active");
+        return 0;
+    }
+
+    adc_stop_threshold_thread();
+
+#if IS_ENABLED(CONFIG_NRFX_SAADC) && !IS_ENABLED(CONFIG_ADC)
+    /* Disable TIMER1 and PPI links, uninit SAADC */
+    (void)nrfx_ppi_channel_disable(adc_ppi_sample_ch);
+    (void)nrfx_ppi_channel_disable(adc_ppi_start_on_end_ch);
+    nrfx_timer_disable(&adc_hw_timer);
+    nrfx_saadc_abort();
+    nrfx_saadc_uninit();
+#endif
+
+    adc_dma_active = false;
+#if IS_ENABLED(CONFIG_ADC)
+    if (zephyr_adc_thread_active)
+    {
+        zephyr_adc_thread_active = false;
+        k_thread_abort(&zephyr_adc_thread);
+        LOG_INF("📊 Zephyr ADC capture thread stopped (on stop)");
+    }
+    if (vitals_batt_disabled_for_adc)
+    {
+        (void)juxta_vitals_set_battery_monitoring(&vitals_ctx, true);
+        vitals_batt_disabled_for_adc = false;
+        LOG_INF("📊 Resumed vitals battery monitoring after ADC capture");
+    }
+#endif
+    LOG_INF("📊 Ring buffer system stopped");
+    return 0;
+}
+
+#if IS_ENABLED(CONFIG_NRFX_SAADC) && !IS_ENABLED(CONFIG_ADC)
+/* Minimal SAADC event handler: push finished buffer to ring and re-arm */
+static void saadc_evt_handler(nrfx_saadc_evt_t const *p_event)
+{
+    static bool next_buf_is_0 = false;
+
+    switch (p_event->type)
+    {
+    case NRFX_SAADC_EVT_READY:
+        LOG_INF("📊 SAADC READY");
+        break;
+    case NRFX_SAADC_EVT_BUF_REQ:
+    {
+        /* Supply the next buffer for continuous conversion */
+        nrf_saadc_value_t *next = next_buf_is_0 ? saadc_buf0 : saadc_buf1;
+        nrfx_err_t r = nrfx_saadc_buffer_set(next, ADC_DMA_BLOCK_SIZE);
+        if (r != NRFX_SUCCESS)
+        {
+            LOG_ERR("📊 nrfx_saadc_buffer_set(next) failed: %d", r);
+        }
+        next_buf_is_0 = !next_buf_is_0;
+        break;
+    }
+    case NRFX_SAADC_EVT_DONE:
+    {
+        nrf_saadc_value_t *finished = p_event->data.done.p_buffer;
+        uint16_t num = p_event->data.done.size;
+        if (finished && num > 0)
+        {
+            adc_ring_add_samples((const int16_t *)finished, num);
+            LOG_INF("📊 SAADC DONE: +%u samples → ring_count=%u", num, adc_ring_count);
+        }
+        break;
+    }
+    case NRFX_SAADC_EVT_FINISHED:
+        LOG_INF("📊 SAADC FINISHED");
+        break;
+    case NRFX_SAADC_EVT_LIMIT:
+        LOG_WRN("📊 SAADC LIMIT event");
+        break;
+    case NRFX_SAADC_EVT_CALIBRATEDONE:
+        LOG_INF("📊 SAADC CALIBRATION DONE");
+        break;
+    default:
+        break;
+    }
+}
+#endif
+
+/* Phase B1: Threshold detection thread implementation */
+static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    LOG_INF("📊 Threshold detection thread started");
+    uint32_t scan_position = 0;
+
+    while (adc_threshold_thread_active)
+    {
+        /* Get current ADC configuration */
+        struct juxta_framfs_adc_config adc_config;
+        if (juxta_framfs_get_adc_config(&framfs_ctx, &adc_config) != 0)
+        {
+            /* Use defaults if config read fails */
+            adc_config.threshold_mv = 0;
+            adc_config.debounce_ms = 5000;
+            adc_config.output_peaks_only = false;
+        }
+        /* Guard against zero debounce to avoid divide-by-zero in any conversions */
+        if (adc_config.debounce_ms == 0)
+        {
+            adc_config.debounce_ms = 1;
+        }
+
+        /* Determine extraction window from config (adcBufferSize), clamped to limits */
+        uint32_t window_samples = adc_config.buffer_size;
+        if (window_samples == 0)
+        {
+            window_samples = 500; /* reasonable default if unset */
+        }
+        if (window_samples > ADC_MAX_SAMPLES)
+        {
+            window_samples = ADC_MAX_SAMPLES;
+        }
+
+        /* Check if enough samples available for processing */
+        /* Require at least one full window worth of samples in the ring */
+        if (adc_ring_count >= window_samples)
+        {
+            /* Check debounce timer */
+            uint32_t current_time = k_uptime_get_32();
+            if (current_time >= next_allowed_trigger_ms)
+            {
+                /* Search for threshold crossing or timer trigger */
+                uint32_t trigger_pos = UINT32_MAX;
+
+                if (adc_config.threshold_mv > 0)
+                {
+                    /* Threshold mode - search for crossing */
+                    trigger_pos = adc_ring_find_trigger(scan_position, ADC_DMA_BLOCK_SIZE, adc_config.threshold_mv);
+                }
+                else
+                {
+                    /* Timer mode (threshold = 0) - always trigger */
+                    trigger_pos = adc_ring_head; /* Use current position */
+                }
+
+                if (trigger_pos != UINT32_MAX)
+                {
+                    /* Trigger found - extract and save data */
+                    LOG_DBG("🎯 Peri-event trigger at position %u", trigger_pos);
+
+                    /* Extract centered data around trigger */
+                    static int16_t extracted_samples[ADC_MAX_SAMPLES];
+                    uint32_t extracted_count = adc_ring_extract_centered(trigger_pos, extracted_samples, window_samples);
+
+                    if (extracted_count > 0)
+                    {
+                        /* Phase C1: Process extracted peri-event data */
+                        adc_process_peri_event_data(extracted_samples, extracted_count, &adc_config);
+
+                        /* Update debounce absolute gate */
+                        next_allowed_trigger_ms = current_time + adc_config.debounce_ms;
+                    }
+                }
+            }
+        }
+
+        /* Update scan position for next iteration */
+        scan_position = adc_ring_head;
+
+        /* Sleep to prevent excessive CPU usage */
+        k_sleep(K_MSEC(10)); /* Check every 10ms */
+    }
+
+    LOG_INF("📊 Threshold detection thread stopped");
+}
+
+static int adc_start_threshold_thread(void)
+{
+    if (adc_threshold_thread_active)
+    {
+        return 0; /* Already running */
+    }
+
+    adc_threshold_thread_active = true;
+
+    k_thread_create(&adc_threshold_thread, adc_threshold_stack,
+                    K_THREAD_STACK_SIZEOF(adc_threshold_stack),
+                    adc_threshold_thread_entry, NULL, NULL, NULL,
+                    K_PRIO_COOP(7), 0, K_NO_WAIT);
+
+    LOG_INF("📊 Threshold detection thread created");
+    return 0;
+}
+
+static void adc_stop_threshold_thread(void)
+{
+    if (adc_threshold_thread_active)
+    {
+        adc_threshold_thread_active = false;
+        k_thread_abort(&adc_threshold_thread);
+        LOG_INF("📊 Threshold detection thread stopped");
+    }
+}
+
+/* Phase C1: Peri-event data processing function - simplified for now */
+static void adc_process_peri_event_data(const int16_t *raw_samples, uint32_t sample_count,
+                                        const struct juxta_framfs_adc_config *config)
+{
+    if (!raw_samples || sample_count == 0 || !config)
+    {
+        return;
+    }
+
+    /* Simple conversion: treat raw samples as already scaled for now */
+    uint8_t peak_positive = 0;
+    uint8_t peak_negative = 255;
+
+    /* Convert samples to scaled format and find peaks */
+    for (uint32_t i = 0; i < sample_count && i < ADC_MAX_SAMPLES; i++)
+    {
+        /* Proper scaling: raw_samples[i] contains mV values, not raw ADC */
+        /* Convert mV range (-2000 to +2000) to 0-255 */
+        int32_t voltage_mv = raw_samples[i];
+        int32_t scaled = (voltage_mv + 2000) * 255 / 4000;
+        if (scaled < 0)
+            scaled = 0;
+        if (scaled > 255)
+            scaled = 255;
+        adc_scaled_buffer[i] = (uint8_t)scaled;
+
+        /* Debug: Log first few samples to check for mid-voltage issue */
+        if (i < 5)
+        {
+            LOG_DBG("📊 Sample[%u]: %d mV → scaled %u (0x%02X)",
+                    i, voltage_mv, (unsigned)scaled, (unsigned)adc_scaled_buffer[i]);
+        }
+
+        /* Track peaks */
+        if (adc_scaled_buffer[i] > peak_positive)
+            peak_positive = adc_scaled_buffer[i];
+        if (adc_scaled_buffer[i] < peak_negative)
+            peak_negative = adc_scaled_buffer[i];
+    }
+
+    /* Get timing information */
+    uint32_t unix_timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
+    uint32_t microsecond_offset = juxta_vitals_get_rel_microseconds_to_unix(&vitals_ctx);
+
+    /* Calculate duration for saved data; guard against zero rate */
+    uint32_t rate_hz = (ADC_TARGET_RATE_HZ > 0) ? ADC_TARGET_RATE_HZ : 1;
+    uint32_t duration_us = (sample_count > 0)
+                               ? (uint32_t)((uint64_t)sample_count * 1000000ULL / rate_hz)
+                               : 0u;
+
+    /* Cap duration to prevent FRAMFS overflow */
+    if (duration_us > 65535)
+    {
+        duration_us = 65535;
+        LOG_WRN("📊 Duration capped to 65535 µs for %u samples (simulation mode)", sample_count);
+    }
+
+    /* Store data based on output mode */
+    int ret = 0;
+    if (config->output_peaks_only)
+    {
+        /* Min/Max mode - store peaks only */
+        ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
+                                                 JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT,
+                                                 NULL, 0, duration_us,
+                                                 peak_positive, peak_negative);
+        if (ret == 0)
+        {
+            LOG_INF("📊 Peri-event peaks saved: [%u, %u], threshold=%u mV (trigger centered)",
+                    peak_positive, peak_negative, (unsigned)config->threshold_mv);
+        }
+    }
+    else
+    {
+        /* Full buffer mode - store complete waveform */
+        ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
+                                                 JUXTA_FRAMFS_ADC_EVENT_PERI_EVENT,
+                                                 adc_scaled_buffer, (uint16_t)sample_count, duration_us,
+                                                 peak_positive, peak_negative);
+        if (ret == 0)
+        {
+            LOG_INF("📊 Peri-event waveform saved: %u samples, peaks [%u, %u], threshold=%u mV (trigger centered)",
+                    (unsigned)sample_count, peak_positive, peak_negative, (unsigned)config->threshold_mv);
+        }
+    }
+
+    if (ret < 0)
+    {
+        LOG_ERR("📊 Failed to save peri-event data: %d", ret);
+    }
+}
+
 /* Battery check helper for FRAM operations */
 static bool should_allow_fram_write(void)
 {
@@ -507,159 +1298,59 @@ static bool should_allow_fram_write(void)
     return true;
 }
 
-// ADC work handler - runs in thread context to avoid ISR issues
+// Phase D1: New ring buffer-based ADC work handler
 static void adc_work_handler(struct k_work *work)
 {
-    if (!hardware_verified || !framfs_ctx.initialized || ble_connected || !juxta_adc_is_ready())
+    LOG_INF("📊 adc_work_handler: enter (verified=%d, framfs=%d, ble=%d, dma_active=%d, ring_count=%u)",
+            hardware_verified, framfs_ctx.initialized, ble_connected, adc_dma_active, adc_ring_count);
+
+    if (!hardware_verified || !framfs_ctx.initialized || ble_connected)
     {
+        LOG_INF("📊 adc_work_handler: deferred (preconditions not met)");
         return;
     }
 
-    /* Check battery before FRAM operations */
-    if (!should_allow_fram_write())
+    /* In Phase 1 (no TIMER/PPI yet), just ensure DMA scaffolding is active.
+     * Do NOT start threshold thread until we actually have samples in the ring
+     * to avoid any early computations that could cause faults.
+     */
+    if (!adc_dma_active)
     {
-        LOG_INF("📊 Skipping ADC burst due to low battery");
-        return;
+        LOG_INF("📊 adc_work_handler: starting DMA scaffolding");
+        (void)adc_start_dma_sampling();
+#if IS_ENABLED(CONFIG_ADC)
+        /* Prevent SAADC contention: pause vitals battery ADC while capturing */
+        if (!vitals_batt_disabled_for_adc)
+        {
+            (void)juxta_vitals_set_battery_monitoring(&vitals_ctx, false);
+            vitals_batt_disabled_for_adc = true;
+            LOG_INF("📊 Paused vitals battery monitoring for ADC capture");
+        }
+        if (!zephyr_adc_thread_active)
+        {
+            zephyr_adc_thread_active = true;
+            k_thread_create(&zephyr_adc_thread, zephyr_adc_stack, K_THREAD_STACK_SIZEOF(zephyr_adc_stack),
+                            zephyr_adc_thread_entry, NULL, NULL, NULL, K_PRIO_COOP(7), 0, K_NO_WAIT);
+            LOG_INF("📊 Zephyr ADC capture thread started");
+        }
+#endif
     }
 
-    /* Get ADC configuration */
-    struct juxta_framfs_adc_config adc_config;
-    int config_ret = juxta_framfs_get_adc_config(&framfs_ctx, &adc_config);
-    if (config_ret < 0)
+    /* Start threshold thread only when we have at least one DMA block worth of samples */
+    if (!adc_threshold_thread_active && adc_ring_count >= ADC_DMA_BLOCK_SIZE)
     {
-        LOG_ERR("📊 Failed to get ADC config, using defaults");
-        /* Use default timer burst mode */
-        adc_config.mode = JUXTA_FRAMFS_ADC_MODE_TIMER_BURST;
-        adc_config.threshold_mv = 0;
-        adc_config.buffer_size = 1000;
-        adc_config.debounce_ms = 5000;
-        adc_config.output_peaks_only = false;
+        LOG_INF("📊 Starting threshold detection (ring has %u samples)", adc_ring_count);
+        (void)adc_start_threshold_thread();
     }
 
-    // Trigger ADC burst sampling into static buffer
-    int32_t *samples = adc_samples_buffer; // Use static buffer to avoid stack usage
-    uint32_t actual_samples;
-    uint32_t duration_us;
-
-    /* Use configured buffer size (limited by static buffer and duration overflow protection) */
-    /* Limit to 1000 samples to prevent duration overflow (1000 * 60µs = 60ms < 65.5ms limit) */
-    uint32_t max_samples = MIN(MIN(adc_config.buffer_size, ADC_MAX_SAMPLES), 1000);
-
-    int ret = juxta_adc_burst_sample(samples, max_samples, &actual_samples, &duration_us);
-    if (ret == 0 && actual_samples > 0)
-    {
-        LOG_DBG("📊 ADC work handler: mode=%d, actual_samples=%u, duration=%u us",
-                adc_config.mode, (unsigned)actual_samples, (unsigned)duration_us);
-
-        // Get Unix timestamp and microsecond offset using the new vitals helper functions
-        uint32_t unix_timestamp = juxta_vitals_get_timestamp(&vitals_ctx);
-        uint32_t microsecond_offset = juxta_vitals_get_rel_microseconds_to_unix(&vitals_ctx);
-
-        // Convert int32_t samples to uint8_t for storage (scale appropriately) using static buffer
-        uint8_t *scaled_samples = adc_scaled_buffer;
-        uint32_t count = (actual_samples > max_samples) ? max_samples : actual_samples;
-
-        LOG_DBG("📊 ADC work handler: using count=%u for storage", (unsigned)count);
-        for (uint32_t i = 0; i < count; i++)
-        {
-            // Scale int32_t voltage (mV) to uint8_t (0-255 range)
-            // Assuming voltage range is roughly -2000 to +2000 mV
-            int32_t scaled = (samples[i] + 2000) * 255 / 4000;
-            if (scaled < 0)
-                scaled = 0;
-            if (scaled > 255)
-                scaled = 255;
-            scaled_samples[i] = (uint8_t)scaled;
-        }
-
-        /* Process based on ADC mode */
-        if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_TIMER_BURST)
-        {
-            /* Timer burst mode - store all samples */
-            ret = juxta_framfs_append_adc_burst_data(&time_ctx, unix_timestamp, microsecond_offset,
-                                                     scaled_samples, (uint16_t)count, duration_us);
-        }
-        else if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT)
-        {
-            /* Threshold event mode - check for threshold crossing */
-            bool threshold_crossed = false;
-            uint8_t peak_positive = 0;
-            uint8_t peak_negative = 255;
-
-            /* Find peaks and check threshold */
-            for (uint32_t i = 0; i < count; i++)
-            {
-                int32_t voltage_mv = samples[i];
-                uint8_t scaled_sample = scaled_samples[i];
-
-                /* Check threshold crossing (absolute value) */
-                if (adc_config.threshold_mv > 0 && abs(voltage_mv) > (int32_t)adc_config.threshold_mv)
-                {
-                    threshold_crossed = true;
-                }
-
-                /* Track peaks */
-                if (scaled_sample > peak_positive)
-                {
-                    peak_positive = scaled_sample;
-                }
-                if (scaled_sample < peak_negative)
-                {
-                    peak_negative = scaled_sample;
-                }
-            }
-
-            /* Store event if threshold crossed or always trigger (threshold = 0) */
-            if (threshold_crossed || adc_config.threshold_mv == 0)
-            {
-                if (adc_config.output_peaks_only)
-                {
-                    /* Single event mode - store peaks only */
-                    ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
-                                                             JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT,
-                                                             NULL, 0, duration_us,
-                                                             peak_positive, peak_negative);
-                    if (ret == 0)
-                    {
-                        LOG_INF("📊 ADC event saved: peaks [%u, %u], threshold=%u mV",
-                                peak_positive, peak_negative, (unsigned)adc_config.threshold_mv);
-                    }
-                }
-                else
-                {
-                    /* Peri-event mode - store full waveform */
-                    ret = juxta_framfs_append_adc_event_data(&time_ctx, unix_timestamp, microsecond_offset,
-                                                             JUXTA_FRAMFS_ADC_EVENT_PERI_EVENT,
-                                                             scaled_samples, (uint16_t)count, duration_us,
-                                                             peak_positive, peak_negative);
-                    if (ret == 0)
-                    {
-                        LOG_INF("📊 ADC peri-event saved: %u samples, peaks [%u, %u], threshold=%u mV",
-                                (unsigned)count, peak_positive, peak_negative, (unsigned)adc_config.threshold_mv);
-                    }
-                }
-            }
-            else
-            {
-                LOG_DBG("📊 No threshold crossing detected (threshold=%u mV)", (unsigned)adc_config.threshold_mv);
-            }
-        }
-
-        if (ret < 0)
-        {
-            LOG_ERR("📊 Failed to record ADC data: %d", ret);
-        }
-    }
-    else
-    {
-        LOG_WRN("📊 ADC burst sampling failed or no samples: %d", ret);
-    }
+    LOG_INF("📊 Ring buffer status: head=%u, count=%u", adc_ring_head, adc_ring_count);
 }
 
 // ADC timer callback - triggers ADC work in thread context
 static void adc_timer_callback(struct k_timer *timer)
 {
     // Only submit work, do not call FRAMFS functions in ISR context
+    LOG_INF("📊 adc_timer_callback: submit adc_work");
     k_work_submit(&adc_work);
 }
 
@@ -1249,6 +1940,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     ble_connected = false; // Mark as disconnected
     ble_state = BLE_STATE_IDLE;
 
+    /* Stop DMA sampling if active */
+    if (adc_dma_active)
+    {
+        LOG_INF("📊 Stopping ADC DMA sampling on disconnect");
+        adc_stop_dma_sampling();
+    }
+
     /* Re-enable watchdog after BLE operations complete - COMMENTED OUT */
     // if (wdt && wdt_channel_id >= 0)
     // {
@@ -1338,7 +2036,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
             else if (current_mode == OPERATING_MODE_ADC_ONLY)
             {
                 LOG_INF("▶️ ADC_ONLY mode resumed - ADC timer continues");
-                // ADC timer continues automatically
+                /* Kick ADC work immediately after disconnect so DMA path starts without delay */
+                LOG_INF("📊 adc_work_handler: resume kick after disconnect");
+                k_work_submit(&adc_work);
             }
         }
     }
@@ -1456,7 +2156,7 @@ static void pause_all_operations(void)
     if (current_mode == OPERATING_MODE_ADC_ONLY)
     {
         // Stop ADC timer
-        k_timer_stop(&adc_timer);
+        k_timer_stop(&adc_k_timer);
         LOG_INF("⏸️ ADC timer stopped");
     }
     else if (current_mode == OPERATING_MODE_NORMAL)
@@ -1485,7 +2185,7 @@ static void resume_all_operations(void)
     if (current_mode == OPERATING_MODE_ADC_ONLY)
     {
         // Restart ADC timer
-        k_timer_start(&adc_timer, K_SECONDS(5), K_SECONDS(5));
+        k_timer_start(&adc_k_timer, K_SECONDS(5), K_SECONDS(5));
         LOG_INF("▶️ ADC timer restarted");
     }
     else if (current_mode == OPERATING_MODE_NORMAL)
@@ -1508,7 +2208,7 @@ static void perform_graceful_reset(void)
     // Ensure all operations are stopped based on current mode
     if (current_mode == OPERATING_MODE_ADC_ONLY)
     {
-        k_timer_stop(&adc_timer);
+        k_timer_stop(&adc_k_timer);
         LOG_INF("🔄 ADC timer stopped for reset");
     }
     else if (current_mode == OPERATING_MODE_NORMAL)
@@ -2180,8 +2880,11 @@ int main(void)
     {
         /* Mode 1: Start ADC timer for pure ADC recordings - no state machine needed */
         k_work_init(&adc_work, adc_work_handler);
-        k_timer_init(&adc_timer, adc_timer_callback, NULL);
-        k_timer_start(&adc_timer, K_SECONDS(5), K_SECONDS(5)); // Every 5 seconds
+        k_timer_init(&adc_k_timer, adc_timer_callback, NULL);
+        k_timer_start(&adc_k_timer, K_SECONDS(5), K_SECONDS(5)); // Every 5 seconds
+        /* Kick once immediately so we don't wait 5 seconds for first run */
+        LOG_INF("📊 adc_work_handler: initial kick after ADC_ONLY init");
+        k_work_submit(&adc_work);
         LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
         LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (5s intervals)");
 
