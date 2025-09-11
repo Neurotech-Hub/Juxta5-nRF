@@ -251,11 +251,11 @@ static bool adc_operations_paused = false;
 #define ADC_MAX_SAMPLES 1000
 static uint8_t adc_scaled_buffer[ADC_MAX_SAMPLES];
 
-/* Phase A1: DMA Ring Buffer Configuration for 10kSPS peri-event capture */
-#define ADC_RING_BUFFER_SIZE 1000 /* 0.1s history at 10kSPS (~2KB RAM) */
-#define ADC_DMA_BLOCK_SIZE 100    /* 1ms per block at 100kSPS */
-#define ADC_TARGET_RATE_HZ 100000 /* Target 100kSPS sampling rate */
-#define ADC_INTERVAL_US 10        /* 10µs between samples for 100kSPS */
+/* Phase A1: DMA Ring Buffer Configuration for peri-event capture */
+#define ADC_RING_BUFFER_SIZE 1000 /* Ring buffer size (configurable sampling rate) */
+#define ADC_DMA_BLOCK_SIZE 100    /* DMA block size */
+#define ADC_TARGET_RATE_HZ 100000 /* Legacy constant (not used - sampling rate is session-based) */
+#define ADC_INTERVAL_US 10        /* Legacy constant (not used - interval calculated from session rate) */
 
 /* Ring buffer storage (Phase A1: just variables) */
 static int16_t adc_ring_buffer[ADC_RING_BUFFER_SIZE];
@@ -428,7 +428,7 @@ static void adc_stop_threshold_thread(void);
 static uint8_t current_mode = OPERATING_MODE_UNDEFINED; /* Must be set via BLE */
 static uint8_t session_adv_interval = ADV_INTERVAL_SECONDS;
 static uint8_t session_scan_interval = SCAN_INTERVAL_SECONDS;
-static uint32_t session_adc_sampling_rate = 100000; /* ADC sampling rate in Hz (default 100kHz) */
+static uint32_t session_adc_sampling_rate = 10000; /* ADC sampling rate in Hz (default 10kHz) */
 #define GATEWAY_ADV_TIMEOUT_SECONDS 30
 #define WDT_TIMEOUT_MS 30000
 
@@ -635,7 +635,7 @@ void juxta_set_session_intervals(uint8_t adv_interval, uint8_t scan_interval)
 
 /**
  * @brief Get current ADC sampling rate from session configuration
- * @return Current sampling rate in Hz
+ * @return Current sampling rate in Hz (default 10kHz)
  */
 uint32_t juxta_get_adc_sampling_rate(void)
 {
@@ -644,15 +644,15 @@ uint32_t juxta_get_adc_sampling_rate(void)
 
 /**
  * @brief Set ADC sampling rate in session configuration
- * @param sampling_rate_hz Sampling rate in Hz (will be clamped to 1kHz-100kHz range)
+ * @param sampling_rate_hz Sampling rate in Hz (will be clamped to 10kHz-100kHz range)
  */
 void juxta_set_adc_sampling_rate(uint32_t sampling_rate_hz)
 {
     /* Clamp to valid range */
-    if (sampling_rate_hz < 1000)
+    if (sampling_rate_hz < 10000)
     {
-        LOG_WRN("Sampling rate too low: %u Hz, clamping to 1000 Hz", sampling_rate_hz);
-        session_adc_sampling_rate = 1000;
+        LOG_WRN("Sampling rate too low: %u Hz, clamping to 10000 Hz", sampling_rate_hz);
+        session_adc_sampling_rate = 10000;
     }
     else if (sampling_rate_hz > 100000)
     {
@@ -1353,11 +1353,11 @@ static void adc_process_peri_event_data(const int16_t *raw_samples, uint32_t sam
                                ? (uint32_t)((uint64_t)sample_count * 1000000ULL / rate_hz)
                                : 0u;
 
-    /* Cap duration to prevent FRAMFS overflow */
-    if (duration_us > 65535)
+    /* Cap duration to prevent FRAMFS overflow (max 10 seconds) */
+    if (duration_us > 10000000)
     {
-        duration_us = 65535;
-        LOG_WRN("📊 Duration capped to 65535 µs for %u samples (simulation mode)", sample_count);
+        duration_us = 10000000;
+        LOG_WRN("📊 Duration capped to 10 seconds for %u samples at %u Hz", sample_count, rate_hz);
     }
 
     /* Store data based on output mode */
@@ -1511,6 +1511,32 @@ static void setup_dynamic_adv_name(void)
     {
         LOG_WRN("Failed to get BLE MAC address, using default");
         strcpy(adv_name, "JX_DEFAULT");
+    }
+
+    // Set the device name in the Bluetooth stack
+    int ret = bt_set_name(adv_name);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set device name: %d", ret);
+    }
+    else
+    {
+        LOG_INF("📛 Device name set to: %s", adv_name);
+
+        // Update advertising data to include the new name
+        // Note: bt_set_name() doesn't automatically update advertising data
+        struct bt_data adv_data[] = {
+            BT_DATA(BT_DATA_NAME_COMPLETE, adv_name, strlen(adv_name))};
+
+        ret = bt_le_adv_update_data(adv_data, ARRAY_SIZE(adv_data), NULL, 0);
+        if (ret < 0)
+        {
+            LOG_WRN("Failed to update advertising data: %d (this is normal if not advertising yet)", ret);
+        }
+        else
+        {
+            LOG_INF("📛 Advertising data updated with new name");
+        }
     }
 }
 
@@ -2789,6 +2815,9 @@ int main(void)
     // Start connectable advertising and wait for datetime synchronization
     // Ensure work handler is initialized before any scheduling
     k_work_init(&datetime_sync_restart_work, datetime_sync_restart_work_handler);
+
+    // Ensure dynamic name is set before starting connectable advertising
+    setup_dynamic_adv_name();
 
     // Retry connectable advertising with delays
     int adv_retry_count = 0;

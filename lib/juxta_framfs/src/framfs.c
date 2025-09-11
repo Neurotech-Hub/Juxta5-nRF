@@ -1179,6 +1179,13 @@ int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx)
     strcpy(ctx->user_settings.subject_id, "");       /* Default: empty */
     strcpy(ctx->user_settings.upload_path, "/TEST"); /* Default: /TEST */
 
+    /* Initialize ADC configuration with defaults */
+    ctx->user_settings.adc_config.mode = JUXTA_FRAMFS_ADC_MODE_TIMER_BURST;
+    ctx->user_settings.adc_config.threshold_mv = 0;          /* 0 = always trigger (timer mode) */
+    ctx->user_settings.adc_config.buffer_size = 1000;        /* Default buffer size */
+    ctx->user_settings.adc_config.debounce_ms = 5000;        /* 5 second intervals (timer mode) */
+    ctx->user_settings.adc_config.output_peaks_only = false; /* Full waveform */
+
     /* Write to FRAM */
     int ret = framfs_write_user_settings(ctx);
     if (ret < 0)
@@ -1186,13 +1193,6 @@ int juxta_framfs_clear_user_settings(struct juxta_framfs_context *ctx)
         LOG_ERR("Failed to write user settings: %d", ret);
         return ret;
     }
-
-    /* Initialize ADC configuration with defaults */
-    ctx->user_settings.adc_config.mode = JUXTA_FRAMFS_ADC_MODE_TIMER_BURST;
-    ctx->user_settings.adc_config.threshold_mv = 0;          /* 0 = always trigger (timer mode) */
-    ctx->user_settings.adc_config.buffer_size = 1000;        /* Default buffer size */
-    ctx->user_settings.adc_config.debounce_ms = 5000;        /* 5 second intervals (timer mode) */
-    ctx->user_settings.adc_config.output_peaks_only = false; /* Full waveform */
 
     LOG_INF("User settings cleared successfully");
     return JUXTA_FRAMFS_OK;
