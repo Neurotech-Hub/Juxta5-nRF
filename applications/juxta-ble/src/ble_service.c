@@ -741,6 +741,18 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
         }
     }
 
+    p = strstr(json_cmd, "\"adcSamplingRate\":");
+    if (p)
+    {
+        uint32_t adc_sampling_rate;
+        if (sscanf(p, "\"adcSamplingRate\":%u", &adc_sampling_rate) == 1)
+        {
+            LOG_INF("🎛️ ADC sampling rate command: %u Hz", adc_sampling_rate);
+            juxta_set_adc_sampling_rate(adc_sampling_rate);
+            /* Note: sampling rate is session-based, not persisted to FRAMFS */
+        }
+    }
+
     if (settings_changed)
     {
         LOG_INF("🎛️ Settings updated - saving to framfs");

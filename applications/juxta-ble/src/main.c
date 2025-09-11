@@ -337,7 +337,10 @@ static void zephyr_adc_thread_entry(void *p1, void *p2, void *p3)
         seq.resolution = 12;
         seq.oversampling = 0;
         struct adc_sequence_options opts = {0};
-        opts.interval_us = ADC_INTERVAL_US;
+
+        /* Get current sampling rate from configuration */
+        uint32_t current_sampling_rate = juxta_get_adc_sampling_rate();
+        opts.interval_us = 1000000UL / current_sampling_rate; /* Convert Hz to microseconds */
         opts.extra_samplings = ADC_DMA_BLOCK_SIZE - 1;
         seq.options = &opts;
 
@@ -425,6 +428,7 @@ static void adc_stop_threshold_thread(void);
 static uint8_t current_mode = OPERATING_MODE_UNDEFINED; /* Must be set via BLE */
 static uint8_t session_adv_interval = ADV_INTERVAL_SECONDS;
 static uint8_t session_scan_interval = SCAN_INTERVAL_SECONDS;
+static uint32_t session_adc_sampling_rate = 100000; /* ADC sampling rate in Hz (default 100kHz) */
 #define GATEWAY_ADV_TIMEOUT_SECONDS 30
 #define WDT_TIMEOUT_MS 30000
 
@@ -630,6 +634,40 @@ void juxta_set_session_intervals(uint8_t adv_interval, uint8_t scan_interval)
 }
 
 /**
+ * @brief Get current ADC sampling rate from session configuration
+ * @return Current sampling rate in Hz
+ */
+uint32_t juxta_get_adc_sampling_rate(void)
+{
+    return session_adc_sampling_rate;
+}
+
+/**
+ * @brief Set ADC sampling rate in session configuration
+ * @param sampling_rate_hz Sampling rate in Hz (will be clamped to 1kHz-100kHz range)
+ */
+void juxta_set_adc_sampling_rate(uint32_t sampling_rate_hz)
+{
+    /* Clamp to valid range */
+    if (sampling_rate_hz < 1000)
+    {
+        LOG_WRN("Sampling rate too low: %u Hz, clamping to 1000 Hz", sampling_rate_hz);
+        session_adc_sampling_rate = 1000;
+    }
+    else if (sampling_rate_hz > 100000)
+    {
+        LOG_WRN("Sampling rate too high: %u Hz, clamping to 100000 Hz", sampling_rate_hz);
+        session_adc_sampling_rate = 100000;
+    }
+    else
+    {
+        session_adc_sampling_rate = sampling_rate_hz;
+    }
+
+    LOG_INF("🔧 ADC sampling rate updated: %u Hz", session_adc_sampling_rate);
+}
+
+/**
  * @brief Trigger ADC configuration update when ADC settings change
  * Called from BLE service when ADC configuration is updated
  */
@@ -641,9 +679,9 @@ void juxta_ble_adc_config_update_trigger(void)
     struct juxta_framfs_adc_config adc_config;
     if (juxta_framfs_get_adc_config(&framfs_ctx, &adc_config) == 0)
     {
-        LOG_INF("📊 New ADC config: mode=%d, threshold=%u mV, buffer=%u, debounce=%u ms, peaks_only=%s",
+        LOG_INF("📊 New ADC config: mode=%d, threshold=%u mV, buffer=%u, debounce=%u ms, peaks_only=%s, sampling_rate=%u Hz",
                 adc_config.mode, (unsigned)adc_config.threshold_mv, adc_config.buffer_size,
-                (unsigned)adc_config.debounce_ms, adc_config.output_peaks_only ? "true" : "false");
+                (unsigned)adc_config.debounce_ms, adc_config.output_peaks_only ? "true" : "false", session_adc_sampling_rate);
 
         /* Update ADC timer interval if in ADC_ONLY mode and using timer mode */
         /* Only update timer if hardware is verified and system is ready */
@@ -893,7 +931,9 @@ static int adc_start_dma_sampling(void)
     }
     else
     {
-        uint32_t ticks = nrfx_timer_us_to_ticks(&adc_hw_timer, 1000000UL / ADC_TARGET_RATE_HZ);
+        /* Get current sampling rate from configuration */
+        uint32_t current_sampling_rate = juxta_get_adc_sampling_rate();
+        uint32_t ticks = nrfx_timer_us_to_ticks(&adc_hw_timer, 1000000UL / current_sampling_rate);
         nrfx_timer_clear(&adc_hw_timer);
         nrfx_timer_extended_compare(&adc_hw_timer, NRF_TIMER_CC_CHANNEL0, ticks,
                                     NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, false);
@@ -902,7 +942,10 @@ static int adc_start_dma_sampling(void)
     /* Advanced mode: external SAMPLE via PPI */
     uint32_t ch_mask = BIT(0);
     nrfx_saadc_adv_config_t adv_cfg = NRFX_SAADC_DEFAULT_ADV_CONFIG;
-    adv_cfg.internal_timer_cc = use_internal_timer ? (uint16_t)(16000000UL / ADC_TARGET_RATE_HZ) : 0;
+
+    /* Get current sampling rate from configuration */
+    uint32_t current_sampling_rate = juxta_get_adc_sampling_rate();
+    adv_cfg.internal_timer_cc = use_internal_timer ? (uint16_t)(16000000UL / current_sampling_rate) : 0;
     if (use_internal_timer && adv_cfg.internal_timer_cc < 80)
     {
         adv_cfg.internal_timer_cc = 80; /* Hardware lower bound */
@@ -972,12 +1015,12 @@ static int adc_start_dma_sampling(void)
         (void)nrfx_ppi_channel_enable(adc_ppi_sample_ch);
         (void)nrfx_ppi_channel_enable(adc_ppi_start_on_end_ch);
         nrfx_timer_enable(&adc_hw_timer);
-        LOG_INF("📊 Phase 2 active: TIMER->PPI->SAADC wired at %u Hz", ADC_TARGET_RATE_HZ);
+        LOG_INF("📊 Phase 2 active: TIMER->PPI->SAADC wired at %u Hz", current_sampling_rate);
     }
     else
     {
         LOG_INF("📊 Phase 2 active: SAADC internal timer at ~%u Hz (CC=%u)",
-                ADC_TARGET_RATE_HZ, adv_cfg.internal_timer_cc);
+                current_sampling_rate, adv_cfg.internal_timer_cc);
     }
 #else
     LOG_INF("📊 Zephyr ADC driver active (CONFIG_ADC=y) - skipping nrfx SAADC DMA start");
@@ -1303,7 +1346,9 @@ static void adc_process_peri_event_data(const int16_t *raw_samples, uint32_t sam
     uint32_t microsecond_offset = juxta_vitals_get_rel_microseconds_to_unix(&vitals_ctx);
 
     /* Calculate duration for saved data; guard against zero rate */
-    uint32_t rate_hz = (ADC_TARGET_RATE_HZ > 0) ? ADC_TARGET_RATE_HZ : 1;
+    uint32_t rate_hz = juxta_get_adc_sampling_rate();
+    if (rate_hz == 0)
+        rate_hz = 1; /* Guard against zero rate */
     uint32_t duration_us = (sample_count > 0)
                                ? (uint32_t)((uint64_t)sample_count * 1000000ULL / rate_hz)
                                : 0u;
@@ -2945,9 +2990,22 @@ int main(void)
         /* Mode 1: Start ADC timer for pure ADC recordings - no state machine needed */
         k_work_init(&adc_work, adc_work_handler);
         k_timer_init(&adc_k_timer, adc_timer_callback, NULL);
-        k_timer_start(&adc_k_timer, K_SECONDS(5), K_SECONDS(5)); // Every 5 seconds
-        /* Kick once immediately so we don't wait 5 seconds for first run */
-        LOG_INF("📊 adc_work_handler: initial kick after ADC_ONLY init");
+
+        /* Get ADC configuration for timer interval */
+        struct juxta_framfs_adc_config adc_config;
+        uint32_t interval_seconds = 5; /* Default 5 seconds */
+        if (juxta_framfs_get_adc_config(&framfs_ctx, &adc_config) == 0)
+        {
+            interval_seconds = adc_config.debounce_ms / 1000;
+            if (interval_seconds < 1)
+            {
+                interval_seconds = 1; /* Minimum 1 second */
+            }
+        }
+
+        k_timer_start(&adc_k_timer, K_SECONDS(interval_seconds), K_SECONDS(interval_seconds));
+        /* Kick once immediately so we don't wait for first run */
+        LOG_INF("📊 adc_work_handler: initial kick after ADC_ONLY init (interval: %u seconds)", interval_seconds);
         k_work_submit(&adc_work);
         LOG_INF("✅ JUXTA BLE Application started in ADC_ONLY mode (pure ADC recordings)");
         LOG_INF("📊 ADC_ONLY mode: State machine disabled - ADC timer active (5s intervals)");

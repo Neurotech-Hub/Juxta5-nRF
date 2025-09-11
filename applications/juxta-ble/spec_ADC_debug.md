@@ -27,19 +27,25 @@ Following the header, the data format depends on the event type:
 ## Event Type Identification
 
 ### Timer Burst Events (Event Type 0x00)
+- **Mode**: `adc_config.mode = 0` (JUXTA_FRAMFS_ADC_MODE_TIMER_BURST)
 - **Sample count**: > 0 (typically 1000)
 - **Data format**: Raw ADC samples (0-255)
 - **Structure**: 13-byte header + N sample bytes
+- **Trigger**: Always triggers based on debounce timer (ignores threshold)
 
 ### Single Events (Event Type 0x02 - Peak Detection)
+- **Mode**: `adc_config.mode = 1` with `adcPeaksOnly = true`
 - **Sample count**: 0 (no samples stored)
 - **Data format**: Peak values + reserved
 - **Structure**: 13-byte header + 3-byte event data
+- **Trigger**: Threshold-based detection
 
 ### Peri-Events (Event Type 0x01 - Waveform Capture)
+- **Mode**: `adc_config.mode = 1` with `adcPeaksOnly = false`
 - **Sample count**: > 0 (typically 200-1000)
 - **Data format**: Raw ADC samples (0-255)
 - **Structure**: 13-byte header + N sample bytes
+- **Trigger**: Threshold-based detection
 
 ## Decoding Examples
 
@@ -208,14 +214,19 @@ def decode_adc_file(filename):
 ## Event Type Determination
 
 ### Direct Detection (Byte 12)
-- **Event type 0x00**: Timer burst event (waveform data, typically 1000 samples)
-- **Event type 0x01**: Peri-event waveform (waveform data, variable samples)
-- **Event type 0x02**: Single event (peaks only, sample count = 0)
+- **Event type 0x00**: Timer burst event (mode 0, always triggers, waveform data)
+- **Event type 0x01**: Peri-event waveform (mode 1, threshold-based, waveform data)
+- **Event type 0x02**: Single event (mode 1, threshold-based, peaks only)
 
 ### Event Type Constants
-- **0x00**: Timer burst event
-- **0x01**: Peri-event waveform
-- **0x02**: Single event (peaks only)
+- **0x00**: Timer burst event (JUXTA_FRAMFS_ADC_EVENT_TIMER_BURST)
+- **0x01**: Peri-event waveform (JUXTA_FRAMFS_ADC_EVENT_PERI_EVENT)
+- **0x02**: Single event (JUXTA_FRAMFS_ADC_EVENT_SINGLE_EVENT)
+
+### Mode-to-Event-Type Mapping
+- **Mode 0**: Always produces event type 0x00 (timer burst)
+- **Mode 1 + peaks_only=false**: Produces event type 0x01 (peri-event)
+- **Mode 1 + peaks_only=true**: Produces event type 0x02 (single event)
 
 ## Data Architecture Summary
 
@@ -232,11 +243,13 @@ def decode_adc_file(filename):
 
 ## Notes
 - **Endianness**: All multi-byte values are stored in big-endian format
-- **Header size**: Updated to 13 bytes (added event type byte)
-- **Event type**: Now explicitly stored in header byte 12 for all record types
-- **Sample scaling**: The device scales int32_t voltage readings to uint8_t for storage
+- **Header size**: 13 bytes (includes event type byte)
+- **Event type**: Explicitly stored in header byte 12 for all record types
+- **Sample scaling**: Device scales int16_t voltage readings to uint8_t for storage
 - **File boundaries**: Records are stored sequentially without delimiters
 - **Event types**: Multiple formats supported in same file with explicit type identification
-- **Configuration driven**: Event types determined by runtime ADC configuration
+- **Mode-based configuration**: Event types determined by `adc_config.mode` and `adcPeaksOnly` settings
+- **Debounce logic**: Both modes respect debounce timer to prevent rapid triggering
 - **Microsecond precision**: All events maintain exact timing relationships
 - **File transfer**: Data sent as hex strings via BLE with EOF marker
+- **Current implementation**: Software simulation mode with 1kHz sampling rate

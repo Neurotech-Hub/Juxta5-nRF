@@ -107,6 +107,18 @@ extern "C"
     extern void juxta_ble_timing_update_trigger(void);
 
     /**
+     * @brief Get current ADC sampling rate from session configuration
+     * @return Current sampling rate in Hz
+     */
+    extern uint32_t juxta_get_adc_sampling_rate(void);
+
+    /**
+     * @brief Set ADC sampling rate in session configuration
+     * @param sampling_rate_hz Sampling rate in Hz (will be clamped to 1kHz-100kHz range)
+     */
+    extern void juxta_set_adc_sampling_rate(uint32_t sampling_rate_hz);
+
+    /**
      * @brief Trigger ADC configuration update when ADC settings change
      * This function should be implemented in main.c to handle ADC config updates
      */

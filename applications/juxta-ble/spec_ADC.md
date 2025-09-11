@@ -5,19 +5,21 @@ The ADC-only mode provides high-precision data logging for electric fish dischar
 
 ## ADC Sampling Modes
 
-The system supports two distinct ADC sampling modes:
+The system supports two distinct ADC sampling modes controlled by `adc_config.mode`:
 
-### 1. Timer-Based Burst Mode (Current Implementation)
+### 1. Timer-Based Burst Mode (Mode 0)
 - **Purpose**: Regular sampling bursts for general monitoring
-- **Trigger**: Fixed timer intervals (currently 5 seconds)
+- **Trigger**: Fixed timer intervals (configurable debounce period, default 5 seconds)
 - **Data**: Complete burst of samples with precise timing
 - **Use Case**: Baseline monitoring and system validation
+- **Configuration**: `mode=0`, threshold ignored, always triggers
 
-### 2. Threshold-Based Event Mode (New)
+### 2. Threshold-Based Event Mode (Mode 1)
 - **Purpose**: Capture electric fish discharge events with configurable output
 - **Trigger**: Threshold crossing on absolute differential signal
 - **Data**: Configurable output format (peaks only or full waveform)
 - **Use Case**: Event detection, counting, and waveform analysis
+- **Configuration**: `mode=1`, threshold detection active
 
 ## Timing Requirements
 
@@ -79,9 +81,10 @@ Both single-event and peri-event modes use the same underlying implementation wi
 - **Storage**: Full buffer contents
 - **Use case**: Detailed pulse shape analysis and debugging
 
-##### Timer Mode (Current Behavior)
-- **Threshold**: 0 mV (always triggers)
-- **Debounce**: 5000ms (5-second intervals)
+##### Timer Mode (Mode 0)
+- **Mode**: `adc_config.mode = 0` (JUXTA_FRAMFS_ADC_MODE_TIMER_BURST)
+- **Threshold**: Ignored (always triggers regardless of threshold value)
+- **Debounce**: Configurable (default 5000ms)
 - **Output**: Complete burst waveform
 - **Use case**: Baseline monitoring and system validation
 
@@ -134,11 +137,11 @@ Samples (N bytes): Complete waveform (peri-event only)
 - **Timer mode**: Threshold=0, debounce=5000ms (recreates current behavior)
 
 #### Phase 2: DMA Ring Buffer Implementation (Completed)
-- **Continuous sampling**: 10kHz ADC sampling into circular ring buffer
+- **Continuous sampling**: 1kHz ADC sampling into circular ring buffer (software simulation mode)
 - **Real-time threshold detection**: Dedicated thread monitors for threshold crossings
 - **Peri-event extraction**: Centered waveform capture around trigger events
 - **Configurable output**: Peaks-only or full waveform storage
-- **Session-based activation**: Starts after BLE disconnect in ADC_ONLY mode
+- **Mode-based activation**: Controlled by `adc_config.mode` setting
 
 #### Phase 3: DMA Optimization (Advanced)
 - **Hardware acceleration**: Use nRF52840 EasyDMA for automatic data transfer
@@ -236,21 +239,22 @@ static int16_t adc_dma_buf1[ADC_DMA_BLOCK_SIZE];
 #### Operational Flow
 
 ##### 1. System Activation
-- **Trigger**: BLE disconnect in ADC_ONLY mode with threshold event configuration
-- **Startup**: ADC work handler detects `adc_config.mode == JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT`
-- **Initialization**: Starts DMA sampling and threshold detection thread
+- **Trigger**: ADC_ONLY mode initialization with any ADC configuration
+- **Startup**: ADC work handler starts based on `adc_config.mode` setting
+- **Initialization**: Starts DMA sampling and threshold detection thread for both modes
 
 ##### 2. Continuous Sampling
-- **Target Rate**: 10kHz (100µs intervals)
-- **DMA Operation**: Hardware fills ping-pong buffers automatically
-- **Ring Buffer**: DMA completion callback adds samples to circular buffer
+- **Current Rate**: 1kHz (1ms intervals) - software simulation mode
+- **DMA Operation**: Software timer-based ADC sampling
+- **Ring Buffer**: Timer callback adds samples to circular buffer
 - **Memory Management**: Automatic wraparound prevents overflow
 
 ##### 3. Threshold Detection
 - **Dedicated Thread**: High-priority cooperative thread monitors ring buffer
-- **Real-time Scanning**: Searches for threshold crossings in newly added samples
-- **Configurable Threshold**: Absolute value comparison |signal| > threshold_mv
-- **Debounce Logic**: Prevents multiple triggers within debounce period
+- **Mode-based Logic**: 
+  - Mode 0: Always triggers (ignores threshold)
+  - Mode 1: Searches for threshold crossings |signal| > threshold_mv
+- **Debounce Logic**: Prevents multiple triggers within debounce period (applies to both modes)
 
 ##### 4. Peri-Event Extraction
 - **Trigger Centering**: Extracts samples centered around threshold crossing
@@ -295,15 +299,15 @@ static int16_t adc_dma_buf1[ADC_DMA_BLOCK_SIZE];
 - **Total Impact**: ~2.5KB additional RAM usage
 
 ##### Timing Precision
-- **Sample Rate**: Target 10kHz (actual rate depends on DMA implementation)
+- **Sample Rate**: 1kHz (software simulation mode)
 - **Threshold Detection**: Sub-millisecond response time
 - **Event Centering**: Precise trigger positioning within buffer
 - **Timestamp Accuracy**: Microsecond-level timing via RTC0 integration
 
 ##### Power Consumption
-- **Continuous Operation**: Higher power due to 10kHz sampling
+- **Continuous Operation**: Moderate power due to 1kHz sampling
 - **Thread Efficiency**: Cooperative threading reduces CPU overhead
-- **DMA Benefits**: Hardware automation reduces processor load
+- **Software Mode**: Timer-based sampling with configurable intervals
 - **Configurable Rates**: Lower sample rates possible for power savings
 
 #### Implementation Status
@@ -343,11 +347,13 @@ The hardware DMA integration was intentionally not completed for several strateg
 The system currently operates in **"Software Simulation Mode"**:
 - **Timer-Based Sampling**: 1kHz software timer takes real ADC samples and feeds ring buffer
 - **Ring Buffer**: Fully functional circular buffer management
-- **Threshold Detection**: Complete real-time monitoring for threshold crossings
+- **Mode-Based Detection**: 
+  - Mode 0: Always triggers with debounce (timer mode)
+  - Mode 1: Threshold-based detection with debounce (event mode)
 - **Peri-Event Extraction**: Functional centered waveform capture around triggers
 - **FRAMFS Storage**: Complete data storage with proper timestamps
 - **BLE Configuration**: All settings work and apply immediately
-- **Testing Ready**: Configure ADC Mode 1 via BLE and test threshold detection
+- **Testing Ready**: Both modes fully functional and testable
 
 ##### Software vs Hardware DMA Comparison
 
