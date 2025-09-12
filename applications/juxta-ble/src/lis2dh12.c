@@ -682,7 +682,7 @@ int lis2dh12_init_motion_system(void)
         return -ENODEV;
     }
 
-    ret = gpio_pin_configure(motion_dev.int_gpio.port, motion_dev.int_gpio.pin, GPIO_INPUT | GPIO_PULL_UP);
+    ret = gpio_pin_configure(motion_dev.int_gpio.port, motion_dev.int_gpio.pin, GPIO_INPUT);
     if (ret < 0)
     {
         LOG_ERR("Failed to configure LIS2DH INT GPIO: %d", ret);
