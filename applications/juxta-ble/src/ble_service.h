@@ -151,6 +151,18 @@ extern "C"
     void juxta_set_session_intervals(uint8_t adv_interval, uint8_t scan_interval);
 
     /**
+     * @brief Get current inactivity doubler setting
+     * @return true if motion-based interval doubling is enabled, false otherwise
+     */
+    bool juxta_get_session_inactivity_doubler_enabled(void);
+
+    /**
+     * @brief Set current inactivity doubler setting
+     * @param enabled true to enable motion-based interval doubling, false to disable
+     */
+    void juxta_set_session_inactivity_doubler_enabled(bool enabled);
+
+    /**
      * @brief Connection established callback
      *
      * @param conn Bluetooth connection handle

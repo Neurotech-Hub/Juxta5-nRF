@@ -1823,7 +1823,7 @@ int juxta_framfs_append_adc_burst_data(struct juxta_framfs_ctx *ctx,
     uint32_t clamped_duration = (duration_us > 65535) ? 65535 : duration_us;
     if (duration_us > 65535)
     {
-        LOG_WRN("📊 Duration overflow: %u µs capped to 65535 µs (indicates slow sampling)", (unsigned)duration_us);
+        LOG_WRN("*** CRITICAL *** Duration overflow: %u µs capped to 65535 µs (indicates slow sampling)", (unsigned)duration_us);
     }
     header[10] = (clamped_duration >> 8) & 0xFF;     /* Duration high byte */
     header[11] = clamped_duration & 0xFF;            /* Duration low byte */
@@ -1978,7 +1978,7 @@ int juxta_framfs_append_adc_event_data(struct juxta_framfs_ctx *ctx,
     uint32_t clamped_duration = (duration_us > 65535) ? 65535 : duration_us;
     if (duration_us > 65535)
     {
-        LOG_WRN("📊 Duration overflow: %u µs capped to 65535 µs (indicates slow sampling)", (unsigned)duration_us);
+        LOG_WRN("*** CRITICAL *** Duration overflow: %u µs capped to 65535 µs (indicates slow sampling)", (unsigned)duration_us);
     }
     header[10] = (clamped_duration >> 8) & 0xFF;
     header[11] = clamped_duration & 0xFF;

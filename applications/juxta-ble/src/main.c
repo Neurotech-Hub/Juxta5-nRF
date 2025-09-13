@@ -248,14 +248,17 @@ static uint32_t magnet_reset_start_time = 0;
 static bool adc_operations_paused = false;
 
 /* Static buffers for ADC sampling to avoid sysworkq stack overflow */
-#define ADC_MAX_SAMPLES 1000
+#define ADC_MAX_SAMPLES 500
 static uint8_t adc_scaled_buffer[ADC_MAX_SAMPLES];
 
 /* Phase A1: DMA Ring Buffer Configuration for peri-event capture */
-#define ADC_RING_BUFFER_SIZE 1000 /* Ring buffer size (configurable sampling rate) */
-#define ADC_DMA_BLOCK_SIZE 100    /* DMA block size */
-#define ADC_TARGET_RATE_HZ 100000 /* Legacy constant (not used - sampling rate is session-based) */
-#define ADC_INTERVAL_US 10        /* Legacy constant (not used - interval calculated from session rate) */
+#define ADC_RING_BUFFER_SIZE 500 /* Ring buffer size (configurable sampling rate) */
+#define ADC_DMA_BLOCK_SIZE 100   /* DMA block size */
+
+/* Buffer size validation limits */
+#define ADC_MIN_BUFFER_SIZE 100     /* Minimum: 1 DMA block */
+#define ADC_DEFAULT_BUFFER_SIZE 200 /* Recommended default */
+#define ADC_MAX_BUFFER_SIZE 500     /* Maximum: matches ring buffer size */
 
 /* Ring buffer storage (Phase A1: just variables) */
 static int16_t adc_ring_buffer[ADC_RING_BUFFER_SIZE];
@@ -419,8 +422,8 @@ static void adc_stop_threshold_thread(void);
 #define OPERATING_MODE_NORMAL 0x00    /* State machine/BLE bursts/motion counting */
 #define OPERATING_MODE_ADC_ONLY 0x01  /* Purely ADC recordings */
 
-#define ADV_BURST_DURATION_MS 100
-#define SCAN_BURST_DURATION_MS 500
+#define ADV_BURST_DURATION_MS 2000
+#define SCAN_BURST_DURATION_MS 300
 #define ADV_INTERVAL_SECONDS 5
 #define SCAN_INTERVAL_SECONDS 20
 
@@ -428,6 +431,8 @@ static void adc_stop_threshold_thread(void);
 static uint8_t current_mode = OPERATING_MODE_UNDEFINED; /* Must be set via BLE */
 static uint8_t session_adv_interval = ADV_INTERVAL_SECONDS;
 static uint8_t session_scan_interval = SCAN_INTERVAL_SECONDS;
+static bool session_inactivity_doubler_enabled = true; /* Enable motion-based interval doubling by default */
+
 static uint32_t session_adc_sampling_rate = 10000; /* ADC sampling rate in Hz (default 10kHz) */
 #define GATEWAY_ADV_TIMEOUT_SECONDS 30
 #define WDT_TIMEOUT_MS 30000
@@ -534,8 +539,8 @@ static uint32_t get_adv_interval(void)
 {
     uint8_t adv_interval = session_adv_interval; /* Use session variable */
 
-    /* Apply motion-based interval adjustment */
-    if (lis2dh12_should_use_extended_intervals())
+    /* Apply motion-based interval adjustment (only if enabled) */
+    if (session_inactivity_doubler_enabled && lis2dh12_should_use_extended_intervals())
     {
         adv_interval *= 2; /* Double the interval when no motion detected */
         LOG_DBG("📡 No motion detected, using extended adv_interval: %d", adv_interval);
@@ -548,8 +553,8 @@ static uint32_t get_scan_interval(void)
 {
     uint8_t scan_interval = session_scan_interval; /* Use session variable */
 
-    /* Apply motion-based interval adjustment */
-    if (lis2dh12_should_use_extended_intervals())
+    /* Apply motion-based interval adjustment (only if enabled) */
+    if (session_inactivity_doubler_enabled && lis2dh12_should_use_extended_intervals())
     {
         scan_interval *= 2; /* Double the interval when no motion detected */
         LOG_DBG("🔍 No motion detected, using extended scan_interval: %d", scan_interval);
@@ -631,6 +636,25 @@ void juxta_set_session_intervals(uint8_t adv_interval, uint8_t scan_interval)
     session_adv_interval = adv_interval;
     session_scan_interval = scan_interval;
     LOG_INF("🔧 Session intervals updated: adv=%d, scan=%d", adv_interval, scan_interval);
+}
+
+/**
+ * @brief Get current inactivity doubler setting
+ * Called from BLE service to report current setting
+ */
+bool juxta_get_session_inactivity_doubler_enabled(void)
+{
+    return session_inactivity_doubler_enabled;
+}
+
+/**
+ * @brief Set current inactivity doubler setting
+ * Called from BLE service when setting is changed
+ */
+void juxta_set_session_inactivity_doubler_enabled(bool enabled)
+{
+    session_inactivity_doubler_enabled = enabled;
+    LOG_INF("🔧 Session inactivity doubler %s", enabled ? "enabled" : "disabled");
 }
 
 /**
@@ -1128,7 +1152,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
 
     static uint32_t thread_instance = 0;
     thread_instance++;
-    LOG_INF("📊 Threshold detection thread started (instance %u)", thread_instance);
+    LOG_DBG("Threshold detection thread started (instance %u)", thread_instance);
     uint32_t scan_position = 0;
     uint32_t loop_count = 0;
 
@@ -1137,7 +1161,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
         loop_count++;
         if (loop_count % 100 == 1)
         { // Log every 100th iteration to avoid spam
-            LOG_INF("📊 Threshold thread loop iteration %u", loop_count);
+            LOG_DBG("Threshold thread loop iteration %u", loop_count);
         }
         /* Get current ADC configuration */
         struct juxta_framfs_adc_config adc_config;
@@ -1154,7 +1178,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
             // Only log config read every 100th iteration to reduce spam
             if (loop_count % 100 == 1)
             {
-                LOG_INF("📊 ADC config read: threshold=%u mV, debounce=%u ms, mode=%d",
+                LOG_DBG("ADC config read: threshold=%u mV, debounce=%u ms, mode=%d",
                         (unsigned)adc_config.threshold_mv, (unsigned)adc_config.debounce_ms, adc_config.mode);
             }
         }
@@ -1168,11 +1192,19 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
         uint32_t window_samples = adc_config.buffer_size;
         if (window_samples == 0)
         {
-            window_samples = 500; /* reasonable default if unset */
+            window_samples = ADC_DEFAULT_BUFFER_SIZE; /* Use recommended default if unset */
         }
-        if (window_samples > ADC_MAX_SAMPLES)
+
+        /* Validate buffer size within allowed limits */
+        if (window_samples < ADC_MIN_BUFFER_SIZE)
         {
-            window_samples = ADC_MAX_SAMPLES;
+            LOG_WRN("Buffer size %u too small, clamping to minimum %u", window_samples, ADC_MIN_BUFFER_SIZE);
+            window_samples = ADC_MIN_BUFFER_SIZE;
+        }
+        if (window_samples > ADC_MAX_BUFFER_SIZE)
+        {
+            LOG_WRN("Buffer size %u too large, clamping to maximum %u", window_samples, ADC_MAX_BUFFER_SIZE);
+            window_samples = ADC_MAX_BUFFER_SIZE;
         }
 
         /* Check if enough samples available for processing */
@@ -1180,7 +1212,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
         // Only log every 100th iteration to reduce spam
         if (loop_count % 100 == 1)
         {
-            LOG_INF("📊 Thread loop: ring_count=%u, window_samples=%u", adc_ring_count, window_samples);
+            LOG_DBG("Thread loop: ring_count=%u, window_samples=%u", adc_ring_count, window_samples);
         }
         if (adc_ring_count >= window_samples)
         {
@@ -1188,22 +1220,22 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
             uint32_t current_time = k_uptime_get_32();
             if (next_allowed_trigger_ms != next_allowed_trigger_ms_last_logged)
             {
-                LOG_INF("📊 next_allowed_trigger_ms changed: %u -> %u", next_allowed_trigger_ms_last_logged, next_allowed_trigger_ms);
+                LOG_DBG("next_allowed_trigger_ms changed: %u -> %u", next_allowed_trigger_ms_last_logged, next_allowed_trigger_ms);
                 next_allowed_trigger_ms_last_logged = next_allowed_trigger_ms;
             }
             // Only log debounce check when it changes state or every 100th iteration
             if (loop_count % 100 == 1 || current_time >= next_allowed_trigger_ms)
             {
-                LOG_INF("📊 Debounce check: current=%u ms, next_allowed=%u ms, delta=%d ms",
+                LOG_DBG("Debounce check: current=%u ms, next_allowed=%u ms, delta=%d ms",
                         current_time, next_allowed_trigger_ms, (int32_t)(current_time - next_allowed_trigger_ms));
             }
             if (current_time >= next_allowed_trigger_ms)
             {
-                LOG_INF("📊 DEBOUNCE EXPIRED - allowing trigger");
+                LOG_DBG("DEBOUNCE EXPIRED - allowing trigger");
 
                 /* Update debounce timer FIRST - this prevents rapid re-triggering */
                 next_allowed_trigger_ms = current_time + adc_config.debounce_ms;
-                LOG_INF("📊 Debounce timer updated: next_allowed=%u ms (current=%u + debounce=%u)",
+                LOG_DBG("Debounce timer updated: next_allowed=%u ms (current=%u + debounce=%u)",
                         next_allowed_trigger_ms, current_time, (unsigned)adc_config.debounce_ms);
 
                 /* Search for threshold crossing or timer trigger */
@@ -1213,7 +1245,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
                 if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_THRESHOLD_EVENT)
                 {
                     /* Threshold mode - search for crossing */
-                    LOG_INF("📊 Using threshold mode: searching for %u mV crossing", (unsigned)adc_config.threshold_mv);
+                    LOG_DBG("Using threshold mode: searching for %u mV crossing", (unsigned)adc_config.threshold_mv);
                     trigger_pos = adc_ring_find_trigger(scan_position, ADC_DMA_BLOCK_SIZE, adc_config.threshold_mv);
                     trigger_found = (trigger_pos != UINT32_MAX);
 
@@ -1232,7 +1264,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
                 else
                 {
                     /* Timer mode (mode = 0) - always trigger, but still respect debounce */
-                    LOG_INF("📊 Using timer mode: mode=%d, always triggering (with debounce)", adc_config.mode);
+                    LOG_DBG("Using timer mode: mode=%d, always triggering (with debounce)", adc_config.mode);
                     trigger_pos = adc_ring_head; /* Use current position */
                     trigger_found = true;        /* Always trigger in timer mode */
                 }
@@ -1240,7 +1272,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
                 if (trigger_found)
                 {
                     /* Trigger found - extract and save data */
-                    LOG_INF("🎯 Peri-event trigger at position %u", trigger_pos);
+                    LOG_DBG("!! Peri-event trigger at position %u", trigger_pos);
 
                     /* Extract centered data around trigger */
                     static int16_t extracted_samples[ADC_MAX_SAMPLES];
@@ -1258,7 +1290,7 @@ static void adc_threshold_thread_entry(void *p1, void *p2, void *p3)
                 // Only log debounce active every 100th iteration to reduce spam
                 if (loop_count % 100 == 1)
                 {
-                    LOG_INF("📊 DEBOUNCE ACTIVE - blocking trigger (delta=%d ms)", (int32_t)(current_time - next_allowed_trigger_ms));
+                    LOG_DBG("DEBOUNCE ACTIVE - blocking trigger (delta=%d ms)", (int32_t)(current_time - next_allowed_trigger_ms));
                 }
             }
         }
@@ -1287,7 +1319,7 @@ static int adc_start_threshold_thread(void)
                     adc_threshold_thread_entry, NULL, NULL, NULL,
                     K_PRIO_COOP(7), 0, K_NO_WAIT);
 
-    LOG_INF("📊 Threshold detection thread created");
+    LOG_DBG("Threshold detection thread created");
     return 0;
 }
 
@@ -1384,7 +1416,7 @@ static void adc_process_peri_event_data(const int16_t *raw_samples, uint32_t sam
                                                  peak_positive, peak_negative);
         if (ret == 0)
         {
-            LOG_INF("📊 Peri-event waveform saved: %u samples, peaks [%u, %u], threshold=%u mV (trigger centered)",
+            LOG_INF("*** FRAM WRITE SUCCESS *** Peri-event waveform saved: %u samples, peaks [%u, %u], threshold=%u mV",
                     (unsigned)sample_count, peak_positive, peak_negative, (unsigned)config->threshold_mv);
         }
     }
@@ -1410,12 +1442,12 @@ static bool should_allow_fram_write(void)
 // Phase D1: New ring buffer-based ADC work handler
 static void adc_work_handler(struct k_work *work)
 {
-    LOG_INF("📊 adc_work_handler: enter (verified=%d, framfs=%d, ble=%d, dma_active=%d, ring_count=%u)",
+    LOG_DBG("ADC work handler: verified=%d, framfs=%d, ble=%d, dma_active=%d, ring_count=%u",
             hardware_verified, framfs_ctx.initialized, ble_connected, adc_dma_active, adc_ring_count);
 
     if (!hardware_verified || !framfs_ctx.initialized || ble_connected)
     {
-        LOG_INF("📊 adc_work_handler: deferred (preconditions not met)");
+        LOG_DBG("ADC work handler: deferred (preconditions not met)");
         return;
     }
 
@@ -1448,18 +1480,18 @@ static void adc_work_handler(struct k_work *work)
     /* Start threshold thread only when we have at least one DMA block worth of samples */
     if (!adc_threshold_thread_active && adc_ring_count >= ADC_DMA_BLOCK_SIZE)
     {
-        LOG_INF("📊 Starting threshold detection (ring has %u samples)", adc_ring_count);
+        LOG_DBG("Starting threshold detection (ring has %u samples)", adc_ring_count);
         (void)adc_start_threshold_thread();
     }
 
-    LOG_INF("📊 Ring buffer status: head=%u, count=%u", adc_ring_head, adc_ring_count);
+    LOG_DBG("Ring buffer status: head=%u, count=%u", adc_ring_head, adc_ring_count);
 }
 
 // ADC timer callback - triggers ADC work in thread context
 static void adc_timer_callback(struct k_timer *timer)
 {
     // Only submit work, do not call FRAMFS functions in ISR context
-    LOG_INF("📊 adc_timer_callback: submit adc_work");
+    LOG_DBG("ADC timer callback: submit adc_work");
     k_work_submit(&adc_work);
 }
 
@@ -1855,10 +1887,12 @@ static void state_work_handler(struct k_work *work)
         /* Add minimum delay to prevent rapid start/stop cycles */
         next_delay_ms = MAX(next_delay_ms, 100);
 
-        /* Add small random offset (0-1000ms) to prevent device synchronization */
-        uint32_t random_offset = sys_rand32_get() % 1000;
+        /* Add small random offset (0-500ms) to prevent device synchronization */
+        uint32_t random_offset = sys_rand32_get() % 200;
         next_delay_ms += random_offset;
 
+        LOG_INF("🎲 Random delay applied: +%u ms (total delay: %u ms) to prevent device sync",
+                random_offset, next_delay_ms);
         LOG_DBG("Sleeping for %u ms until next action (including %u ms random offset)",
                 next_delay_ms, random_offset);
         k_timer_start(&state_timer, K_MSEC(next_delay_ms), K_NO_WAIT);
@@ -1922,12 +1956,19 @@ static int juxta_start_scanning(void)
 {
     LOG_INF("🔍 Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
 
+    // struct bt_le_scan_param scan_param = {
+    //     .type = BT_LE_SCAN_TYPE_PASSIVE,
+    //     .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+    //     .interval = BT_GAP_SCAN_FAST_INTERVAL,
+    //     .window = BT_GAP_SCAN_FAST_WINDOW,
+    //     .timeout = 0,
+    // };
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_PASSIVE,
-        .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
-        .interval = BT_GAP_SCAN_FAST_INTERVAL,
-        .window = BT_GAP_SCAN_FAST_WINDOW,
-        .timeout = 0,
+        .options = 0,
+        .interval = 0x0060, // 60 units = 37.5 ms
+        .window = 0x0060,   // match interval for continuous scan during burst
+        .timeout = 0,       // controlled externally with SCAN_BURST_DURATION_MS
     };
 
     /* Ensure advertising is fully stopped and add a longer delay before scanning */
@@ -2074,6 +2115,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
     ble_connected = false; // Mark as disconnected
     ble_state = BLE_STATE_IDLE;
+
+    /* Turn on LED for 1 second to indicate transition to next stage */
+    gpio_pin_set_dt(&led, 1); // LED ON
+    LOG_INF("💡 LED ON for 1s - transitioning to next stage");
+    k_sleep(K_SECONDS(1));
+    gpio_pin_set_dt(&led, 0); // LED OFF
+    LOG_INF("💡 LED OFF - transition complete");
 
     /* Stop DMA sampling if active */
     if (adc_dma_active)

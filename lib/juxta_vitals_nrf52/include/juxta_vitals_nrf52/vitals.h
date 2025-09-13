@@ -22,7 +22,7 @@ extern "C"
  * ======================================================================== */
 
 /* Voltage thresholds (millivolts) */
-#define JUXTA_VITALS_BATTERY_FULL_MV 3000     /* 3.0V - 100% */
+#define JUXTA_VITALS_BATTERY_FULL_MV 2800     /* 2.8V - 100% */
 #define JUXTA_VITALS_BATTERY_CRITICAL_MV 2100 /* 2.1V - critical threshold before 1.8V minimum */
 
 /* Temperature limits */

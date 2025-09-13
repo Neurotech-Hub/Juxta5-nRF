@@ -136,7 +136,7 @@ int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
         return -EINVAL;
     }
 
-    if (max_samples < 200)
+    if (max_samples < 100)
     {
         return -EINVAL;
     }
@@ -151,7 +151,7 @@ int juxta_adc_burst_sample(int32_t *samples, uint32_t max_samples,
 
     /* Use optimized batch sampling to avoid per-sample overhead */
     /* Configure sequence for burst sampling */
-    static int16_t burst_buffer[1000]; /* Static buffer for raw ADC values */
+    static int16_t burst_buffer[500]; /* Static buffer for raw ADC values */
 
     struct adc_sequence burst_seq = {
         .channels = BIT(0),

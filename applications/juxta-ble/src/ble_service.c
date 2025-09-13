@@ -358,34 +358,10 @@ static int generate_node_response(char *buffer, size_t buffer_size)
         battery_level = 0;
     }
 
-    /* Get current session operating mode from main.c */
-    uint8_t operating_mode = juxta_get_current_operating_mode();
-
-    /* Get current session intervals from main.c */
-    uint8_t adv_interval = 0, scan_interval = 0;
-    juxta_get_session_intervals(&adv_interval, &scan_interval);
-
-    /* Get ADC configuration */
-    struct juxta_framfs_adc_config adc_config = {0};
-    if (framfs_ctx && framfs_ctx->initialized)
-    {
-        if (juxta_framfs_get_adc_config(framfs_ctx, &adc_config) != 0)
-        {
-            /* Use defaults if read fails */
-            adc_config.mode = JUXTA_FRAMFS_ADC_MODE_TIMER_BURST;
-            adc_config.threshold_mv = 0;
-            adc_config.buffer_size = 1000;
-            adc_config.debounce_ms = 5000;
-            adc_config.output_peaks_only = false;
-        }
-    }
-
-    /* Generate JSON response with session and ADC configuration */
+    /* Generate simplified JSON response */
     int written = snprintf(buffer, buffer_size,
-                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"operating_mode\":%d,\"adv_interval\":%d,\"scan_interval\":%d,\"alert\":\"%s\",\"adc_config\":{\"mode\":%d,\"threshold\":%u,\"buffer_size\":%u,\"debounce\":%u,\"peaks_only\":%s}}",
-                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, operating_mode, adv_interval, scan_interval, alert,
-                           adc_config.mode, (unsigned)adc_config.threshold_mv, adc_config.buffer_size,
-                           (unsigned)adc_config.debounce_ms, adc_config.output_peaks_only ? "true" : "false");
+                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"alert\":\"%s\"}",
+                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, alert);
 
     if (written >= buffer_size)
     {
@@ -428,7 +404,7 @@ static ssize_t read_node_char(struct bt_conn *conn, const struct bt_gatt_attr *a
 
 /**
  * @brief Parse JSON command from gateway characteristic
- * Expected format: {"timestamp":1234567890,"sendFilenames":true,"clearMemory":true,"operatingMode":0,"advInterval":5,"scanInterval":15,"subjectId":"vole001","uploadPath":"/TEST"}
+ * Expected format: {"timestamp":1234567890,"sendFilenames":true,"clearMemory":true,"inactivityDoubler":false,"subjectId":"vole001","uploadPath":"/TEST"}
  */
 static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_settings *settings)
 {
@@ -750,6 +726,26 @@ static int parse_gateway_command(const char *json_cmd, struct juxta_framfs_user_
             LOG_INF("🎛️ ADC sampling rate command: %u Hz", adc_sampling_rate);
             juxta_set_adc_sampling_rate(adc_sampling_rate);
             /* Note: sampling rate is session-based, not persisted to FRAMFS */
+        }
+    }
+
+    /* Look for inactivityDoubler (session-based) */
+    p = strstr(json_cmd, "\"inactivityDoubler\":");
+    if (p)
+    {
+        if (strstr(p, "\"inactivityDoubler\":true") || strstr(p, "\"inactivityDoubler\": true"))
+        {
+            LOG_INF("🎛️ Inactivity doubler command: enabled");
+            juxta_set_session_inactivity_doubler_enabled(true);
+        }
+        else if (strstr(p, "\"inactivityDoubler\":false") || strstr(p, "\"inactivityDoubler\": false"))
+        {
+            LOG_INF("🎛️ Inactivity doubler command: disabled");
+            juxta_set_session_inactivity_doubler_enabled(false);
+        }
+        else
+        {
+            LOG_WRN("🎛️ Invalid inactivityDoubler format in command");
         }
     }
 
