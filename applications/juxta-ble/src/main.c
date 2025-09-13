@@ -2117,10 +2117,11 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     ble_state = BLE_STATE_IDLE;
 
     /* Turn on LED for 1 second to indicate transition to next stage */
-    gpio_pin_set_dt(&led, 1); // LED ON
+    const struct gpio_dt_spec led_spec = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
+    gpio_pin_set_dt(&led_spec, 1); // LED ON
     LOG_INF("💡 LED ON for 1s - transitioning to next stage");
     k_sleep(K_SECONDS(1));
-    gpio_pin_set_dt(&led, 0); // LED OFF
+    gpio_pin_set_dt(&led_spec, 0); // LED OFF
     LOG_INF("💡 LED OFF - transition complete");
 
     /* Stop DMA sampling if active */
