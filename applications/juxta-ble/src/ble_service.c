@@ -71,6 +71,9 @@ static struct bt_gatt_indicate_params file_transfer_ind_params;
 /* External framfs context - will be set during initialization */
 static struct juxta_framfs_context *framfs_ctx = NULL;
 
+/* External time-aware framfs context - will be set during initialization */
+static struct juxta_framfs_ctx *time_ctx = NULL;
+
 /* External vitals context - will be set during initialization */
 static struct juxta_vitals_ctx *vitals_ctx = NULL;
 
@@ -132,6 +135,25 @@ void juxta_ble_set_framfs_context(struct juxta_framfs_context *ctx)
 {
     framfs_ctx = ctx;
     LOG_INF("📁 BLE service linked to framfs context");
+}
+
+/**
+ * @brief Set the time-aware framfs context for file operations
+ */
+void juxta_ble_set_time_aware_framfs_context(struct juxta_framfs_ctx *ctx)
+{
+    time_ctx = ctx;
+    LOG_INF("📁 BLE service linked to time-aware framfs context");
+    if (time_ctx && time_ctx->fs_ctx)
+    {
+        LOG_INF("📁 Time-aware context: fs_ctx=%p, initialized=%s",
+                time_ctx->fs_ctx, time_ctx->fs_ctx->initialized ? "true" : "false");
+    }
+    else
+    {
+        LOG_ERR("📁 Time-aware context validation failed: time_ctx=%p, fs_ctx=%p",
+                time_ctx, time_ctx ? time_ctx->fs_ctx : NULL);
+    }
 }
 
 /**
@@ -872,14 +894,21 @@ static int handle_file_error(int error_code, const char *operation, const char *
  */
 static int generate_file_listing(char *buffer, size_t buffer_size)
 {
-    if (!framfs_ctx || !framfs_ctx->initialized)
+    LOG_INF("📁 generate_file_listing called: time_ctx=%p", time_ctx);
+    if (time_ctx)
     {
-        LOG_ERR("📁 Framfs not available for file listing");
+        LOG_INF("📁 time_ctx->fs_ctx=%p, initialized=%s",
+                time_ctx->fs_ctx, time_ctx->fs_ctx ? (time_ctx->fs_ctx->initialized ? "true" : "false") : "NULL");
+    }
+
+    if (!time_ctx || !time_ctx->fs_ctx || !time_ctx->fs_ctx->initialized)
+    {
+        LOG_ERR("📁 Time-aware framfs not available for file listing");
         return -1;
     }
 
     char filenames[JUXTA_FRAMFS_MAX_FILES][JUXTA_FRAMFS_FILENAME_LEN];
-    int file_count = juxta_framfs_list_files(framfs_ctx, filenames, JUXTA_FRAMFS_MAX_FILES);
+    int file_count = juxta_framfs_list_files(time_ctx->fs_ctx, filenames, JUXTA_FRAMFS_MAX_FILES);
 
     if (file_count < 0)
     {
@@ -893,7 +922,7 @@ static int generate_file_listing(char *buffer, size_t buffer_size)
     for (int i = 0; i < file_count; i++)
     {
         struct juxta_framfs_entry entry;
-        int ret = juxta_framfs_get_file_info(framfs_ctx, filenames[i], &entry);
+        int ret = juxta_framfs_get_file_info(time_ctx->fs_ctx, filenames[i], &entry);
         if (ret == 0)
         {
             int len = snprintf(buffer + written, buffer_size - written,
@@ -923,7 +952,7 @@ static int generate_file_listing(char *buffer, size_t buffer_size)
 
     /* Add MAC table as special "file" if it has data */
     uint32_t mac_table_size;
-    if (juxta_framfs_get_mac_table_data_size(framfs_ctx, &mac_table_size) == 0 && mac_table_size > 0)
+    if (juxta_framfs_get_mac_table_data_size(time_ctx->fs_ctx, &mac_table_size) == 0 && mac_table_size > 0)
     {
         int mac_len = snprintf(buffer + written, buffer_size - written,
                                ";MACIDX|%u", mac_table_size);

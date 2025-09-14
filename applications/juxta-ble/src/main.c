@@ -1887,8 +1887,8 @@ static void state_work_handler(struct k_work *work)
         /* Add minimum delay to prevent rapid start/stop cycles */
         next_delay_ms = MAX(next_delay_ms, 100);
 
-        /* Add small random offset (0-500ms) to prevent device synchronization */
-        uint32_t random_offset = sys_rand32_get() % 200;
+        /* Add small random offset (0-1000ms) to prevent device synchronization */
+        uint32_t random_offset = sys_rand32_get() % 1000;
         next_delay_ms += random_offset;
 
         LOG_INF("🎲 Random delay applied: +%u ms (total delay: %u ms) to prevent device sync",
@@ -2110,6 +2110,89 @@ static void connected(struct bt_conn *conn, uint8_t err)
     LOG_INF("⏸️ State machine paused - will resume after disconnection");
 }
 
+/**
+ * @brief Restore system state after BLE disconnect
+ *
+ * This function ensures the device returns to the correct operating state
+ * after a BLE connection is terminated. It handles all operating modes
+ * and ensures proper system component initialization.
+ */
+static void restore_system_state_after_disconnect(void)
+{
+    LOG_INF("🔄 Restoring system state after BLE disconnect");
+
+    /* Check if state system is ready */
+    if (!state_system_ready)
+    {
+        LOG_WRN("⚠️ State system not ready - skipping state restoration");
+        return;
+    }
+
+    /* Determine current operating mode */
+    const char *mode_name = (current_mode == OPERATING_MODE_UNDEFINED) ? "UNDEFINED" : (current_mode == OPERATING_MODE_NORMAL) ? "NORMAL"
+                                                                                   : (current_mode == OPERATING_MODE_ADC_ONLY) ? "ADC_ONLY"
+                                                                                                                               : "UNKNOWN";
+
+    LOG_INF("🔧 Current operating mode: %d (%s)", current_mode, mode_name);
+
+    /* Restore state based on operating mode */
+    switch (current_mode)
+    {
+    case OPERATING_MODE_NORMAL:
+        LOG_INF("🚀 Restoring NORMAL operation mode");
+
+        /* Reset timestamps to prevent immediate execution */
+        last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
+        last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();
+
+        /* Resume FRAMFS logging */
+        LOG_INF("📝 FRAMFS logging operations resumed");
+
+        /* Restart state machine */
+        LOG_INF("⚙️ State machine restarted for normal operation");
+        k_work_submit(&state_work);
+
+        break;
+
+    case OPERATING_MODE_ADC_ONLY:
+        LOG_INF("📊 Restoring ADC_ONLY operation mode");
+
+        /* Resume ADC operations */
+        LOG_INF("📊 ADC operations resumed");
+        k_work_submit(&adc_work);
+
+        break;
+
+    case OPERATING_MODE_UNDEFINED:
+        LOG_INF("⏸️ Operating mode undefined - staying in connectable advertising");
+        /* No additional action needed - device remains configurable */
+        break;
+
+    default:
+        LOG_ERR("❌ Unknown operating mode: %d - defaulting to NORMAL", current_mode);
+        current_mode = OPERATING_MODE_NORMAL;
+        /* Recursive call to handle the corrected mode */
+        restore_system_state_after_disconnect();
+        return;
+    }
+
+    /* Validate system health */
+    LOG_INF("🔍 Validating system health after state restoration");
+
+    /* Check critical system components */
+    if (!hardware_verified)
+    {
+        LOG_WRN("⚠️ Hardware not verified - system may not function correctly");
+    }
+
+    if (!datetime_synchronized)
+    {
+        LOG_WRN("⚠️ Datetime not synchronized - timestamps may be incorrect");
+    }
+
+    LOG_INF("✅ System state restoration completed successfully");
+}
+
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
@@ -2146,7 +2229,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     /* Notify BLE service of disconnection */
     juxta_ble_connection_terminated();
 
-    /* Production flow: Check if datetime was synchronized AND operating mode is defined */
+    /* Handle initial boot sequence (magnet-activated devices) */
     if (magnet_activated && (!datetime_synchronized || current_mode == OPERATING_MODE_UNDEFINED))
     {
         datetime_sync_retry_count++;
@@ -2174,26 +2257,18 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
             }
         }
     }
-    else if (datetime_synchronized && current_mode != OPERATING_MODE_UNDEFINED)
+    else
     {
-        /* Normal operation - resume appropriate mode (only if properly configured) */
+        /* Normal operation - use robust state restoration */
+        if (datetime_synchronized && current_mode != OPERATING_MODE_UNDEFINED)
         {
-            /* Avoid submitting work before state system is initialized */
-            if (!state_system_ready)
-            {
-                LOG_DBG("State system not ready yet; skipping resume on disconnect");
-                return;
-            }
-
             /* Reset magnet activation flag since we're now in normal operation */
             magnet_activated = false;
-            /* Reset magnet reset state machine to prevent false positives */
             magnet_reset_state = MAGNET_RESET_STATE_NORMAL;
             LOG_DBG("🧲 Magnet activation flag and reset state reset - entering normal operation");
 
             /* DEBUG: Check magnet sensor GPIO state after BLE disconnect */
             LOG_INF("🧲 DEBUG: Checking magnet sensor after BLE disconnect...");
-            // Use direct GPIO access instead of device tree to avoid compilation issues
             const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
             if (device_is_ready(gpio_dev))
             {
@@ -2204,40 +2279,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
             {
                 LOG_ERR("🧲 DEBUG: GPIO1 device not ready");
             }
-
-            /* Operating mode is session-based only - no longer read from FRAM */
-            /* current_mode remains as set during BLE session or defaults to NORMAL */
-
-            if (current_mode == OPERATING_MODE_NORMAL)
-            {
-                last_adv_timestamp = get_rtc_timestamp() - get_adv_interval();
-                last_scan_timestamp = get_rtc_timestamp() - get_scan_interval();
-
-                LOG_INF("▶️ FRAMFS logging operations resumed");
-                LOG_INF("▶️ State machine resumed - resuming normal operation");
-                k_work_submit(&state_work);
-            }
-            else if (current_mode == OPERATING_MODE_ADC_ONLY)
-            {
-                LOG_INF("▶️ ADC_ONLY mode resumed - ADC timer continues");
-                /* Kick ADC work immediately after disconnect so DMA path starts without delay */
-                LOG_INF("📊 adc_work_handler: resume kick after disconnect");
-                k_work_submit(&adc_work);
-            }
         }
-    }
-    else
-    {
-        /* Handle other disconnect cases - if mode is undefined, stay in connectable advertising */
-        if (current_mode == OPERATING_MODE_UNDEFINED)
-        {
-            LOG_INF("⏸️ Operating mode still undefined after disconnect - staying in connectable advertising");
-            /* Don't proceed to production initialization - stay configurable */
-        }
-        else
-        {
-            LOG_DBG("📱 Normal disconnect - device remains in current operational state");
-        }
+
+        /* Use centralized state restoration function */
+        restore_system_state_after_disconnect();
     }
 }
 
@@ -2847,6 +2892,18 @@ int main(void)
     }
     juxta_ble_set_framfs_context(&framfs_ctx);
 
+    /* Initialize time-aware wrapper for compatibility with existing code */
+    LOG_INF("📁 Initializing time-aware file system...");
+    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
+    if (ret < 0)
+    {
+        LOG_ERR("Time-aware framfs init failed: %d", ret);
+        return ret;
+    }
+
+    /* Link time-aware framfs context to BLE service for file operations */
+    juxta_ble_set_time_aware_framfs_context(&time_ctx);
+
     setup_dynamic_adv_name();
     ret = juxta_ble_service_init();
     if (ret < 0)
@@ -2951,15 +3008,6 @@ int main(void)
 
     /* Link vitals context to BLE service for timestamp synchronization */
     juxta_ble_set_vitals_context(&vitals_ctx);
-
-    /* Initialize time-aware wrapper for compatibility with existing code */
-    LOG_INF("📁 Initializing time-aware file system...");
-    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
-    if (ret < 0)
-    {
-        LOG_ERR("Time-aware framfs init failed: %d", ret);
-        return ret;
-    }
 
     init_randomization();
     k_work_init(&state_work, state_work_handler);

@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/conn.h>
+#include "juxta_framfs/framfs.h"
 
 /* Forward declaration for framfs context */
 struct juxta_framfs_context;
@@ -84,6 +85,13 @@ extern "C"
      * @param ctx Initialized framfs context
      */
     void juxta_ble_set_framfs_context(struct juxta_framfs_context *ctx);
+
+    /**
+     * @brief Set the time-aware framfs context for file operations
+     *
+     * @param ctx Initialized time-aware framfs context
+     */
+    void juxta_ble_set_time_aware_framfs_context(struct juxta_framfs_ctx *ctx);
 
     /**
      * @brief Set the vitals context for timestamp synchronization

@@ -1484,6 +1484,9 @@ int juxta_framfs_init_with_time(struct juxta_framfs_ctx *ctx,
     snprintf(ctx->current_filename, sizeof(ctx->current_filename),
              "%06u", ctx->current_file_date);
 
+    LOG_INF("📁 File system initialized with date: %06u, filename: %s",
+            ctx->current_file_date, ctx->current_filename);
+
     LOG_INF("File system initialized with time management for date: %s", ctx->current_filename);
     return JUXTA_FRAMFS_OK;
 }
@@ -1495,8 +1498,13 @@ int juxta_framfs_ensure_current_file(struct juxta_framfs_ctx *ctx)
         return JUXTA_FRAMFS_ERROR;
     }
 
+    LOG_INF("🔍 ensure_current_file called - checking date");
+
     /* Get current date from RTC */
     uint32_t current_date = ctx->get_rtc_time();
+
+    LOG_INF("📅 File system date check: current=%06u, stored=%06u",
+            current_date, ctx->current_file_date);
 
     /* Check if we need to create or switch files */
     if (current_date != ctx->current_file_date || ctx->fs_ctx->active_file_index < 0)

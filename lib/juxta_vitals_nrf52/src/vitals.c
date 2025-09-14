@@ -660,6 +660,7 @@ uint32_t juxta_vitals_get_file_date_yymmdd(struct juxta_vitals_ctx *ctx)
     uint32_t yymmdd = short_year * 10000 + month * 100 + day;
 
     LOG_DBG("📅 File date calculation: timestamp=%u, YYMMDD=%06u", live_timestamp, yymmdd);
+    LOG_INF("📅 Current file date: %06u (timestamp: %u)", yymmdd, live_timestamp);
 
     return yymmdd;
 }
