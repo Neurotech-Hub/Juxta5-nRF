@@ -307,6 +307,7 @@ static int generate_node_response(char *buffer, size_t buffer_size)
     char device_id[16];
     char upload_path[32];
     uint8_t battery_level = 0;
+    uint8_t memory_level = 0;
     const char *alert = ""; /* TODO: Phase 3 - Implement alert system */
 
     /* Get device ID */
@@ -358,10 +359,30 @@ static int generate_node_response(char *buffer, size_t buffer_size)
         battery_level = 0;
     }
 
+    /* Get memory level from framfs library */
+    if (framfs_ctx && framfs_ctx->initialized)
+    {
+        int ret = juxta_framfs_get_memory_usage_percent(framfs_ctx, &memory_level);
+        if (ret == 0)
+        {
+            LOG_DBG("📊 Memory level: %d%%", memory_level);
+        }
+        else
+        {
+            LOG_WRN("📊 Failed to get memory level: %d, using 0", ret);
+            memory_level = 0; /* Default to 0 if read fails */
+        }
+    }
+    else
+    {
+        LOG_WRN("📊 Framfs context not available, memory level = 0");
+        memory_level = 0;
+    }
+
     /* Generate simplified JSON response */
     int written = snprintf(buffer, buffer_size,
-                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"device_id\":\"%s\",\"alert\":\"%s\"}",
-                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, device_id, alert);
+                           "{\"upload_path\":\"%s\",\"firmware_version\":\"%s\",\"battery_level\":%d,\"memory_level\":%d,\"device_id\":\"%s\",\"alert\":\"%s\"}",
+                           upload_path, JUXTA_FIRMWARE_VERSION, battery_level, memory_level, device_id, alert);
 
     if (written >= buffer_size)
     {

@@ -602,22 +602,66 @@ uint32_t juxta_vitals_get_file_date_yymmdd(struct juxta_vitals_ctx *ctx)
         return 0;
     }
 
-    /* Get the full date first */
-    uint32_t full_date = juxta_vitals_get_date_yyyymmdd(ctx);
-    if (full_date == 0)
+    /* Get the live timestamp (includes elapsed time since sync) */
+    uint32_t live_timestamp = juxta_vitals_get_timestamp(ctx);
+    if (live_timestamp == 0)
     {
         return 0;
     }
 
-    /* Extract year, month, day */
-    uint32_t year = full_date / 10000;
-    uint32_t month = (full_date % 10000) / 100;
-    uint32_t day = full_date % 100;
+    /* Convert live Unix timestamp to date */
+    uint32_t days_since_epoch = live_timestamp / 86400;
+    uint32_t year = 1970;
+    uint32_t month = 1;
+    uint32_t day = 1;
+
+    /* Simple date calculation (approximate) */
+    while (days_since_epoch > 365)
+    {
+        if ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)
+        {
+            if (days_since_epoch > 366)
+            {
+                days_since_epoch -= 366;
+                year++;
+            }
+            else
+            {
+                break;
+            }
+        }
+        else
+        {
+            days_since_epoch -= 365;
+            year++;
+        }
+    }
+
+    /* Calculate month and day */
+    uint32_t days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)
+    {
+        days_in_month[1] = 29; /* February in leap year */
+    }
+
+    for (int i = 0; i < 12; i++)
+    {
+        if (days_since_epoch <= days_in_month[i])
+        {
+            month = i + 1;
+            day = days_since_epoch + 1; /* Add 1 since days are 1-based */
+            break;
+        }
+        days_since_epoch -= days_in_month[i];
+    }
 
     /* Convert to YYMMDD format (assume 20XX) */
     uint32_t short_year = year % 100; /* Extract last 2 digits */
+    uint32_t yymmdd = short_year * 10000 + month * 100 + day;
 
-    return short_year * 10000 + month * 100 + day;
+    LOG_DBG("📅 File date calculation: timestamp=%u, YYMMDD=%06u", live_timestamp, yymmdd);
+
+    return yymmdd;
 }
 
 uint16_t juxta_vitals_get_minute_of_day(struct juxta_vitals_ctx *ctx)

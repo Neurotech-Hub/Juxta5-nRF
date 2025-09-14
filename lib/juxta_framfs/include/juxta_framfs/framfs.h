@@ -800,6 +800,16 @@ extern "C"
                                           char *filename);
 
     /**
+     * @brief Get memory usage percentage (0-100)
+     *
+     * @param ctx File system context
+     * @param usage_percent Pointer to store usage percentage (0-100)
+     * @return 0 on success, negative error code on failure
+     */
+    int juxta_framfs_get_memory_usage_percent(struct juxta_framfs_context *ctx,
+                                              uint8_t *usage_percent);
+
+    /**
      * @brief Seal current file and create new one for next day
      *
      * @param ctx File system context

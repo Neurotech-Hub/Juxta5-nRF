@@ -1695,6 +1695,44 @@ int juxta_framfs_advance_to_next_day(struct juxta_framfs_ctx *ctx)
     return JUXTA_FRAMFS_OK;
 }
 
+int juxta_framfs_get_memory_usage_percent(struct juxta_framfs_context *ctx,
+                                          uint8_t *usage_percent)
+{
+    if (!ctx || !ctx->initialized || !usage_percent)
+    {
+        return JUXTA_FRAMFS_ERROR;
+    }
+
+    /* Read fresh header from FRAM to get current usage */
+    int ret = framfs_read_header(ctx);
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to read header for memory usage calculation: %d", ret);
+        return ret;
+    }
+
+    /* Calculate usage percentage based on next_data_addr */
+    /* next_data_addr points to the next available byte, so it represents used bytes */
+    uint32_t used_bytes = ctx->header.next_data_addr;
+    uint32_t total_bytes = JUXTA_FRAM_SIZE_BYTES;
+
+    /* Calculate percentage (0-100) */
+    uint32_t usage = (used_bytes * 100) / total_bytes;
+
+    /* Cap at 100% */
+    if (usage > 100)
+    {
+        usage = 100;
+    }
+
+    *usage_percent = (uint8_t)usage;
+
+    LOG_DBG("📊 Memory usage: %u bytes / %u bytes = %u%%",
+            (unsigned)used_bytes, (unsigned)total_bytes, (unsigned)usage);
+
+    return JUXTA_FRAMFS_OK;
+}
+
 /* ========================================================================
  * ADC Burst Record Functions
  * ======================================================================== */
