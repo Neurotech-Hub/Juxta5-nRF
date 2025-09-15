@@ -222,6 +222,15 @@ static struct k_work state_work;
 static struct k_timer state_timer;
 static bool state_system_ready = false;
 
+// Work queue health monitoring
+static struct k_work health_check_work;
+static struct k_timer health_check_timer;
+static uint32_t last_state_work_time = 0;
+static uint32_t last_adc_work_time = 0;
+static uint32_t state_work_count = 0;
+static uint32_t adc_work_count = 0;
+static uint32_t stuck_work_detections = 0;
+
 // ADC timer for mode 1 (ADC_ONLY mode)
 static struct k_timer adc_k_timer;
 static struct k_work adc_work;
@@ -1442,8 +1451,12 @@ static bool should_allow_fram_write(void)
 // Phase D1: New ring buffer-based ADC work handler
 static void adc_work_handler(struct k_work *work)
 {
-    LOG_DBG("ADC work handler: verified=%d, framfs=%d, ble=%d, dma_active=%d, ring_count=%u",
-            hardware_verified, framfs_ctx.initialized, ble_connected, adc_dma_active, adc_ring_count);
+    uint32_t work_start_time = k_uptime_get_32();
+    last_adc_work_time = work_start_time;
+    adc_work_count++;
+
+    LOG_INF("📊 adc_work_handler: ENTRY - verified=%d, framfs=%d, ble=%d, dma_active=%d, ring_count=%u, count=%u",
+            hardware_verified, framfs_ctx.initialized, ble_connected, adc_dma_active, adc_ring_count, adc_work_count);
 
     if (!hardware_verified || !framfs_ctx.initialized || ble_connected)
     {
@@ -1485,14 +1498,17 @@ static void adc_work_handler(struct k_work *work)
     }
 
     LOG_DBG("Ring buffer status: head=%u, count=%u", adc_ring_head, adc_ring_count);
+
+    LOG_INF("📊 adc_work_handler: EXIT");
 }
 
 // ADC timer callback - triggers ADC work in thread context
 static void adc_timer_callback(struct k_timer *timer)
 {
     // Only submit work, do not call FRAMFS functions in ISR context
-    LOG_DBG("ADC timer callback: submit adc_work");
-    k_work_submit(&adc_work);
+    LOG_INF("⏰ adc_timer_callback: ENTRY - submitting adc_work");
+    int ret = k_work_submit(&adc_work);
+    LOG_INF("⏰ adc_timer_callback: EXIT - work submission result: %d", ret);
 }
 
 // Magnet reset functions for both operating modes
@@ -1598,8 +1614,10 @@ static enum {
 static void state_timer_callback(struct k_timer *timer)
 {
     // Only post an event, do not call BLE APIs or change state here
+    LOG_INF("⏰ state_timer_callback: ENTRY - setting EVENT_TIMER_EXPIRED");
     state_event = EVENT_TIMER_EXPIRED;
-    k_work_submit(&state_work);
+    int ret = k_work_submit(&state_work);
+    LOG_INF("⏰ state_timer_callback: EXIT - work submission result: %d", ret);
 }
 
 static void process_scan_events(void)
@@ -1650,6 +1668,19 @@ static void process_scan_events(void)
 
 static void state_work_handler(struct k_work *work)
 {
+    uint32_t work_start_time = k_uptime_get_32();
+    last_state_work_time = work_start_time;
+    state_work_count++;
+
+    LOG_INF("🔄 state_work_handler: ENTRY - state_system_ready=%s, count=%u",
+            state_system_ready ? "true" : "false", state_work_count);
+
+    if (!state_system_ready)
+    {
+        LOG_WRN("⚠️ state_work_handler: State system not ready, exiting");
+        return;
+    }
+
     uint32_t current_time = get_rtc_timestamp();
 
     // Process all scan events from the queue
@@ -1698,25 +1729,37 @@ static void state_work_handler(struct k_work *work)
                     mac_ids[i][2] = juxta_scan_table[i].mac_id & 0xFF;
                     rssi_values[i] = juxta_scan_table[i].rssi;
                 }
+                uint32_t framfs_start = k_uptime_get_32();
                 int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, lis2dh12_get_motion_count(),
                                                                battery_level, temperature,
                                                                mac_ids, rssi_values, device_count);
+                uint32_t framfs_duration = k_uptime_get_32() - framfs_start;
                 if (ret == 0)
                 {
-                    LOG_INF("📊 FRAMFS minute record: devices=%d, motion=%d, battery=%d%%, temp=%d°C",
-                            device_count, lis2dh12_get_motion_count(), battery_level, temperature);
+                    LOG_INF("📊 FRAMFS minute record: devices=%d, motion=%d, battery=%d%%, temp=%d°C (took %u ms)",
+                            device_count, lis2dh12_get_motion_count(), battery_level, temperature, framfs_duration);
+                }
+                else
+                {
+                    LOG_ERR("📊 FRAMFS minute record failed: %d (took %u ms)", ret, framfs_duration);
                 }
             }
             else
             {
                 /* No devices found - use NO_ACTIVITY type but still include battery/temperature */
+                uint32_t framfs_start = k_uptime_get_32();
                 int ret = juxta_framfs_append_device_scan_data(&time_ctx, current_minute, lis2dh12_get_motion_count(),
                                                                battery_level, temperature,
                                                                NULL, NULL, 0);
+                uint32_t framfs_duration = k_uptime_get_32() - framfs_start;
                 if (ret == 0)
                 {
-                    LOG_INF("📊 FRAMFS minute record: no activity, battery=%d%%, temp=%d°C",
-                            battery_level, temperature);
+                    LOG_INF("📊 FRAMFS minute record: no activity, battery=%d%%, temp=%d°C (took %u ms)",
+                            battery_level, temperature, framfs_duration);
+                }
+                else
+                {
+                    LOG_ERR("📊 FRAMFS minute record failed: %d (took %u ms)", ret, framfs_duration);
                 }
             }
         }
@@ -1811,16 +1854,18 @@ static void state_work_handler(struct k_work *work)
         {
             juxta_scan_table_reset();
             ble_state = BLE_STATE_SCANNING;
+            uint32_t scan_start = k_uptime_get_32();
             int err = juxta_start_scanning();
+            uint32_t scan_duration = k_uptime_get_32() - scan_start;
             if (err == 0)
             {
-                LOG_INF("Starting scan burst (%d ms)", SCAN_BURST_DURATION_MS);
+                LOG_INF("Starting scan burst (%d ms) - took %u ms to start", SCAN_BURST_DURATION_MS, scan_duration);
                 k_timer_start(&state_timer, K_MSEC(SCAN_BURST_DURATION_MS), K_NO_WAIT);
             }
             else
             {
                 ble_state = BLE_STATE_IDLE;
-                LOG_ERR("Scan failed, retrying in 1 second");
+                LOG_ERR("Scan failed: %d (took %u ms), retrying in 1 second", err, scan_duration);
                 k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
             }
             return;
@@ -1851,16 +1896,18 @@ static void state_work_handler(struct k_work *work)
         if (adv_due && ble_state == BLE_STATE_IDLE)
         {
             ble_state = BLE_STATE_ADVERTISING;
+            uint32_t adv_start = k_uptime_get_32();
             int err = juxta_start_advertising();
+            uint32_t adv_duration = k_uptime_get_32() - adv_start;
             if (err == 0)
             {
-                LOG_INF("Starting advertising burst (%d ms)", ADV_BURST_DURATION_MS);
+                LOG_INF("Starting advertising burst (%d ms) - took %u ms to start", ADV_BURST_DURATION_MS, adv_duration);
                 k_timer_start(&state_timer, K_MSEC(ADV_BURST_DURATION_MS), K_NO_WAIT);
             }
             else
             {
                 ble_state = BLE_STATE_IDLE;
-                LOG_ERR("Advertising failed, retrying in 1 second");
+                LOG_ERR("Advertising failed: %d (took %u ms), retrying in 1 second", err, adv_duration);
                 k_timer_start(&state_timer, K_SECONDS(1), K_NO_WAIT);
             }
             return;
@@ -1901,6 +1948,49 @@ static void state_work_handler(struct k_work *work)
         uint32_t uptime = k_uptime_get_32();
         LOG_DBG("Timestamp: %u, Uptime(ms): %u", ts, uptime);
     }
+
+    LOG_INF("🔄 state_work_handler: EXIT");
+}
+
+// Work queue health monitoring
+static void health_check_work_handler(struct k_work *work)
+{
+    uint32_t current_time = k_uptime_get_32();
+    uint32_t time_since_state_work = current_time - last_state_work_time;
+    uint32_t time_since_adc_work = current_time - last_adc_work_time;
+
+    LOG_INF("🏥 health_check: state_work_count=%u, adc_work_count=%u, stuck_detections=%u",
+            state_work_count, adc_work_count, stuck_work_detections);
+    LOG_INF("🏥 health_check: time_since_state_work=%u ms, time_since_adc_work=%u ms",
+            time_since_state_work, time_since_adc_work);
+
+    // Check for stuck work handlers (no execution in last 2 minutes)
+    bool state_work_stuck = (time_since_state_work > 120000) && (state_work_count > 0);
+    bool adc_work_stuck = (time_since_adc_work > 120000) && (adc_work_count > 0);
+
+    if (state_work_stuck || adc_work_stuck)
+    {
+        stuck_work_detections++;
+        LOG_ERR("🚨 STUCK WORK DETECTED: state_stuck=%s, adc_stuck=%s, detection_count=%u",
+                state_work_stuck ? "true" : "false",
+                adc_work_stuck ? "true" : "false",
+                stuck_work_detections);
+
+        // Log work queue statistics
+        LOG_ERR("🚨 Work queue may be blocked - manual intervention may be required");
+    }
+    else
+    {
+        LOG_INF("✅ Work queue health check passed");
+    }
+}
+
+// Health check timer callback
+static void health_check_timer_callback(struct k_timer *timer)
+{
+    LOG_INF("⏰ health_check_timer_callback: ENTRY - submitting health_check_work");
+    int ret = k_work_submit(&health_check_work);
+    LOG_INF("⏰ health_check_timer_callback: EXIT - work submission result: %d", ret);
 }
 
 static int juxta_start_advertising(void)
@@ -3012,6 +3102,13 @@ int main(void)
     init_randomization();
     k_work_init(&state_work, state_work_handler);
     k_timer_init(&state_timer, state_timer_callback, NULL);
+
+    // Initialize work queue health monitoring
+    k_work_init(&health_check_work, health_check_work_handler);
+    k_timer_init(&health_check_timer, health_check_timer_callback, NULL);
+    k_timer_start(&health_check_timer, K_SECONDS(30), K_SECONDS(30)); // Check every 30 seconds
+    LOG_INF("🏥 Work queue health monitoring initialized (30s intervals)");
+
     state_system_ready = true;
 
     /* Quick vitals sanity read in thread context */
