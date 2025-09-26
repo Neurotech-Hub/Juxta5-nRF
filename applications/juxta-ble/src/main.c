@@ -1439,13 +1439,32 @@ static void adc_process_peri_event_data(const int16_t *raw_samples, uint32_t sam
 /* Battery check helper for FRAM operations */
 static bool should_allow_fram_write(void)
 {
+    uint16_t battery_mv = juxta_vitals_get_battery_mv(&vitals_ctx);
+
+    // Validate battery reading (should be 2000-4200 mV for Li-ion)
+    if (battery_mv < 1000 || battery_mv > 5000)
+    {
+        LOG_ERR("🚨 Invalid battery reading: %d mV - allowing FRAM write", battery_mv);
+        return true; // Allow operations if battery reading is invalid
+    }
+
     if (juxta_vitals_is_low_battery(&vitals_ctx))
     {
-        LOG_WRN("⚠️ Battery critically low (%d mV) - preventing FRAM write",
-                juxta_vitals_get_battery_mv(&vitals_ctx));
+        LOG_WRN("⚠️ Battery critically low (%d mV) - preventing FRAM write", battery_mv);
         return false;
     }
     return true;
+}
+
+/* Battery system health monitoring */
+static void check_battery_system_health(void)
+{
+    uint16_t battery_mv = juxta_vitals_get_battery_mv(&vitals_ctx);
+    if (battery_mv < 1000 || battery_mv > 5000)
+    {
+        LOG_ERR("🚨 Battery system failure detected: %d mV", battery_mv);
+        juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_ERROR);
+    }
 }
 
 // Phase D1: New ring buffer-based ADC work handler
@@ -1458,9 +1477,10 @@ static void adc_work_handler(struct k_work *work)
     LOG_INF("📊 adc_work_handler: ENTRY - verified=%d, framfs=%d, ble=%d, dma_active=%d, ring_count=%u, count=%u",
             hardware_verified, framfs_ctx.initialized, ble_connected, adc_dma_active, adc_ring_count, adc_work_count);
 
-    if (!hardware_verified || !framfs_ctx.initialized || ble_connected)
+    if (!framfs_ctx.initialized || ble_connected)
     {
-        LOG_DBG("ADC work handler: deferred (preconditions not met)");
+        LOG_DBG("ADC work handler: deferred (preconditions not met: framfs=%d, ble=%d)",
+                framfs_ctx.initialized, ble_connected);
         return;
     }
 
@@ -1520,18 +1540,17 @@ static void perform_graceful_reset(void);
 /* Definition: simple record logger (BOOT/CONNECTED/NO_ACTIVITY/ERROR) */
 static void juxta_log_simple(uint8_t type)
 {
-    if (!hardware_verified || !framfs_ctx.initialized || ble_connected)
+    if (!framfs_ctx.initialized || ble_connected)
     {
         return;
     }
 
-    if (!should_allow_fram_write())
+    // Always allow error logging, even with low battery
+    if (type == JUXTA_FRAMFS_RECORD_TYPE_ERROR || should_allow_fram_write())
     {
-        return;
+        uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
+        (void)juxta_framfs_append_simple_record_data(&time_ctx, minute, type);
     }
-
-    uint16_t minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
-    (void)juxta_framfs_append_simple_record_data(&time_ctx, minute, type);
 }
 
 /* Wrapper to provide YYMMDD date for framfs time API using vitals */
@@ -1691,7 +1710,7 @@ static void state_work_handler(struct k_work *work)
     if (current_minute != last_logged_minute)
     {
         /* Consolidated minute logging to FRAMFS (devices + motion + battery + temperature) */
-        if (hardware_verified && framfs_ctx.initialized && !ble_connected)
+        if (framfs_ctx.initialized && !ble_connected)
         {
             /* Check battery before FRAM operations */
             if (!should_allow_fram_write())
@@ -1706,6 +1725,8 @@ static void state_work_handler(struct k_work *work)
             if (juxta_vitals_get_validated_battery_level(&vitals_ctx, &battery_level) != 0)
             {
                 battery_level = 0; // Default if read fails
+                LOG_ERR("🚨 Battery level read failed during minute logging");
+                juxta_log_simple(JUXTA_FRAMFS_RECORD_TYPE_ERROR);
             }
 
             /* Get temperature from LIS2DH */
@@ -1983,6 +2004,9 @@ static void health_check_work_handler(struct k_work *work)
     {
         LOG_INF("✅ Work queue health check passed");
     }
+
+    // Check battery system health
+    check_battery_system_health();
 }
 
 // Health check timer callback
@@ -2055,9 +2079,9 @@ static int juxta_start_scanning(void)
     // };
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_PASSIVE,
-        .options = 0,
+        .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
         .interval = 0x0060, // 60 units = 37.5 ms
-        .window = 0x0060,   // match interval for continuous scan during burst
+        .window = 0x0010,   // reduced window to 6.25 ms
         .timeout = 0,       // controlled externally with SCAN_BURST_DURATION_MS
     };
 
@@ -2210,11 +2234,40 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void restore_system_state_after_disconnect(void)
 {
     LOG_INF("🔄 Restoring system state after BLE disconnect");
+    LOG_INF("🔍 System state: hardware_verified=%d, framfs_initialized=%d, state_system_ready=%d",
+            hardware_verified, framfs_ctx.initialized, state_system_ready);
 
-    /* Check if state system is ready */
-    if (!state_system_ready)
+    /* Check system readiness based on operating mode */
+    bool system_ready = false;
+    if (current_mode == OPERATING_MODE_NORMAL)
     {
-        LOG_WRN("⚠️ State system not ready - skipping state restoration");
+        system_ready = state_system_ready;
+        if (!system_ready)
+        {
+            LOG_WRN("⚠️ State system not ready for NORMAL mode - skipping state restoration");
+            return;
+        }
+    }
+    else if (current_mode == OPERATING_MODE_ADC_ONLY)
+    {
+        // For ADC mode, we can use framfs_initialized as a proxy for hardware verification
+        // since FRAM initialization includes hardware verification
+        system_ready = framfs_ctx.initialized;
+        if (!system_ready)
+        {
+            LOG_WRN("⚠️ ADC system not ready (framfs_initialized=%d) - skipping state restoration",
+                    framfs_ctx.initialized);
+            return;
+        }
+        else
+        {
+            LOG_INF("✅ ADC system ready (framfs_initialized=%d, hardware_verified=%d)",
+                    framfs_ctx.initialized, hardware_verified);
+        }
+    }
+    else
+    {
+        LOG_WRN("⚠️ Unknown operating mode %d - skipping state restoration", current_mode);
         return;
     }
 
@@ -2223,7 +2276,7 @@ static void restore_system_state_after_disconnect(void)
                                                                                    : (current_mode == OPERATING_MODE_ADC_ONLY) ? "ADC_ONLY"
                                                                                                                                : "UNKNOWN";
 
-    LOG_INF("🔧 Current operating mode: %d (%s)", current_mode, mode_name);
+    LOG_INF("🔧 Current operating mode: %d (%s), system_ready=%s", current_mode, mode_name, system_ready ? "true" : "false");
 
     /* Restore state based on operating mode */
     switch (current_mode)
@@ -2248,8 +2301,27 @@ static void restore_system_state_after_disconnect(void)
         LOG_INF("📊 Restoring ADC_ONLY operation mode");
 
         /* Resume ADC operations */
-        LOG_INF("📊 ADC operations resumed");
-        k_work_submit(&adc_work);
+        LOG_INF("📊 ADC operations resumed - submitting adc_work");
+        int adc_work_result = k_work_submit(&adc_work);
+        LOG_INF("📊 ADC work submission result: %d", adc_work_result);
+
+        /* Start ADC timer for periodic operation */
+        uint32_t interval_seconds = 5; // Default interval
+        struct juxta_framfs_adc_config adc_config;
+        if (juxta_framfs_get_adc_config(&framfs_ctx, &adc_config) == 0)
+        {
+            if (adc_config.mode == JUXTA_FRAMFS_ADC_MODE_TIMER_BURST && adc_config.debounce_ms > 0)
+            {
+                interval_seconds = (adc_config.debounce_ms + 999) / 1000; // Convert ms to seconds, round up
+                if (interval_seconds < 1)
+                {
+                    interval_seconds = 1; /* Minimum 1 second */
+                }
+            }
+        }
+
+        k_timer_start(&adc_k_timer, K_SECONDS(interval_seconds), K_SECONDS(interval_seconds));
+        LOG_INF("📊 ADC timer restarted with %u second intervals", interval_seconds);
 
         break;
 

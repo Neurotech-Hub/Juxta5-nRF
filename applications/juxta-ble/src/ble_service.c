@@ -103,10 +103,18 @@ static bool should_allow_fram_write(void)
         return true;
     }
 
+    uint16_t battery_mv = juxta_vitals_get_battery_mv(vitals_ctx);
+
+    // Validate battery reading (should be 2000-4200 mV for Li-ion)
+    if (battery_mv < 1000 || battery_mv > 5000)
+    {
+        LOG_ERR("🚨 Invalid battery reading: %d mV - allowing FRAM write", battery_mv);
+        return true; // Allow operations if battery reading is invalid
+    }
+
     if (juxta_vitals_is_low_battery(vitals_ctx))
     {
-        LOG_WRN("⚠️ Battery critically low (%d mV) - preventing FRAM write",
-                juxta_vitals_get_battery_mv(vitals_ctx));
+        LOG_WRN("⚠️ Battery critically low (%d mV) - preventing FRAM write", battery_mv);
         return false;
     }
     return true;
