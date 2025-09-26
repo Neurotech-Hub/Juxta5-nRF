@@ -2967,6 +2967,46 @@ int main(void)
     /* Clear reset reason register */
     NRF_POWER->RESETREAS = reset_reason;
 
+    /* Configure Power-fail Comparator (POF) to prevent 2.1V brownout resets */
+    /*
+     * POF Analysis and Findings:
+     * - POF was DISABLED by default (threshold=0, enabled=0)
+     * - This explains why 2.1V voltage dips weren't causing brownout resets
+     * - Original stability issues were likely due to battery monitoring system failures, not POF
+     * - POF is somewhat redundant with our ADC-based voltage monitoring system
+     * - ADC monitoring is more flexible (configurable thresholds) vs POF (fixed at 1.7V)
+     * - Keeping POF as hardware-level safety net for now, but ADC monitoring is primary
+     * - POF provides low-level protection if ADC system fails
+     */
+    /* Read current POF configuration to verify default values */
+    uint32_t pofcon_before = NRF_POWER->POFCON;
+    uint8_t threshold_before = (pofcon_before & POWER_POFCON_THRESHOLD_Msk) >> POWER_POFCON_THRESHOLD_Pos;
+    uint8_t pof_enabled_before = (pofcon_before & POWER_POFCON_POF_Msk) >> POWER_POFCON_POF_Pos;
+
+    LOG_INF("🔋 POF before: POFCON=0x%08X, threshold=%d (%d.%dV), enabled=%d",
+            pofcon_before, threshold_before, 1 + (threshold_before - 4) / 10, (threshold_before - 4) % 10, pof_enabled_before);
+
+    /* Set POF threshold to 1.7V (lowest possible) to prevent resets during voltage dips */
+    NRF_POWER->POFCON = (POWER_POFCON_POF_Enabled << POWER_POFCON_POF_Pos) |
+                        (POWER_POFCON_THRESHOLD_V17 << POWER_POFCON_THRESHOLD_Pos);
+
+    /* Verify the change was applied */
+    uint32_t pofcon_after = NRF_POWER->POFCON;
+    uint8_t threshold_after = (pofcon_after & POWER_POFCON_THRESHOLD_Msk) >> POWER_POFCON_THRESHOLD_Pos;
+    uint8_t pof_enabled_after = (pofcon_after & POWER_POFCON_POF_Msk) >> POWER_POFCON_POF_Pos;
+
+    LOG_INF("🔋 POF after:  POFCON=0x%08X, threshold=%d (%d.%dV), enabled=%d",
+            pofcon_after, threshold_after, 1 + (threshold_after - 4) / 10, (threshold_after - 4) % 10, pof_enabled_after);
+
+    if (threshold_after == POWER_POFCON_THRESHOLD_V17 && pof_enabled_after == POWER_POFCON_POF_Enabled)
+    {
+        LOG_INF("✅ POF successfully configured to 1.7V threshold");
+    }
+    else
+    {
+        LOG_ERR("❌ POF configuration failed - threshold=%d, enabled=%d", threshold_after, pof_enabled_after);
+    }
+
     // Configure LED early for FRAM error indication
     if (!device_is_ready(led.port))
     {
