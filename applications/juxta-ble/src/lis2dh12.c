@@ -353,8 +353,8 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
 
     /* Configure motion detection using high-pass filter - following ST AN5005 section 6.3.3 */
 
-    /* Step 1: Write 57h into CTRL_REG1 - Turn on sensor, enable X, Y, Z, ODR = 100 Hz */
-    uint8_t ctrl_reg1 = 0x57; // 0b01010111: ODR=100Hz, XYZ enabled
+    /* Step 1: Write 5Fh into CTRL_REG1 - Turn on sensor, enable X, Y, Z, ODR = 100 Hz, LPen = 1 (preserve temperature) */
+    uint8_t ctrl_reg1 = 0x5F; // 0b01011111: ODR=100Hz, XYZ enabled, LPen=1 (preserve temperature sensor)
     ret = lis2dh12_platform_write(NULL, 0x20, &ctrl_reg1, 1);
     if (ret < 0)
     {
@@ -380,8 +380,8 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         return ret;
     }
 
-    /* Step 4: Write 00h into CTRL_REG4 - FS = ±2 g */
-    uint8_t ctrl_reg4 = 0x00; // 0b00000000: ±2g scale
+    /* Step 4: Write 80h into CTRL_REG4 - FS = ±2 g, BDU = 1 (preserve temperature) */
+    uint8_t ctrl_reg4 = 0x80; // 0b10000000: ±2g scale, BDU=1 (preserve temperature sensor)
     ret = lis2dh12_platform_write(NULL, 0x23, &ctrl_reg4, 1);
     if (ret < 0)
     {
@@ -432,7 +432,7 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         return ret;
     }
 
-    LOG_INF("LIS2DH: High-pass filtered motion detection configured: threshold=%d mg, duration=%d samples",
+    LOG_INF("LIS2DH: High-pass filtered motion detection configured: threshold=%d mg, duration=%d samples (temperature preserved)",
             threshold, duration);
 
     /* Clear any pending interrupts by reading INT1_SRC register */

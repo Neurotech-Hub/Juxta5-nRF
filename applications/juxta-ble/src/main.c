@@ -432,9 +432,49 @@ static void adc_stop_threshold_thread(void);
 #define OPERATING_MODE_ADC_ONLY 0x01  /* Purely ADC recordings */
 
 #define ADV_BURST_DURATION_MS 2000
-#define SCAN_BURST_DURATION_MS 300
+#define SCAN_BURST_DURATION_MS 500
 #define ADV_INTERVAL_SECONDS 5
 #define SCAN_INTERVAL_SECONDS 20
+
+/* Minute write safe zone configuration */
+#define MINUTE_WRITE_SAFE_ZONE_MS 3000 /* 3 seconds before/after minute boundary */
+#define MINUTE_WRITE_DURATION_MS 1000  /* 1 second for FRAM operations */
+#define MINUTE_WRITE_BUFFER_MS 1000    /* 1 second additional buffer */
+
+/* Minute write safe zone helper functions */
+static bool is_in_minute_write_safe_zone(uint32_t current_time)
+{
+    uint32_t seconds_in_minute = current_time % 60;
+    uint32_t safe_zone_start = 60 - (MINUTE_WRITE_SAFE_ZONE_MS / 1000);
+    uint32_t safe_zone_end = MINUTE_WRITE_SAFE_ZONE_MS / 1000;
+
+    return (seconds_in_minute >= safe_zone_start) || (seconds_in_minute <= safe_zone_end);
+}
+
+static bool is_approaching_minute_boundary(uint32_t current_time, uint32_t time_until_next_action)
+{
+    uint32_t seconds_in_minute = current_time % 60;
+    uint32_t time_to_boundary = 60 - seconds_in_minute;
+
+    // If next action would occur within the safe zone, defer it
+    return time_until_next_action >= time_to_boundary - (MINUTE_WRITE_SAFE_ZONE_MS / 1000);
+}
+
+static uint32_t calculate_time_to_exit_safe_zone(uint32_t current_time)
+{
+    uint32_t seconds_in_minute = current_time % 60;
+
+    if (seconds_in_minute >= (60 - (MINUTE_WRITE_SAFE_ZONE_MS / 1000)))
+    {
+        // We're in the end-of-minute safe zone
+        return (60 - seconds_in_minute) + (MINUTE_WRITE_SAFE_ZONE_MS / 1000);
+    }
+    else
+    {
+        // We're in the beginning-of-minute safe zone
+        return (MINUTE_WRITE_SAFE_ZONE_MS / 1000) - seconds_in_minute;
+    }
+}
 
 /* Global session-based variables (not persisted in FRAM) */
 static uint8_t current_mode = OPERATING_MODE_UNDEFINED; /* Must be set via BLE */
@@ -555,6 +595,17 @@ static uint32_t get_adv_interval(void)
         LOG_DBG("📡 No motion detected, using extended adv_interval: %d", adv_interval);
     }
 
+    /* Apply minute safety adjustment */
+    uint32_t current_time = get_rtc_timestamp();
+    if (is_approaching_minute_boundary(current_time, adv_interval))
+    {
+        uint32_t seconds_in_minute = current_time % 60;
+        uint32_t time_to_boundary = 60 - seconds_in_minute;
+        uint32_t safe_interval = time_to_boundary + (MINUTE_WRITE_SAFE_ZONE_MS / 1000);
+        adv_interval = MAX(adv_interval, safe_interval);
+        LOG_INF("⏰ Adjusted adv_interval to %u for minute safety", adv_interval);
+    }
+
     return adv_interval;
 }
 
@@ -567,6 +618,17 @@ static uint32_t get_scan_interval(void)
     {
         scan_interval *= 2; /* Double the interval when no motion detected */
         LOG_DBG("🔍 No motion detected, using extended scan_interval: %d", scan_interval);
+    }
+
+    /* Apply minute safety adjustment */
+    uint32_t current_time = get_rtc_timestamp();
+    if (is_approaching_minute_boundary(current_time, scan_interval))
+    {
+        uint32_t seconds_in_minute = current_time % 60;
+        uint32_t time_to_boundary = 60 - seconds_in_minute;
+        uint32_t safe_interval = time_to_boundary + (MINUTE_WRITE_SAFE_ZONE_MS / 1000);
+        scan_interval = MAX(scan_interval, safe_interval);
+        LOG_INF("⏰ Adjusted scan_interval to %u for minute safety", scan_interval);
     }
 
     return scan_interval;
@@ -1691,16 +1753,19 @@ static void state_work_handler(struct k_work *work)
     last_state_work_time = work_start_time;
     state_work_count++;
 
-    LOG_INF("🔄 state_work_handler: ENTRY - state_system_ready=%s, count=%u",
-            state_system_ready ? "true" : "false", state_work_count);
+    uint32_t current_time = get_rtc_timestamp();
+    uint32_t seconds_in_minute = current_time % 60;
+    bool in_safe_zone = is_in_minute_write_safe_zone(current_time);
+
+    LOG_INF("🔄 state_work_handler: ENTRY - state_system_ready=%s, count=%u, time=%u, sec_in_min=%u, safe_zone=%s",
+            state_system_ready ? "true" : "false", state_work_count, current_time, seconds_in_minute,
+            in_safe_zone ? "true" : "false");
 
     if (!state_system_ready)
     {
         LOG_WRN("⚠️ state_work_handler: State system not ready, exiting");
         return;
     }
-
-    uint32_t current_time = get_rtc_timestamp();
 
     // Process all scan events from the queue
     process_scan_events();
@@ -1709,6 +1774,15 @@ static void state_work_handler(struct k_work *work)
     uint16_t current_minute = juxta_vitals_get_minute_of_day(&vitals_ctx);
     if (current_minute != last_logged_minute)
     {
+        LOG_INF("📊 Minute boundary detected: %u -> %u (time=%u, sec_in_min=%u)",
+                last_logged_minute, current_minute, current_time, seconds_in_minute);
+
+        // Ensure we're in a safe zone for FRAM operations
+        if (is_in_minute_write_safe_zone(current_time))
+        {
+            LOG_WRN("⚠️ Attempting FRAM operation in safe zone - this should not happen");
+        }
+
         /* Consolidated minute logging to FRAMFS (devices + motion + battery + temperature) */
         if (framfs_ctx.initialized && !ble_connected)
         {
@@ -1718,6 +1792,9 @@ static void state_work_handler(struct k_work *work)
                 LOG_INF("📊 Skipping FRAMFS minute logging due to low battery");
                 return;
             }
+
+            // Add a small delay to ensure we're past any BLE operations
+            k_sleep(K_MSEC(100));
 
             /* Get battery level */
             uint8_t battery_level = 0;
@@ -1757,12 +1834,12 @@ static void state_work_handler(struct k_work *work)
                 uint32_t framfs_duration = k_uptime_get_32() - framfs_start;
                 if (ret == 0)
                 {
-                    LOG_INF("📊 FRAMFS minute record: devices=%d, motion=%d, battery=%d%%, temp=%d°C (took %u ms)",
-                            device_count, lis2dh12_get_motion_count(), battery_level, temperature, framfs_duration);
+                    LOG_INF("📊 FRAM minute record completed in %u ms: devices=%d, motion=%d, battery=%d%%, temp=%d°C",
+                            framfs_duration, device_count, lis2dh12_get_motion_count(), battery_level, temperature);
                 }
                 else
                 {
-                    LOG_ERR("📊 FRAMFS minute record failed: %d (took %u ms)", ret, framfs_duration);
+                    LOG_ERR("📊 FRAM minute record failed: %d (took %u ms)", ret, framfs_duration);
                 }
             }
             else
@@ -1775,12 +1852,12 @@ static void state_work_handler(struct k_work *work)
                 uint32_t framfs_duration = k_uptime_get_32() - framfs_start;
                 if (ret == 0)
                 {
-                    LOG_INF("📊 FRAMFS minute record: no activity, battery=%d%%, temp=%d°C (took %u ms)",
-                            battery_level, temperature, framfs_duration);
+                    LOG_INF("📊 FRAM minute record completed in %u ms: no activity, battery=%d%%, temp=%d°C",
+                            framfs_duration, battery_level, temperature);
                 }
                 else
                 {
-                    LOG_ERR("📊 FRAMFS minute record failed: %d (took %u ms)", ret, framfs_duration);
+                    LOG_ERR("📊 FRAM minute record failed: %d (took %u ms)", ret, framfs_duration);
                 }
             }
         }
@@ -1949,20 +2026,47 @@ static void state_work_handler(struct k_work *work)
 
             time_until_adv = (time_since_adv >= get_adv_interval()) ? 0 : (get_adv_interval() - time_since_adv);
             time_until_scan = (time_since_scan >= get_scan_interval()) ? 0 : (get_scan_interval() - time_since_scan);
+
+            LOG_DBG("⏰ BLE timing: adv_interval=%u, scan_interval=%u, time_until_adv=%u, time_until_scan=%u",
+                    get_adv_interval(), get_scan_interval(), time_until_adv, time_until_scan);
+        }
+
+        // Check if we're in or approaching a minute write safe zone
+        if (is_in_minute_write_safe_zone(current_time))
+        {
+            LOG_INF("⏰ In minute write safe zone - deferring BLE operations");
+            uint32_t time_to_exit_safe_zone = calculate_time_to_exit_safe_zone(current_time);
+            k_timer_start(&state_timer, K_SECONDS(time_to_exit_safe_zone), K_NO_WAIT);
+            LOG_INF("⏰ Deferring BLE operations for %u seconds", time_to_exit_safe_zone);
+            return;
         }
 
         uint32_t next_delay_ms = MIN(time_until_adv, time_until_scan) * 1000;
-        /* Add minimum delay to prevent rapid start/stop cycles */
-        next_delay_ms = MAX(next_delay_ms, 100);
 
-        /* Add small random offset (0-1000ms) to prevent device synchronization */
-        uint32_t random_offset = sys_rand32_get() % 1000;
-        next_delay_ms += random_offset;
+        // Check if next action would conflict with minute write window
+        if (is_approaching_minute_boundary(current_time, next_delay_ms / 1000))
+        {
+            LOG_INF("⏰ Next BLE action would conflict with minute write window - deferring");
+            // Calculate time to safely start BLE operations after minute boundary
+            uint32_t seconds_in_minute = current_time % 60;
+            uint32_t time_to_safe_zone = 60 - seconds_in_minute + (MINUTE_WRITE_SAFE_ZONE_MS / 1000);
+            next_delay_ms = time_to_safe_zone * 1000;
+            LOG_INF("⏰ Deferring BLE operations for %u seconds to avoid minute write conflict", time_to_safe_zone);
+        }
+        else
+        {
+            /* Add minimum delay to prevent rapid start/stop cycles */
+            next_delay_ms = MAX(next_delay_ms, 100);
 
-        LOG_INF("🎲 Random delay applied: +%u ms (total delay: %u ms) to prevent device sync",
-                random_offset, next_delay_ms);
-        LOG_DBG("Sleeping for %u ms until next action (including %u ms random offset)",
-                next_delay_ms, random_offset);
+            /* Add small random offset (0-1000ms) to prevent device synchronization */
+            uint32_t random_offset = sys_rand32_get() % 1000;
+            next_delay_ms += random_offset;
+
+            LOG_INF("🎲 Random delay applied: +%u ms (total delay: %u ms) to prevent device sync",
+                    random_offset, next_delay_ms);
+        }
+
+        LOG_DBG("Sleeping for %u ms until next action", next_delay_ms);
         k_timer_start(&state_timer, K_MSEC(next_delay_ms), K_NO_WAIT);
 
         uint32_t ts = juxta_vitals_get_timestamp(&vitals_ctx);
