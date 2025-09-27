@@ -210,13 +210,13 @@ int lis2dh12_init(struct lis2dh12_dev *dev)
         return ret;
     }
 
-    /* Enable temperature sensor */
-    /* TEMP_CFG_REG (0x1F): Set TEMP_EN[1:0] bits to enable temperature sensor */
-    uint8_t temp_cfg = 0xC0;                                 // 0b11000000: TEMP_EN[1:0] = 11 (enable temp sensor)
+    /* Temperature sensor will be enabled on-demand during minute logging */
+    /* TEMP_CFG_REG (0x1F): Keep TEMP_EN[1:0] = 00 (disabled) for power efficiency */
+    uint8_t temp_cfg = 0x00;                                 // 0b00000000: TEMP_EN[1:0] = 00 (disabled)
     ret = lis2dh12_platform_write(NULL, 0x1F, &temp_cfg, 1); // TEMP_CFG_REG
     if (ret < 0)
     {
-        LOG_ERR("Failed to enable temperature sensor: %d", ret);
+        LOG_ERR("Failed to configure temperature sensor: %d", ret);
         return ret;
     }
 
@@ -314,7 +314,11 @@ int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperatu
  * @brief Get temperature reading from global LIS2DH device
  * Public interface for motion system temperature access
  */
-int lis2dh12_get_temperature(int8_t *temperature)
+/**
+ * @brief Enable temperature sensor for reading
+ * This function enables the temperature sensor, waits for stabilization, then reads the temperature
+ */
+int lis2dh12_enable_and_read_temperature(int8_t *temperature)
 {
     if (!temperature)
     {
@@ -328,17 +332,43 @@ int lis2dh12_get_temperature(int8_t *temperature)
         return -ENODEV;
     }
 
+    /* Enable temperature sensor */
+    uint8_t temp_cfg = 0xC0;                                     // 0b11000000: TEMP_EN[1:0] = 11 (enable temp sensor)
+    int ret = lis2dh12_platform_write(NULL, 0x1F, &temp_cfg, 1); // TEMP_CFG_REG
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to enable temperature sensor: %d", ret);
+        *temperature = 0;
+        return ret;
+    }
+
+    /* Wait for temperature sensor to stabilize (50ms) */
+    k_sleep(K_MSEC(50));
+
     /* Read temperature using the low-resolution function */
-    int ret = lis2dh12_read_temperature_lowres(g_lis2dh12_dev, temperature);
+    ret = lis2dh12_read_temperature_lowres(g_lis2dh12_dev, temperature);
     if (ret < 0)
     {
         LOG_WRN("Failed to read LIS2DH temperature: %d", ret);
         *temperature = 0; /* Default to 0 if read fails */
-        return ret;
     }
 
-    LOG_DBG("LIS2DH temperature: %d°C", *temperature);
+    /* Disable temperature sensor to save power */
+    temp_cfg = 0x00;                                         // 0b00000000: TEMP_EN[1:0] = 00 (disabled)
+    ret = lis2dh12_platform_write(NULL, 0x1F, &temp_cfg, 1); // TEMP_CFG_REG
+    if (ret < 0)
+    {
+        LOG_WRN("Failed to disable temperature sensor: %d", ret);
+    }
+
+    LOG_DBG("LIS2DH temperature: %d°C (sensor enabled on-demand)", *temperature);
     return 0;
+}
+
+int lis2dh12_get_temperature(int8_t *temperature)
+{
+    /* Use the new on-demand temperature reading function */
+    return lis2dh12_enable_and_read_temperature(temperature);
 }
 
 int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
@@ -353,8 +383,8 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
 
     /* Configure motion detection using high-pass filter - following ST AN5005 section 6.3.3 */
 
-    /* Step 1: Write 5Fh into CTRL_REG1 - Turn on sensor, enable X, Y, Z, ODR = 100 Hz, LPen = 1 (preserve temperature) */
-    uint8_t ctrl_reg1 = 0x5F; // 0b01011111: ODR=100Hz, XYZ enabled, LPen=1 (preserve temperature sensor)
+    /* Step 1: Write 57h into CTRL_REG1 - Turn on sensor, enable X, Y, Z, ODR = 100 Hz, LPen = 0 (motion detection mode) */
+    uint8_t ctrl_reg1 = 0x57; // 0b01010111: ODR=100Hz, XYZ enabled, LPen=0 (motion detection mode)
     ret = lis2dh12_platform_write(NULL, 0x20, &ctrl_reg1, 1);
     if (ret < 0)
     {
@@ -380,8 +410,8 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         return ret;
     }
 
-    /* Step 4: Write 80h into CTRL_REG4 - FS = ±2 g, BDU = 1 (preserve temperature) */
-    uint8_t ctrl_reg4 = 0x80; // 0b10000000: ±2g scale, BDU=1 (preserve temperature sensor)
+    /* Step 4: Write 00h into CTRL_REG4 - FS = ±2 g, BDU = 0 (motion detection mode) */
+    uint8_t ctrl_reg4 = 0x00; // 0b00000000: ±2g scale, BDU=0 (motion detection mode)
     ret = lis2dh12_platform_write(NULL, 0x23, &ctrl_reg4, 1);
     if (ret < 0)
     {
@@ -432,7 +462,7 @@ int lis2dh12_configure_motion_detection(struct lis2dh12_dev *dev,
         return ret;
     }
 
-    LOG_INF("LIS2DH: High-pass filtered motion detection configured: threshold=%d mg, duration=%d samples (temperature preserved)",
+    LOG_INF("LIS2DH: High-pass filtered motion detection configured: threshold=%d mg, duration=%d samples (temperature on-demand)",
             threshold, duration);
 
     /* Clear any pending interrupts by reading INT1_SRC register */

@@ -430,6 +430,7 @@ static void adc_stop_threshold_thread(void);
 #define OPERATING_MODE_UNDEFINED 0xFF /* Must be set via BLE */
 #define OPERATING_MODE_NORMAL 0x00    /* State machine/BLE bursts/motion counting */
 #define OPERATING_MODE_ADC_ONLY 0x01  /* Purely ADC recordings */
+#define OPERATING_MODE_DFU 0x02       /* DFU mode for firmware updates */
 
 #define ADV_BURST_DURATION_MS 2000
 #define SCAN_BURST_DURATION_MS 500
@@ -1777,10 +1778,19 @@ static void state_work_handler(struct k_work *work)
         LOG_INF("📊 Minute boundary detected: %u -> %u (time=%u, sec_in_min=%u)",
                 last_logged_minute, current_minute, current_time, seconds_in_minute);
 
-        // Ensure we're in a safe zone for FRAM operations
+        // Ensure we're NOT in a safe zone for FRAM operations
         if (is_in_minute_write_safe_zone(current_time))
         {
-            LOG_WRN("⚠️ Attempting FRAM operation in safe zone - this should not happen");
+            LOG_WRN("⚠️ Minute boundary detected in safe zone - deferring FRAM logging");
+            // Calculate time to exit safe zone and reschedule
+            uint32_t time_to_exit_safe_zone = calculate_time_to_exit_safe_zone(current_time);
+            if (time_to_exit_safe_zone == 0)
+            {
+                time_to_exit_safe_zone = 1; // Minimum 1 second delay
+            }
+            k_timer_start(&state_timer, K_SECONDS(time_to_exit_safe_zone), K_NO_WAIT);
+            LOG_INF("⏰ Deferring minute logging for %u seconds to exit safe zone", time_to_exit_safe_zone);
+            return;
         }
 
         /* Consolidated minute logging to FRAMFS (devices + motion + battery + temperature) */
@@ -2036,6 +2046,13 @@ static void state_work_handler(struct k_work *work)
         {
             LOG_INF("⏰ In minute write safe zone - deferring BLE operations");
             uint32_t time_to_exit_safe_zone = calculate_time_to_exit_safe_zone(current_time);
+
+            // Ensure minimum delay to prevent timer storm
+            if (time_to_exit_safe_zone == 0)
+            {
+                time_to_exit_safe_zone = 1; // Minimum 1 second delay
+            }
+
             k_timer_start(&state_timer, K_SECONDS(time_to_exit_safe_zone), K_NO_WAIT);
             LOG_INF("⏰ Deferring BLE operations for %u seconds", time_to_exit_safe_zone);
             return;
@@ -2050,6 +2067,13 @@ static void state_work_handler(struct k_work *work)
             // Calculate time to safely start BLE operations after minute boundary
             uint32_t seconds_in_minute = current_time % 60;
             uint32_t time_to_safe_zone = 60 - seconds_in_minute + (MINUTE_WRITE_SAFE_ZONE_MS / 1000);
+
+            // Ensure minimum delay to prevent timer storm
+            if (time_to_safe_zone == 0)
+            {
+                time_to_safe_zone = 1; // Minimum 1 second delay
+            }
+
             next_delay_ms = time_to_safe_zone * 1000;
             LOG_INF("⏰ Deferring BLE operations for %u seconds to avoid minute write conflict", time_to_safe_zone);
         }
@@ -2378,6 +2402,7 @@ static void restore_system_state_after_disconnect(void)
     /* Determine current operating mode */
     const char *mode_name = (current_mode == OPERATING_MODE_UNDEFINED) ? "UNDEFINED" : (current_mode == OPERATING_MODE_NORMAL) ? "NORMAL"
                                                                                    : (current_mode == OPERATING_MODE_ADC_ONLY) ? "ADC_ONLY"
+                                                                                   : (current_mode == OPERATING_MODE_DFU)      ? "DFU"
                                                                                                                                : "UNKNOWN";
 
     LOG_INF("🔧 Current operating mode: %d (%s), system_ready=%s", current_mode, mode_name, system_ready ? "true" : "false");
@@ -2464,6 +2489,15 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     LOG_INF("🔌 Disconnected from peer (reason %u)", reason);
     ble_connected = false; // Mark as disconnected
     ble_state = BLE_STATE_IDLE;
+
+    // Check if we're in DFU mode and handle disconnect
+    if (current_mode == OPERATING_MODE_DFU)
+    {
+        LOG_INF("🔄 DFU Mode: Connection lost - will timeout and restart if no reconnection");
+        // Don't call restore_system_state_after_disconnect() in DFU mode
+        // Let the DFU timeout mechanism handle the restart
+        return;
+    }
 
     /* Turn on LED for 1 second to indicate transition to next stage */
     const struct gpio_dt_spec led_spec = GPIO_DT_SPEC_GET(DT_PATH(leds, led_0), gpios);
@@ -2909,6 +2943,9 @@ static void enter_dfu_mode(void)
     LOG_INF("🔄 Entering DFU mode - minimal BLE + SMP only");
     LOG_INF("⚠️ DFU Mode: Hublink service will be disabled for clean MCUmgr operation");
 
+    // Set operating mode to DFU
+    current_mode = OPERATING_MODE_DFU;
+
     // Initialize BLE stack for DFU
     int ret = bt_enable(NULL);
     if (ret)
@@ -2972,13 +3009,37 @@ static void enter_dfu_mode(void)
         LOG_INF("📱 DFU Mode: Ready for firmware upload via Nordic nRF Connect app");
     }
 
-    // DFU mode main loop - just keep the system alive and handle DFU
+    // DFU mode main loop - handle DFU with timeout and disconnect recovery
     uint32_t heartbeat_counter = 0;
+    uint32_t dfu_timeout_counter = 0;
+    const uint32_t DFU_TIMEOUT_MINUTES = 10;                         // Exit DFU after 10 minutes of inactivity
+    const uint32_t DFU_TIMEOUT_HEARTBEATS = DFU_TIMEOUT_MINUTES * 6; // 6 heartbeats per minute (10s intervals)
+
     while (1)
     {
         k_sleep(K_SECONDS(10));
         heartbeat_counter++;
-        LOG_INF("🔄 DFU Mode heartbeat: %u (waiting for firmware update)", heartbeat_counter);
+        dfu_timeout_counter++;
+
+        LOG_INF("🔄 DFU Mode heartbeat: %u (waiting for firmware update, timeout in %u heartbeats)",
+                heartbeat_counter, DFU_TIMEOUT_HEARTBEATS - dfu_timeout_counter);
+
+        // Check for DFU timeout (no connection for extended period)
+        if (dfu_timeout_counter >= DFU_TIMEOUT_HEARTBEATS)
+        {
+            LOG_INF("⏰ DFU Mode timeout reached (%u minutes) - gracefully restarting device", DFU_TIMEOUT_MINUTES);
+            LOG_INF("🔄 Exiting DFU mode and restarting to normal operation");
+
+            // Graceful restart - this will reboot the device
+            sys_reboot(SYS_REBOOT_COLD);
+        }
+
+        // Reset timeout counter if we have an active connection
+        if (ble_connected)
+        {
+            dfu_timeout_counter = 0;
+            LOG_INF("🔄 DFU connection active - resetting timeout counter");
+        }
     }
 }
 
@@ -3384,6 +3445,7 @@ int main(void)
     /* Operating mode is session-based only - must be set via BLE */
     const char *mode_name = (current_mode == OPERATING_MODE_UNDEFINED) ? "UNDEFINED" : (current_mode == OPERATING_MODE_NORMAL) ? "NORMAL"
                                                                                    : (current_mode == OPERATING_MODE_ADC_ONLY) ? "ADC_ONLY"
+                                                                                   : (current_mode == OPERATING_MODE_DFU)      ? "DFU"
                                                                                                                                : "UNKNOWN";
     LOG_INF("🔧 Operating mode: %d (%s)", current_mode, mode_name);
 
