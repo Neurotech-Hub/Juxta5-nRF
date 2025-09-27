@@ -92,7 +92,7 @@
 		/* FRAM is not a JEDEC SPI-NOR flash; expose as a generic SPI device */
 		compatible = "zephyr,spi-device";
 		reg = <0>;
-		spi-max-frequency = <8000000>;
+		spi-max-frequency = <4000000>;
 		label = "FRAM0";
 	};
 
@@ -100,7 +100,7 @@
 	accel0: accel@1 {
 		compatible = "st,lis2dh12-spi";
 		reg = <1>;
-		spi-max-frequency = <8000000>;
+		spi-max-frequency = <4000000>;
 		label = "LIS2DH12";
 	};
 };

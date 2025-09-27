@@ -133,7 +133,7 @@ static int init_fram_and_framfs(struct juxta_fram_device *fram_device, struct ju
         return -ENODEV;
     }
 
-    int ret = juxta_fram_init(fram_device, spi_dev, 8000000, &fram_cs);
+    int ret = juxta_fram_init(fram_device, spi_dev, 4000000, &fram_cs);
     if (ret < 0)
     {
         LOG_ERR("❌ FRAM init failed: %d", ret);
@@ -2034,11 +2034,14 @@ static void state_work_handler(struct k_work *work)
             uint32_t time_since_adv = current_time - last_adv_timestamp;
             uint32_t time_since_scan = current_time - last_scan_timestamp;
 
-            time_until_adv = (time_since_adv >= get_adv_interval()) ? 0 : (get_adv_interval() - time_since_adv);
-            time_until_scan = (time_since_scan >= get_scan_interval()) ? 0 : (get_scan_interval() - time_since_scan);
+            uint32_t adv_interval = get_adv_interval();
+            uint32_t scan_interval = get_scan_interval();
+
+            time_until_adv = (time_since_adv >= adv_interval) ? 0 : (adv_interval - time_since_adv);
+            time_until_scan = (time_since_scan >= scan_interval) ? 0 : (scan_interval - time_since_scan);
 
             LOG_DBG("⏰ BLE timing: adv_interval=%u, scan_interval=%u, time_until_adv=%u, time_until_scan=%u",
-                    get_adv_interval(), get_scan_interval(), time_until_adv, time_until_scan);
+                    adv_interval, scan_interval, time_until_adv, time_until_scan);
         }
 
         // Check if we're in or approaching a minute write safe zone
@@ -2154,9 +2157,9 @@ static int juxta_start_advertising(void)
         .id = BT_ID_DEFAULT,
         .sid = 0,
         .secondary_max_skip = 0,
-        .options = 0, // Non-connectable for energy efficiency (0 = non-connectable by default)
-        .interval_min = BT_GAP_ADV_FAST_INT_MIN_2,
-        .interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
+        .options = 0,         // Non-connectable for energy efficiency (0 = non-connectable by default)
+        .interval_min = 800,  /* 500ms - power efficient for coin cell */
+        .interval_max = 1600, /* 1000ms - gentle on battery */
         .peer = NULL,
     };
 
@@ -2611,8 +2614,8 @@ static int juxta_start_connectable_advertising(void)
         .sid = 0,
         .secondary_max_skip = 0,
         .options = BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
-        .interval_min = BT_GAP_ADV_FAST_INT_MIN_1,
-        .interval_max = BT_GAP_ADV_FAST_INT_MAX_1,
+        .interval_min = 400, /* 250ms - faster for connection but still efficient */
+        .interval_max = 800, /* 500ms - balance discovery and power */
         .peer = NULL,
     };
 
@@ -2981,8 +2984,8 @@ static void enter_dfu_mode(void)
         .sid = 0,
         .secondary_max_skip = 0,
         .options = BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
-        .interval_min = BT_GAP_ADV_FAST_INT_MIN_1,
-        .interval_max = BT_GAP_ADV_FAST_INT_MAX_1,
+        .interval_min = 400, /* 250ms - faster for connection but still efficient */
+        .interval_max = 800, /* 500ms - balance discovery and power */
         .peer = NULL,
     };
 
