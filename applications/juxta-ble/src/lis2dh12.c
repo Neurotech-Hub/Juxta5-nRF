@@ -10,7 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-LOG_MODULE_REGISTER(lis2dh12, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(lis2dh12, LOG_LEVEL_DBG);
 
 /* Global context for platform functions */
 static struct lis2dh12_dev *g_lis2dh12_dev = NULL;
@@ -300,9 +300,11 @@ int lis2dh12_read_temperature_lowres(struct lis2dh12_dev *dev, int8_t *temperatu
 
     /* Combine into 16-bit LSB value */
     int16_t lsb = ((int16_t)temp_h << 8) | temp_l;
+    LOG_DBG("LIS2DH temp raw: L=0x%02X H=0x%02X LSB=%d", temp_l, temp_h, lsb);
 
     /* Convert using low-power mode formula */
     float_t temp_celsius = lis2dh12_from_lsb_lp_to_celsius(lsb);
+    LOG_DBG("LIS2DH temp conversion: LSB=%d -> %d°C", lsb, (int)temp_celsius);
 
     /* Convert to 8-bit signed for compatibility */
     *temperature = (int8_t)temp_celsius;
@@ -342,8 +344,28 @@ int lis2dh12_enable_and_read_temperature(int8_t *temperature)
         return ret;
     }
 
-    /* Wait for temperature sensor to stabilize (50ms) */
-    k_sleep(K_MSEC(50));
+    /* Ensure device is in low power mode for temperature sensor */
+    uint8_t ctrl_reg1 = 0x2F;                                 // 0b00101111: ODR=10Hz, XYZ enabled, LPen=1 (low power mode)
+    ret = lis2dh12_platform_write(NULL, 0x20, &ctrl_reg1, 1); // CTRL_REG1
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set CTRL_REG1 for temperature: %d", ret);
+        *temperature = 0;
+        return ret;
+    }
+
+    /* Set BDU bit in CTRL_REG4 - REQUIRED for temperature sensor operation */
+    uint8_t ctrl_reg4 = 0x80;                                 // 0b10000000: BDU=1 (Block Data Update enabled)
+    ret = lis2dh12_platform_write(NULL, 0x23, &ctrl_reg4, 1); // CTRL_REG4
+    if (ret < 0)
+    {
+        LOG_ERR("Failed to set CTRL_REG4 BDU for temperature: %d", ret);
+        *temperature = 0;
+        return ret;
+    }
+
+    /* Wait for temperature sensor to stabilize (200ms for better results) */
+    k_sleep(K_MSEC(200));
 
     /* Read temperature using the low-resolution function */
     ret = lis2dh12_read_temperature_lowres(g_lis2dh12_dev, temperature);
@@ -359,6 +381,22 @@ int lis2dh12_enable_and_read_temperature(int8_t *temperature)
     if (ret < 0)
     {
         LOG_WRN("Failed to disable temperature sensor: %d", ret);
+    }
+
+    /* Restore device to motion detection mode */
+    uint8_t ctrl_reg1_restore = 0x57;                                 // 0b01010111: ODR=100Hz, XYZ enabled, LPen=0 (motion detection mode)
+    ret = lis2dh12_platform_write(NULL, 0x20, &ctrl_reg1_restore, 1); // CTRL_REG1
+    if (ret < 0)
+    {
+        LOG_WRN("Failed to restore CTRL_REG1 after temperature: %d", ret);
+    }
+
+    /* Restore CTRL_REG4 to motion detection mode (BDU=0) */
+    uint8_t ctrl_reg4_restore = 0x00;                                 // 0b00000000: BDU=0 (motion detection mode)
+    ret = lis2dh12_platform_write(NULL, 0x23, &ctrl_reg4_restore, 1); // CTRL_REG4
+    if (ret < 0)
+    {
+        LOG_WRN("Failed to restore CTRL_REG4 after temperature: %d", ret);
     }
 
     LOG_DBG("LIS2DH temperature: %d°C (sensor enabled on-demand)", *temperature);
