@@ -3357,13 +3357,20 @@ int main(void)
         }
     }
 
-    /* FRAM already initialized - reinitialize framfs for production use */
-    LOG_INF("📁 Reinitializing framfs context for production...");
-    ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
-    if (ret < 0)
+    /* FRAM already initialized - check if framfs needs reinitialization */
+    if (!framfs_ctx.initialized)
     {
-        LOG_ERR("Framfs reinit failed: %d", ret);
-        return ret;
+        LOG_INF("📁 Initializing framfs context for production...");
+        ret = juxta_framfs_init(&framfs_ctx, &fram_dev);
+        if (ret < 0)
+        {
+            LOG_ERR("Framfs init failed: %d", ret);
+            return ret;
+        }
+    }
+    else
+    {
+        LOG_INF("📁 FRAMFS already initialized - preserving existing data");
     }
 
     /* Link framfs context to BLE service */
