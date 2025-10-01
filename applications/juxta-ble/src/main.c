@@ -433,7 +433,7 @@ static void adc_stop_threshold_thread(void);
 #define OPERATING_MODE_DFU 0x02       /* DFU mode for firmware updates */
 
 #define ADV_BURST_DURATION_MS 2000
-#define SCAN_BURST_DURATION_MS 500
+#define SCAN_BURST_DURATION_MS 1500
 #define ADV_INTERVAL_SECONDS 5
 #define SCAN_INTERVAL_SECONDS 20
 
@@ -2157,9 +2157,9 @@ static int juxta_start_advertising(void)
         .id = BT_ID_DEFAULT,
         .sid = 0,
         .secondary_max_skip = 0,
-        .options = 0,         // Non-connectable for energy efficiency (0 = non-connectable by default)
-        .interval_min = 800,  /* 500ms - power efficient for coin cell */
-        .interval_max = 1600, /* 1000ms - gentle on battery */
+        .options = 0,        // Non-connectable for energy efficiency (0 = non-connectable by default)
+        .interval_min = 160, /* 100ms - aggressive for reliable detection */
+        .interval_max = 320, /* 200ms - fast advertising for short windows */
         .peer = NULL,
     };
 
@@ -2211,8 +2211,8 @@ static int juxta_start_scanning(void)
     struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_PASSIVE,
         .options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
-        .interval = 0x0060, // 60 units = 37.5 ms
-        .window = 0x0010,   // reduced window to 6.25 ms
+        .interval = 0x0080, // 80 units = 50 ms
+        .window = 0x0020,   // 20 units = 12.5 ms (25% duty cycle)
         .timeout = 0,       // controlled externally with SCAN_BURST_DURATION_MS
     };
 
@@ -3375,6 +3375,17 @@ int main(void)
 
     /* Link framfs context to BLE service */
     juxta_ble_set_framfs_context(&framfs_ctx);
+
+    /* Reinitialize time-aware context with current date after BLE disconnect */
+    LOG_INF("📁 Reinitializing time-aware file system with current date...");
+    ret = juxta_framfs_init_with_time(&time_ctx, &framfs_ctx, juxta_vitals_get_file_date_wrapper, true);
+    if (ret < 0)
+    {
+        LOG_ERR("Time-aware framfs reinit failed: %d", ret);
+        return ret;
+    }
+    juxta_ble_set_time_aware_framfs_context(&time_ctx);
+    LOG_INF("📁 Time-aware file system reinitialized with current date");
 
     ret = test_rtc_functionality();
     if (ret < 0)
